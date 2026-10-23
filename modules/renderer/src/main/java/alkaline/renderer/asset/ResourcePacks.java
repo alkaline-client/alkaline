@@ -142,6 +142,11 @@ public final class ResourcePacks {
             }
 
             @Override
+            public List<byte[]> readAll(String path) throws IOException {
+                return source.readAll(path);
+            }
+
+            @Override
             public String describe() {
                 return source.describe();
             }

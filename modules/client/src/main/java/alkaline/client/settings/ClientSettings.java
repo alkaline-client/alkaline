@@ -251,6 +251,29 @@ public final class ClientSettings {
             "resource_packs.selected", "Resource packs", "Selected packs",
             "Packs layered over the vanilla assets, first one winning.", "", 16384));
 
+    // Audio: vanilla's sound categories (SoundCategory), 0..1. Music and records share one slider, off by default.
+    public static final Setting.FloatSetting AUDIO_MASTER = BUILDER.add(Setting.decimal(
+            "audio.master", "Audio", "Master volume", "Scales every sound.", 1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_PLAYERS = BUILDER.add(Setting.decimal(
+            "audio.players", "Audio", "Players", "Hits and hurt sounds, eating, drinking, item pickups.", 1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_HOSTILE = BUILDER.add(Setting.decimal(
+            "audio.hostile", "Audio", "Hostile creatures", "Zombies, skeletons, creepers and other monsters.",
+            1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_NEUTRAL = BUILDER.add(Setting.decimal(
+            "audio.neutral", "Audio", "Friendly creatures",
+            "Footsteps, bows and arrows, splash potions, animals and villagers.", 1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_BLOCKS = BUILDER.add(Setting.decimal(
+            "audio.blocks", "Audio", "Blocks", "Breaking and placing blocks, doors, chests, explosions.", 1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_WEATHER = BUILDER.add(Setting.decimal(
+            "audio.weather", "Audio", "Weather", "Rain and thunder.", 1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_AMBIENT = BUILDER.add(Setting.decimal(
+            "audio.ambient", "Audio", "Ambient", "Cave sounds and fireworks.", 1f, 0f, 1f));
+    public static final Setting.FloatSetting AUDIO_MUSIC = BUILDER.add(Setting.decimal(
+            "audio.music", "Audio", "Music & jukeboxes", "Jukebox records and note blocks.", 0f, 0f, 1f));
+    /** The volume sliders, for their percentage labels. */
+    public static final java.util.List<Setting.FloatSetting> AUDIO_VOLUMES = java.util.List.of(AUDIO_MASTER,
+            AUDIO_PLAYERS, AUDIO_HOSTILE, AUDIO_NEUTRAL, AUDIO_BLOCKS, AUDIO_WEATHER, AUDIO_AMBIENT, AUDIO_MUSIC);
+
     public static final ConfigSchema SCHEMA = BUILDER.build();
 
     private ClientSettings() {

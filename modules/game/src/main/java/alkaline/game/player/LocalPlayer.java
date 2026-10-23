@@ -107,6 +107,12 @@ public final class LocalPlayer {
     public float limbSwingAmount;
     public float previousLimbSwingAmount;
     public boolean inWater;
+    /** Entity.moveEntity's step sound fell due in the last move (one per block walked, or climbed on a ladder). */
+    public boolean stepped;
+    /** The fall distance landed with in the last move (Entity.updateFallState hands it to fall()), else 0. */
+    public float landedFall;
+    private float distanceOnStep;
+    private int nextStepDistance = 1;
     private boolean swinging;
     private int swingTicks;
     public float swingProgress;
@@ -791,6 +797,7 @@ public final class LocalPlayer {
             }
         }
         double fromX = x;
+        double fromY = y;
         double fromZ = z;
         x = (box.minX + box.maxX) / 2.0;
         y = box.minY;
@@ -817,6 +824,7 @@ public final class LocalPlayer {
             }
         }
         // Entity.updateFallState.
+        landedFall = onGround ? fallDistance : 0;
         if (onGround) {
             fallDistance = 0;
         } else if (dy < 0) {
@@ -834,6 +842,16 @@ public final class LocalPlayer {
                 motionY = -motionY;
             } else if (under != 165 || sneaking) {
                 motionY = 0;
+            }
+        }
+        stepped = false;
+        if (!edgeSafe && !riding && !flying) {
+            double climbed = under == 65 ? y - fromY : 0; // only ladders count height
+            distanceOnStep += (float) (Math.sqrt((x - fromX) * (x - fromX) + climbed * climbed
+                    + (z - fromZ) * (z - fromZ)) * 0.6);
+            if (distanceOnStep > nextStepDistance && under != 0) {
+                nextStepDistance = (int) distanceOnStep + 1;
+                stepped = true;
             }
         }
         if (!edgeSafe && !riding) {

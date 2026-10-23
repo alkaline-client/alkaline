@@ -125,6 +125,8 @@ final class ClientApp implements AutoCloseable {
     private HudBridge hudBridge;
     /** Item models, meshes and icons for the world and the HUD; render-thread state. */
     private ItemCatalog itemCatalog;
+    /** The enchantment glint over item icons, drawn over the UI layer (null until the assets load). */
+    private HudGlint hudGlint;
     private alkaline.ui.hud.HudFrame publishedHud;
     private volatile String joinedAddress = "";
     private boolean textInput;
@@ -425,6 +427,7 @@ final class ClientApp implements AutoCloseable {
             palette = paletteLoad.join();
             chatText = ChatText.load(assets);
             itemCatalog = new ItemCatalog(assets);
+            hudGlint = new HudGlint(renderer, itemCatalog);
             alkaline.ui.hud.HudSprites sprites = new alkaline.ui.hud.HudSprites(assets);
             hudBridge = new HudBridge(itemCatalog, sprites, chatText);
             String loadedPacks = startupPacks;
@@ -794,6 +797,9 @@ final class ClientApp implements AutoCloseable {
         ui.checkHealthy();
         SdlWindow.PixelSize size = window.pixelSize();
         compositor.update(size.width(), size.height());
+        if (hudGlint != null) {
+            hudGlint.update(compositor);
+        }
         if (background != null) {
             background.beforeFrame(size.width(), size.height());
         }
@@ -813,6 +819,9 @@ final class ClientApp implements AutoCloseable {
         frame.beginMainPass(surface[0], surface[1], surface[2], 1f);
         compositor.drawBackdrop(frame);
         compositor.drawUi(frame);
+        if (hudGlint != null) {
+            hudGlint.draw(frame, compositor, System.currentTimeMillis());
+        }
         frames++;
         if (options.screenshot() != null && !captureRequested
                 && System.nanoTime() - startNanos >= options.screenshotDelayMillis() * 1_000_000L) {
@@ -1488,6 +1497,9 @@ final class ClientApp implements AutoCloseable {
             if (background instanceof OverworldBackground overworld) {
                 System.out.println(overworld.describe());
             }
+        }
+        if (hudGlint != null) {
+            hudGlint.close();
         }
         compositor.close();
         ui.close();

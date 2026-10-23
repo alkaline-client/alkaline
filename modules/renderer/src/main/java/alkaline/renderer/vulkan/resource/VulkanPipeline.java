@@ -93,6 +93,8 @@ public final class VulkanPipeline implements AutoCloseable {
                 info.pSetLayouts(stack.longs(imageSetLayout));
             } else if (spec.sampledImages() == 2) {
                 info.pSetLayouts(stack.longs(imageSetLayout, imageSetLayout));
+            } else if (spec.sampledImages() == 3) {
+                info.pSetLayouts(stack.longs(imageSetLayout, imageSetLayout, imageSetLayout));
             }
             if (spec.pushConstantBytes() > 0) {
                 info.pPushConstantRanges(VkPushConstantRange.calloc(1, stack)

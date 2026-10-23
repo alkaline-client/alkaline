@@ -360,6 +360,16 @@ public final class MenuCompositor implements AutoCloseable {
                 anchor.getRight() * scaleX, anchor.getBottom() * scaleY);
     }
 
+    /** Every anchor of the UI frame on screen, in UI layer pixels; the map is replaced, not changed, per frame. */
+    public java.util.Map<String, SceneAnchor> anchors() {
+        return anchors;
+    }
+
+    /** The UI layer as last uploaded, or null before the first frame: for passes that read what it shows. */
+    public VulkanDynamicTexture uiTexture() {
+        return uiReady ? uiTexture : null;
+    }
+
     private long uiUploads;
     private long uploadedRows;
     /** Rows of the pending frame to upload, or null for all of them. */

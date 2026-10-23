@@ -117,6 +117,7 @@ final class EntityView implements AutoCloseable {
     private final float[] light1 = new float[3];
     private VulkanTexture glint;
     private boolean glintLoaded;
+    private final GlintStyles glints;
 
     /** An item model on the GPU: its mesh (for the display transforms) and one model and texture per layer. */
     private record GpuItem(ItemMeshes.Mesh mesh, ModelRenderer.GpuModel[] models, VulkanTexture[] textures) {
@@ -132,6 +133,7 @@ final class EntityView implements AutoCloseable {
         this.skins = Objects.requireNonNull(skins, "skins");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         models = new ModelRenderer(renderer, target);
+        glints = new GlintStyles(renderer, catalog, models::prepare);
         arrowModel = models.upload(ProjectileModels.arrow());
         CuboidModel chest = alkaline.renderer.model.ChestModels.chest(false);
         CuboidModel largeChest = alkaline.renderer.model.ChestModels.chest(true);
@@ -157,6 +159,7 @@ final class EntityView implements AutoCloseable {
     /** Loads a few queued textures and item models; call outside frames. */
     void beforeFrame() {
         uploadSkins();
+        glints.beforeFrame();
         if (!glintLoaded) {
             glintLoaded = true;
             glint = load("assets/minecraft/textures/misc/enchanted_item_glint.png",
@@ -254,7 +257,8 @@ final class EntityView implements AutoCloseable {
         for (int index = 0; index < item.models().length; index++) {
             int slot = item.mesh().layers().get(index).tintIndex();
             int tint = slot >= 0 && slot < tints.length ? tints[slot] : 0xFFFFFFFF;
-            models.submit(item.models()[index], item.textures()[index], matrix, tint, 0, light, stack.glint());
+            models.submit(item.models()[index], item.textures()[index], matrix, tint, 0, light,
+                    glints.item(catalog.glintStyle(stack)));
         }
     }
 
@@ -764,17 +768,18 @@ final class EntityView implements AutoCloseable {
                 continue;
             }
             // LayerArmorBase: enchanted armor shimmers with the glint.
-            boolean shimmer = stack.glint();
+            alkaline.renderer.vulkan.model.GlintEffect shimmer = glints.armor(catalog.glintStyle(stack));
             if (material == 0) {
                 int color = stack.leatherColor();
                 models.submit(gpu.get(kind), texture, pose, root, 0xFF000000 | (color < 0 ? LEATHER : color), overlay,
-                        light, shimmer);
+                        light, shimmer, motion.ageInTicks);
                 VulkanTexture leatherOverlay = armorTexture(stack, LEATHER_OVERLAY[leggings ? 1 : 0]);
                 if (leatherOverlay != null) {
                     models.submit(gpu.get(kind), leatherOverlay, pose, root, 0xFFFFFFFF, overlay, light);
                 }
             } else {
-                models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light, shimmer);
+                models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light, shimmer,
+                        motion.ageInTicks);
             }
         }
     }
@@ -988,6 +993,7 @@ final class EntityView implements AutoCloseable {
         for (VulkanTexture texture : skinTextures.values()) {
             texture.close();
         }
+        glints.close();
         if (glint != null) {
             glint.close();
         }

@@ -26,10 +26,27 @@ public record ItemStack(int id, int count, int damage, NBTTagCompound tag) {
         return other != null && other.id == id && other.damage == damage && java.util.Objects.equals(tag, other.tag);
     }
 
-    /** Whether the stack shows vanilla's enchantment glint: enchanted, or an enchanted book. */
+    /**
+     * Item.hasEffect: enchanted, or always for enchanted and written books, bottles o' enchanting and nether stars;
+     * enchanted golden apples (ItemAppleGold), and potions with an effect (ItemPotion; a standard potion's low four
+     * bits brew one unless they are 0, 7 or 15).
+     */
     public boolean glint() {
-        if (id == 403) {
-            return true;
+        switch (id) {
+            case 384, 387, 399, 403 -> {
+                return true;
+            }
+            case 322 -> {
+                return damage > 0;
+            }
+            case 373 -> {
+                if (tag != null && tag.hasKey("CustomPotionEffects", 9)) {
+                    return tag.getTagList("CustomPotionEffects", 10).tagCount() > 0;
+                }
+                return (0x7F7E >> (damage & 15) & 1) != 0;
+            }
+            default -> {
+            }
         }
         return tag != null && tag.hasKey("ench", 9) && tag.getTagList("ench", 10).tagCount() > 0;
     }

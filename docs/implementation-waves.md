@@ -34,9 +34,9 @@ Prompt style follows Anthropic's guidance for Claude 5.5 models:
 | Model and effort | Use for |
 |---|---|
 | Opus 5.5 High | New subsystems, Vulkan or shader work, exact-vanilla ports with hard math, and the performance pass |
-| Opus 5.5 Medium | Hard but well-specified work, and the integrators (conflict resolution needs judgment) |
+| Opus 5.5 Medium | Hard but well-specified work, all frontend work, and the integrators (conflict resolution needs judgment) |
 | Sonnet 5.5 Medium | Well-specified features in one area, and mechanical ports with a clear reference |
-| Sonnet 5.5 High | Features across several files or modules, or UI with gameplay rules |
+| Sonnet 5.5 High | Non-UI features across several files or modules |
 | Haiku 5.5 High | Tests, docs and small isolated changes |
 
 **All frontend work goes to Opus 5.5**, whatever its size: Compose screens, HUD elements, in-game overlays and
@@ -253,7 +253,7 @@ Start every task in its own worktree from `main`, after wave 0 is pushed.
 |---|---|---|---|
 | 1A Remaining mobs | Sonnet Medium | `EntityModels.java`, new model files, their tests | 25631 |
 | 1B Chat | Opus (reworked by the planning session) | new chat files in `modules/ui` and `apps/game-client` | 25632 |
-| 1C Chest-like screens | Opus Medium | inventory or window screen files in `modules/ui`, `Window` screen code | 25633 |
+| 1C Chest-like screens | Opus (done by the planning session) | inventory or window screen files in `modules/ui`, `Window` screen code | 25633 |
 | 1D Sound | Opus High | new `audio` package, its build dependencies | 25634 |
 | 1E Enchantment glint | Opus Medium | `ModelRenderer`, item shaders, `ItemIcons`, `CustomItems` glint | 25635 |
 
@@ -319,7 +319,7 @@ Follow AGENTS.md's simplicity rule and Material 3 Expressive: one input field at
 </done_when>
 ```
 
-### 1C Chest-like container screens (Opus 5.5 Medium)
+### 1C Chest-like container screens (done by the planning session, Opus 5.5)
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 1C, branch wave1/1C, server port 25633.

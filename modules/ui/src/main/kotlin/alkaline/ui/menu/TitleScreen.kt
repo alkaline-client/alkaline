@@ -87,7 +87,10 @@ fun AlkalineMenu(controller: MenuController) {
                     && (controller.play == PlayPhase.PLAYING || controller.play == PlayPhase.PAUSED)
                     && overlay != Overlay.CLICK_GUI && controller.page != MenuPage.SETTINGS
                 ) {
-                    CompositionLocalProvider(alkaline.ui.hud.LocalHudSprites provides controller.hudSprites) {
+                    CompositionLocalProvider(
+                        alkaline.ui.hud.LocalHudSprites provides controller.hudSprites,
+                        alkaline.ui.hud.LocalChatInput provides controller.chat,
+                    ) {
                         alkaline.ui.hud.GameHud(
                             controller.hud.frame, profiles.store(),
                             if (overlay == Overlay.HUD_EDITOR) controller.hudEditor else null,
@@ -105,6 +108,9 @@ fun AlkalineMenu(controller: MenuController) {
                     CompositionLocalProvider(alkaline.ui.hud.LocalHudSprites provides controller.hudSprites) {
                         ContainerScreen(controller.hud.frame, controller.inventoryInput) { controller.typing = it }
                     }
+                }
+                if (controller.phase == MenuPhase.READY && overlay == Overlay.CHAT) {
+                    alkaline.ui.hud.ChatWheel(controller.chat)
                 }
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.SIGN) {
                     SignEditor(controller)

@@ -81,7 +81,9 @@ fun GameHud(frame: HudFrame, profile: ConfigStore, editor: HudEditor?, onDone: (
             FixedOverlays(frame)
         }
         for (module in Modules.all()) {
-            if (module.kind() != Module.Kind.HUD || !snapshot.get(module.enabled())) continue
+            // Typing in chat shows it even where the Chat module is off.
+            val typingChat = module == Modules.CHAT && LocalChatInput.current?.open == true
+            if (module.kind() != Module.Kind.HUD || !(snapshot.get(module.enabled()) || typingChat)) continue
             PlacedElement(module, snapshot, profile, frame, editor)
         }
         if (editor != null) {

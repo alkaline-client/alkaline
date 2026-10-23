@@ -28,6 +28,20 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
     private val rendered = HashMap<String, alkaline.renderer.image.RgbaImage>()
     private val names = ItemNames(chatText)
 
+    private var chatOwner: PlaySession? = null
+    private var chatVersion = -1
+    private var chatCache = emptyList<HudChat>()
+
+    /** Every kept chat line, rebuilt only when one arrives: the open chat scrolls through all of them. */
+    private fun chatLines(play: PlaySession): List<HudChat> {
+        if (play !== chatOwner || play.chatVersion() != chatVersion) {
+            chatOwner = play
+            chatVersion = play.chatVersion()
+            chatCache = play.chat().map { HudChat(it.text(), it.tick()) }
+        }
+        return chatCache
+    }
+
     fun frame(
         play: PlaySession, settings: ConfigSnapshot, fps: Int, server: String, leftCps: Int, rightCps: Int,
         keys: Int, showPlayers: Boolean, chat: ChatText, movementStatus: String = "",
@@ -77,7 +91,7 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
             },
             sidebarTitle = sidebar?.title(),
             sidebar = sidebar?.lines()?.map { HudScore(it.text(), it.score()) } ?: emptyList(),
-            chat = play.chat().take(20).map { HudChat(it.text(), it.tick()) },
+            chat = chatLines(play),
             title = play.title(),
             subtitle = play.subtitle(),
             titleAlpha = play.titleAlpha(0f),

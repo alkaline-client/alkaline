@@ -108,10 +108,11 @@ final class HorseModels {
         pose.rotation(MULE_LEFT_EAR, headX, headY, PI / 12f);
         pose.pivot(MULE_RIGHT_EAR, 0, headPivotY, headPivotZ);
         pose.rotation(MULE_RIGHT_EAR, headX, headY, -PI / 12f);
-        pose.pivot(HEAD_UPPER, 0, 0.02f, 0.02f);
-        pose.pivot(HEAD_LOWER, 0, 0, 0);
-        pose.rotation(HEAD_UPPER, 0, 0, 0);
-        pose.rotation(HEAD_LOWER, 0, 0, 0);
+        float mouth = motion.mouth;
+        pose.pivot(HEAD_UPPER, 0, 0.02f, 0.02f - mouth);
+        pose.pivot(HEAD_LOWER, 0, 0, mouth);
+        pose.rotation(HEAD_UPPER, -0.09424778f * mouth, 0, 0);
+        pose.rotation(HEAD_LOWER, PI / 20f * mouth, 0, 0);
 
         float bodyX = n * -45f * PI / 180f;
         pose.rotation(BODY, bodyX, 0, 0);
@@ -176,19 +177,27 @@ final class HorseModels {
             pose.pivot(RIGHT_REIN, 0, headPivotY, headPivotZ);
             pose.rotation(LEFT_REIN, lean, headY, 0);
             pose.rotation(RIGHT_REIN, lean, headY, 0);
-            pose.rotation(LEFT_SADDLE_ROPE, s / 3f, 0, s / 5f);
-            pose.rotation(LEFT_SADDLE_METAL, s / 3f, 0, s / 5f);
-            pose.rotation(RIGHT_SADDLE_ROPE, s / 3f, 0, -s / 5f);
-            pose.rotation(RIGHT_SADDLE_METAL, s / 3f, 0, -s / 5f);
+            // A rider holds the stirrups up; otherwise they swing with the stride.
+            float swingX = motion.ridden ? -PI / 3f : s / 3f;
+            float swingZ = motion.ridden ? 0f : s / 5f;
+            pose.rotation(LEFT_SADDLE_ROPE, swingX, 0, swingZ);
+            pose.rotation(LEFT_SADDLE_METAL, swingX, 0, swingZ);
+            pose.rotation(RIGHT_SADDLE_ROPE, swingX, 0, -swingZ);
+            pose.rotation(RIGHT_SADDLE_METAL, swingX, 0, -swingZ);
         }
 
         float t = Math.min(0f, -1.3089f + g * 1.5f);
+        float tailYaw = 0f;
+        if (motion.tailSwish) {
+            tailYaw = cos(q * 0.7f);
+            t = 0f;
+        }
         pose.pivot(TAIL_BASE, 0, tailPivotY, 14);
         pose.pivot(TAIL_MIDDLE, 0, tailPivotY, 14);
         pose.pivot(TAIL_TIP, 0, tailPivotY, 14);
-        pose.rotation(TAIL_BASE, t, 0, 0);
-        pose.rotation(TAIL_MIDDLE, t, 0, 0);
-        pose.rotation(TAIL_TIP, -0.2618f + t, 0, 0);
+        pose.rotation(TAIL_BASE, t, tailYaw, 0);
+        pose.rotation(TAIL_MIDDLE, t, tailYaw, 0);
+        pose.rotation(TAIL_TIP, -0.2618f + t, tailYaw, 0);
 
         // ModelHorse.render: which parts draw.
         boolean adult = !motion.foal;
@@ -201,8 +210,8 @@ final class HorseModels {
             pose.visible(part, saddle);
         }
         pose.visible(FACE_ROPES, saddle);
-        pose.visible(LEFT_REIN, false);
-        pose.visible(RIGHT_REIN, false);
+        pose.visible(LEFT_REIN, saddle && motion.ridden);
+        pose.visible(RIGHT_REIN, saddle && motion.ridden);
         pose.visible(LEFT_CHEST, adult && motion.chested);
         pose.visible(RIGHT_CHEST, adult && motion.chested);
     }

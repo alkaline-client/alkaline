@@ -39,6 +39,7 @@ final class MobModels {
             case ZOMBIE_VILLAGER -> zombieVillager();
             case MOOSHROOM_MUSHROOMS -> mushrooms();
             case HORSE -> HorseModels.build();
+            case GUARDIAN_BEAM -> BossModels.beam();
             case GUARDIAN -> BossModels.guardian();
             case WITHER -> BossModels.wither();
             case ENDER_DRAGON -> BossModels.dragon();
@@ -61,7 +62,13 @@ final class MobModels {
             case GUARDIAN -> BossModels.guardian(motion, pose, headYaw, headPitch);
             case WITHER -> BossModels.wither(motion, pose, headYaw, headPitch);
             case ENDER_DRAGON -> BossModels.dragon(motion, pose);
-            case MAGMA_CUBE, MOOSHROOM_MUSHROOMS -> {
+            case MAGMA_CUBE -> {
+                // ModelMagmaCube.setLivingAnimations: slab i rises by -(4 - i) * squish * 1.7.
+                for (int index = 0; index < 8; index++) {
+                    pose.pivot(1 + index, 0, -(4 - index) * Math.max(0f, motion.squish) * 1.7f, 0);
+                }
+            }
+            case MOOSHROOM_MUSHROOMS, GUARDIAN_BEAM -> {
             }
             default -> throw new IllegalArgumentException("No mob animation for " + kind);
         }

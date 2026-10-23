@@ -42,7 +42,7 @@ final class MobSelector {
     private static final String[] MARKINGS = {null, "white", "whitefield", "whitedots", "blackdots"};
     private static final String[] ARMORS = {null, "iron", "gold", "diamond"};
     /** Layered horse texture keys by variant and armor, so a frame builds no strings. */
-    private static final java.util.Map<Integer, String> HORSE_TEXTURES = new java.util.HashMap<>();
+    private static final MobAnimator.IntTable<String> HORSE_TEXTURES = new MobAnimator.IntTable<>();
 
     private MobSelector() {
     }
@@ -87,7 +87,9 @@ final class MobSelector {
                 if (coat >= COATS.length || marking >= MARKINGS.length || armor < 0 || armor >= ARMORS.length) {
                     return false;
                 }
-                choice.texture = HORSE_TEXTURES.computeIfAbsent(variant << 2 | armor, key -> {
+                int key = variant << 2 | armor;
+                String cached = HORSE_TEXTURES.get(key);
+                if (cached == null) {
                     StringBuilder text = new StringBuilder("entity/horse/horse_").append(COATS[coat]);
                     if (MARKINGS[marking] != null) {
                         text.append("+entity/horse/horse_markings_").append(MARKINGS[marking]);
@@ -95,8 +97,10 @@ final class MobSelector {
                     if (ARMORS[armor] != null) {
                         text.append("+entity/horse/armor/horse_armor_").append(ARMORS[armor]);
                     }
-                    return text.toString();
-                });
+                    cached = text.toString();
+                    HORSE_TEXTURES.put(key, cached);
+                }
+                choice.texture = cached;
             }
         }
         choice.scale = type == 1 ? 0.87f : type == 2 ? 0.92f : 1f;
@@ -133,9 +137,6 @@ final class MobSelector {
                 choice.texture = type == 99 ? "entity/rabbit/caerbannog"
                         : "Toast".equals(entity.metadata.getString(2, "")) ? "entity/rabbit/toast"
                         : "entity/rabbit/" + RABBITS[type >= 0 && type < RABBITS.length ? type : 0];
-                // The hop pose peaks mid-jump; without the server's jump timer a rabbit that is moving vertically
-                // holds it.
-                motion.jump = Math.abs(entity.y - entity.previousY) > 1e-3 ? 0.5f : 0f;
             }
             case EntityTypes.OCELOT -> {
                 choice.kind = EntityModels.Kind.OCELOT;
@@ -176,7 +177,6 @@ final class MobSelector {
                 boolean elder = (flags & 4) != 0;
                 choice.texture = elder ? "entity/guardian_elder" : "entity/guardian";
                 choice.scale = elder ? 2.35f : 1f;
-                motion.retracted = (flags & 2) != 0;
                 guardianEye(entity, partialTick, x, y, z, motion);
             }
             case EntityTypes.WITHER -> {

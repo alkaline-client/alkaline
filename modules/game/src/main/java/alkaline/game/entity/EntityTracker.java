@@ -19,6 +19,8 @@ public final class EntityTracker {
     private final List<Integer> removed = new ArrayList<>();
     private final Metadata self = new Metadata();
     private int selfId = Integer.MIN_VALUE;
+    /** Told of every Entity Status for a tracked entity (client-side animations such as the rabbit's hop). */
+    public java.util.function.BiConsumer<Entity, Integer> statusListener;
 
     /** The local player's entity id (from Join Game); its events update {@link #self()} instead. */
     public void selfId(int id) {
@@ -151,6 +153,9 @@ public final class EntityTracker {
                         entity.hurt();
                     } else if (status.status() == 3) {
                         entity.die();
+                    }
+                    if (statusListener != null) {
+                        statusListener.accept(entity, status.status());
                     }
                 }
                 return status.entityId() != selfId || entity != null;

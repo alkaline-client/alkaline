@@ -169,4 +169,61 @@ class MobModelsTest {
         assertEquals((float) Math.PI, pose.rotationY(BossModels.DRAGON_TAIL), 1e-5f);
         assertEquals(0f, pose.rotationY(BossModels.DRAGON_NECK), 1e-5f);
     }
+
+    @Test
+    void magmaCubeSlabsSpreadWithTheSquish() {
+        ModelPose pose = new ModelPose(model(EntityModels.Kind.MAGMA_CUBE));
+        EntityModels.Motion motion = new EntityModels.Motion();
+        motion.squish = 0.5f;
+        EntityModels.animate(EntityModels.Kind.MAGMA_CUBE, motion, pose);
+        assertEquals(-(4 - 0) * 0.5f * 1.7f, pose.pivotY(1), 1e-5f);
+        assertEquals(-(4 - 7) * 0.5f * 1.7f, pose.pivotY(8), 1e-5f);
+        motion.squish = -1f; // a negative factor clamps to zero
+        EntityModels.animate(EntityModels.Kind.MAGMA_CUBE, motion, pose);
+        assertEquals(0f, pose.pivotY(1), 0f);
+    }
+
+    @Test
+    void witherSideHeadsFollowTheirAim() {
+        ModelPose pose = new ModelPose(model(EntityModels.Kind.WITHER));
+        EntityModels.Motion motion = new EntityModels.Motion();
+        motion.sideHeadYaw[0] = 30f;
+        motion.sideHeadPitch[1] = -20f;
+        EntityModels.animate(EntityModels.Kind.WITHER, motion, pose);
+        assertEquals((float) Math.toRadians(30), pose.rotationY(1), 1e-6f);
+        assertEquals((float) Math.toRadians(-20), pose.rotationX(2), 1e-6f);
+    }
+
+    @Test
+    void horseOpensItsMouthSwishesItsTailAndShowsReinsWhenRidden() {
+        ModelPose pose = new ModelPose(model(EntityModels.Kind.HORSE));
+        EntityModels.Motion motion = new EntityModels.Motion();
+        motion.saddled = true;
+        motion.mouth = 1f;
+        EntityModels.animate(EntityModels.Kind.HORSE, motion, pose);
+        assertEquals(-0.09424778f, pose.rotationX(HorseModels.HEAD_UPPER), 1e-6f);
+        assertEquals(1f, pose.pivotZ(HorseModels.HEAD_LOWER), 1e-6f);
+        assertTrue(!pose.visible(HorseModels.LEFT_REIN));
+        motion.ridden = true;
+        motion.tailSwish = true;
+        motion.ageInTicks = 10f;
+        EntityModels.animate(EntityModels.Kind.HORSE, motion, pose);
+        assertTrue(pose.visible(HorseModels.LEFT_REIN) && pose.visible(HorseModels.RIGHT_REIN));
+        assertEquals((float) -Math.PI / 3f, pose.rotationX(HorseModels.LEFT_SADDLE_ROPE), 1e-6f);
+        assertEquals((float) Math.cos(7f), pose.rotationY(HorseModels.TAIL_BASE), 1e-6f);
+        assertEquals(0f, pose.rotationX(HorseModels.TAIL_BASE), 0f);
+    }
+
+    @Test
+    void guardianSpikesPullInAndTheTailFollowsItsPhase() {
+        ModelPose pose = new ModelPose(model(EntityModels.Kind.GUARDIAN));
+        EntityModels.Motion motion = new EntityModels.Motion();
+        motion.spikes = 0f;
+        motion.tailPhase = (float) Math.PI / 2f;
+        EntityModels.animate(EntityModels.Kind.GUARDIAN, motion, pose);
+        float spread = 1f + (float) Math.cos(8) * 0.01f - 0.55f;
+        assertEquals(16f + 8f * spread, pose.pivotY(BossModels.GUARDIAN_SPINES + 8), 1e-4f);
+        assertEquals((float) Math.PI * 0.15f, pose.rotationY(BossModels.GUARDIAN_TAIL2), 1e-6f);
+        assertEquals(2, model(EntityModels.Kind.GUARDIAN_BEAM).partCount());
+    }
 }

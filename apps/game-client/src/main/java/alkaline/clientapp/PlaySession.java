@@ -52,6 +52,11 @@ public final class PlaySession implements AutoCloseable {
     private final Consumer<String> disconnected;
     private final ChatText chat;
     private final EntityTracker entities = new EntityTracker();
+    private final MobAnimator animation = new MobAnimator();
+
+    {
+        animation.attach(entities);
+    }
     private final EntityPicker picker = new EntityPicker();
     private final Inventory inventory = new Inventory();
     /** GuiContainer's input for the open screen's container; its clicks apply here and go to the server. */
@@ -133,6 +138,10 @@ public final class PlaySession implements AutoCloseable {
 
     LocalPlayer player() {
         return player;
+    }
+
+    MobAnimator animation() {
+        return animation;
     }
 
     EntityTracker entities() {
@@ -616,6 +625,7 @@ public final class PlaySession implements AutoCloseable {
         ticks++;
         session.drainEvents(this::handle);
         entities.tick(session.world()::state);
+        animation.tick(entities.all(), session.world()::state);
         effects.replaceAll((id, effect) -> new Effect(id, effect.amplifier(), Math.max(0, effect.ticksLeft() - 1)));
         if (titleTicks > 0) {
             titleTicks--;

@@ -109,7 +109,7 @@ final class EntityView implements AutoCloseable {
     private float viewYaw;
     private float viewPitch;
     private final EntityModels.Motion motion = new EntityModels.Motion();
-    private final DragonTracker dragons = new DragonTracker();
+    private MobAnimator anim;
     private final MobSelector.Choice choice = new MobSelector.Choice();
     private final float[] root = new float[16];
     private final float[] part = new float[16];
@@ -620,8 +620,9 @@ final class EntityView implements AutoCloseable {
         motion.onGround = entity.onGround;
         motion.heldItem = entity.equipment[0] != null ? 1 : 0;
         motion.riding = entity.vehicle >= 0;
-        if (kind == EntityModels.Kind.ENDER_DRAGON) {
-            dragons.update(entity, partialTick, motion);
+        MobAnimator.State animState = anim == null ? null : anim.state(entity);
+        if (animState != null) {
+            anim.apply(entity, animState, partialTick, motion);
         }
         motion.entityId = entity.id;
         motion.ticksExisted = entity.ticksExisted;
@@ -642,7 +643,14 @@ final class EntityView implements AutoCloseable {
         if (zombieArms) {
             EntityModels.zombieArms(motion, pose);
         }
-        livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, biped && motion.sneaking, deathRotation);
+        float scaleY = scale;
+        if (kind == EntityModels.Kind.SLIME || kind == EntityModels.Kind.MAGMA_CUBE) {
+            // RenderSlime.preRenderCallback: squashed by the squish factor, size-scaled.
+            float h = 1f / (motion.squish / (scale * 0.5f + 1f) + 1f);
+            scaleY = scale / h;
+            scale *= h;
+        }
+        livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, scaleY, biped && motion.sneaking, deathRotation);
         if (kind == EntityModels.Kind.ENDER_DRAGON) {
             dragonRoot(x, y, z);
         }
@@ -666,6 +674,12 @@ final class EntityView implements AutoCloseable {
                 models.submit(gpu.get(extraKind), extra, extraPose, root, extraTint, overlay, light);
             }
         }
+        if (kind == EntityModels.Kind.GUARDIAN && animState != null && !invisible) {
+            renderGuardianBeam(entity, animState, x, y, z, partialTick);
+        }
+        if (kind == EntityModels.Kind.WITCH && entity.equipment[0] != null) {
+            renderWitchHeld(entity.equipment[0], pose, light);
+        }
         if (kind == EntityModels.Kind.SNOW_GOLEM && !invisible) {
             renderPumpkinHead(pose, light);
         }
@@ -674,6 +688,119 @@ final class EntityView implements AutoCloseable {
             renderHeld(entity.equipment[0], pose, motion.sneaking, light,
                     entity.equipment[0] != null && entity.equipment[0].id() == 261 && entity.usingItem()
                             ? entity.usingTicks : -1, hookOwners.contains(entity.id));
+        }
+    }
+
+    /** The per-mob animation state the renderer reads (set each frame by the game view). */
+    void animation(MobAnimator animator) {
+        anim = animator;
+    }
+
+    /** Items LayerHeldItemWitch holds like a tool: upright in the hand (ItemTool, ItemSword, rods, sticks). */
+    private static boolean fullThreeD(int id) {
+        return id >= 256 && id <= 258 || id >= 267 && id <= 279 || id >= 283 && id <= 286 || id >= 290 && id <= 294
+                || id == 280 || id == 346 || id == 369 || id == 398;
+    }
+
+    /**
+     * LayerHeldItemWitch: the held item at the tip of the nose, lifted with it, in the layer's per-kind pose (a bow,
+     * a tool, or the default potion pose) and then the item's own third-person display.
+     */
+    private void renderWitchHeld(ItemStack stack, ModelPose pose, int light) {
+        GpuItem held = gpuItem(catalog.model(stack, -1, false));
+        if (held == null) {
+            return;
+        }
+        PoseMath.resolve(pose, root, matrices);
+        int base = 1 * PoseMath.FLOATS_PER_PART; // the nose is part 1
+        Mat4.identity(part);
+        for (int row = 0; row < 3; row++) {
+            for (int column = 0; column < 4; column++) {
+                part[column * 4 + row] = matrices[base + row * 4 + column];
+            }
+        }
+        Mat4.translate(part, -0.0625f, 0.53125f, 0.21875f, part);
+        int id = stack.id();
+        if (id == 261) {
+            Mat4.translate(part, 0f, 0.125f, -0.125f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-45), 0f, 1f, 0f, part);
+            Mat4.scale(part, 0.625f, -0.625f, 0.625f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-100), 1f, 0f, 0f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-20), 0f, 1f, 0f, part);
+        } else if (fullThreeD(id)) {
+            if (id == 346 || id == 398) {
+                Mat4.rotate(part, (float) Math.PI, 0f, 0f, 1f, part);
+                Mat4.translate(part, 0f, -0.0625f, 0f, part);
+            }
+            Mat4.translate(part, 0f, 0.1875f, 0f, part); // RenderWitch.transformHeldFull3DItemLayer
+            Mat4.translate(part, 0.0625f, -0.125f, 0f, part);
+            Mat4.scale(part, 0.625f, -0.625f, 0.625f, part);
+        } else {
+            Mat4.translate(part, 0.1875f, 0.1875f, 0f, part);
+            Mat4.scale(part, 0.875f, 0.875f, 0.875f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-20), 0f, 0f, 1f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-60), 1f, 0f, 0f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-30), 0f, 0f, 1f, part);
+        }
+        Mat4.rotate(part, (float) Math.toRadians(-15), 1f, 0f, 0f, part);
+        Mat4.rotate(part, (float) Math.toRadians(40), 0f, 0f, 1f, part);
+        if (held.definition().block()) {
+            Mat4.scale(part, 2f, 2f, 2f, part);
+        }
+        display(part, held.definition().thirdPerson());
+        Mat4.scale(part, 0.5f, 0.5f, 0.5f, part);
+        Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
+        submitItem(held, stack, part, light);
+    }
+
+    private final float[] beamBase = new float[16];
+    private final float[] beamSegment = new float[16];
+
+    /**
+     * RenderGuardian's beam from the guardian's eye to its target's middle: crossed planes turning about the beam,
+     * tinted redder as the charge builds. It is drawn as a chain of 0.4-block stretches (one texture height each)
+     * slid along the beam, which scrolls the texture as vanilla's v offset does.
+     */
+    private void renderGuardianBeam(Entity entity, MobAnimator.State state, float x, float y, float z,
+                                    float partialTick) {
+        Entity target = state.target == 0 ? null : anim.entity(state.target);
+        VulkanTexture beam = target == null ? null : texture("entity/guardian_beam");
+        if (beam == null) {
+            return;
+        }
+        boolean elder = (entity.metadata.getInt(16, 0) & 4) != 0;
+        double cameraX = entity.renderX(partialTick) - x;
+        double cameraY = entity.renderY(partialTick) - y;
+        double cameraZ = entity.renderZ(partialTick) - z;
+        float eye = EntityTypes.height(entity) * 0.5f;
+        float dx = (float) (target.renderX(partialTick) - cameraX) - x;
+        float dy = (float) (target.renderY(partialTick) + EntityTypes.height(target) * 0.5f - cameraY) - (y + eye);
+        float dz = (float) (target.renderZ(partialTick) - cameraZ) - z;
+        float length = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (length < 1e-3f) {
+            return;
+        }
+        float charge = MobAnimator.beamCharge(state, elder, partialTick);
+        float squared = charge * charge;
+        int tint = 0xFF000000 | 64 + (int) (squared * 240f) << 16 | 32 + (int) (squared * 192f) << 8
+                | 128 - (int) (squared * 64f);
+        float time = entity.ticksExisted + partialTick;
+        float scroll = time * 0.5f % 1f;
+        Mat4.identity(beamBase);
+        Mat4.translate(beamBase, x, y + eye, z, beamBase);
+        Mat4.rotate(beamBase, (float) (Math.PI / 2 - Math.atan2(dz / length, dx / length)), 0f, 1f, 0f, beamBase);
+        Mat4.rotate(beamBase, (float) Math.acos(dy / length), 1f, 0f, 0f, beamBase);
+        Mat4.rotate(beamBase, 0.075f * time, 0f, 1f, 0f, beamBase);
+        ModelPose pose = poses.get(EntityModels.Kind.GUARDIAN_BEAM);
+        for (int stretch = 0; stretch < 256; stretch++) {
+            float start = (stretch - scroll) * 0.4f;
+            if (start >= length) {
+                break;
+            }
+            System.arraycopy(beamBase, 0, beamSegment, 0, 16);
+            Mat4.translate(beamSegment, 0f, start, 0f, beamSegment);
+            Mat4.scale(beamSegment, 0.2f, 0.2f, 0.2f, beamSegment);
+            models.submit(gpu.get(EntityModels.Kind.GUARDIAN_BEAM), beam, pose, beamSegment, tint, 0, 0xFFFFFF);
         }
     }
 
@@ -698,7 +825,7 @@ final class EntityView implements AutoCloseable {
      * from model space (y down) with the renderer's scale, and lifted by vanilla's 1.5078125.
      */
     private void livingRoot(float x, float y, float z, float bodyYaw, Entity entity, float partialTick, float scale,
-                            boolean sneakingBiped, float deathRotation) {
+                            float scaleY, boolean sneakingBiped, float deathRotation) {
         Mat4.identity(root);
         Mat4.translate(root, x, y, z, root);
         Mat4.rotate(root, (float) Math.toRadians(180.0 - bodyYaw), 0f, 1f, 0f, root);
@@ -706,7 +833,7 @@ final class EntityView implements AutoCloseable {
             float tilt = (float) Math.sqrt(Math.max(0f, (entity.deathTime + partialTick - 1f) / 20f * 1.6f));
             Mat4.rotate(root, (float) Math.toRadians(Math.min(1f, tilt) * deathRotation), 0f, 0f, 1f, root);
         }
-        Mat4.scale(root, -scale, -scale, scale, root);
+        Mat4.scale(root, -scale, -scaleY, scale, root);
         Mat4.translate(root, 0f, -1.5078125f, 0f, root);
         if (sneakingBiped) {
             Mat4.translate(root, 0f, 0.2f, 0f, root); // ModelBiped.render while sneaking

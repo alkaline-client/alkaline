@@ -55,7 +55,7 @@ final class BossModels {
     /** ModelGuardian.setRotationAngles; the spines draw in unless the guardian has pulled them back. */
     static void guardian(Motion motion, ModelPose pose, float headYaw, float headPitch) {
         pose.rotation(GUARDIAN_BODY, headPitch, headYaw, 0);
-        float pulled = (motion.retracted ? 1f : 0f) * 0.55f;
+        float pulled = (1f - motion.spikes) * 0.55f;
         for (int spine = 0; spine < 12; spine++) {
             float spread = 1f + cos(motion.ageInTicks * 1.5f + spine) * 0.01f - pulled;
             int part = GUARDIAN_SPINES + spine;
@@ -63,7 +63,7 @@ final class BossModels {
             pose.pivot(part, SPINE_PX[spine] * spread, 16f + SPINE_PY[spine] * spread, SPINE_PZ[spine] * spread);
         }
         pose.pivot(GUARDIAN_EYE, motion.eyeX, motion.eyeLow ? 1f : 0f, -8.25f);
-        float tail = motion.ageInTicks * (motion.retracted ? 0.5f : 0.125f);
+        float tail = motion.tailPhase;
         pose.rotation(GUARDIAN_TAIL0, 0, sin(tail) * PI * 0.05f, 0);
         pose.rotation(GUARDIAN_TAIL1, 0, sin(tail) * PI * 0.1f, 0);
         pose.rotation(GUARDIAN_TAIL2, 0, sin(tail) * PI * 0.15f, 0);
@@ -92,6 +92,24 @@ final class BossModels {
         pose.pivot(WITHER_TAIL, -2, 6.9f + cos(ribs) * 10f, -0.5f + sin(ribs) * 10f);
         pose.rotation(WITHER_TAIL, (0.265f + 0.1f * wave) * PI, 0, 0);
         pose.rotation(WITHER_HEAD, headPitch, headYaw, 0);
+        // setLivingAnimations: the side heads turn to their targets, relative to the body.
+        for (int side = 0; side < 2; side++) {
+            pose.rotation(WITHER_HEAD + 1 + side, (float) Math.toRadians(motion.sideHeadPitch[side]),
+                    (float) Math.toRadians(motion.sideHeadYaw[side]), 0);
+        }
+    }
+
+    // ---- guardian beam -------------------------------------------------------------------------------------
+
+    /**
+     * One 0.4-block stretch of RenderGuardian's beam: two crossed planes 0.4 wide, as boxes 32 units square drawn at
+     * a 0.2 scale so each spans one texture height of guardian_beam.png (64x32) along the beam.
+     */
+    static CuboidModel beam() {
+        return CuboidModel.builder("guardian_beam", 64, 32)
+                .part("plane_a", null, 0, 0, 0, box(0, 0, -16, 0, 0, 32, 32, 0, 0))
+                .part("plane_b", null, 0, 0, 0, 0, PI / 2f, 0, box(0, 0, -16, 0, 0, 32, 32, 0, 0))
+                .build();
     }
 
     // ---- ender dragon --------------------------------------------------------------------------------------

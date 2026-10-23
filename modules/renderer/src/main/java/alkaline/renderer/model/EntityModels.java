@@ -32,7 +32,7 @@ public final class EntityModels {
         COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
         WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE,
         MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS, HORSE,
-        GUARDIAN, WITHER, ENDER_DRAGON
+        GUARDIAN, WITHER, ENDER_DRAGON, GUARDIAN_BEAM
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -76,8 +76,18 @@ public final class EntityModels {
         public boolean longEars;
         public float rearing;
         public float grazing;
-        /** Guardians: spines pulled in, and the eye's offset toward the viewer. */
-        public boolean retracted;
+        /** Horses: mouth openness 0..1, tail swishing, and a rider on the back. */
+        public float mouth;
+        public boolean tailSwish;
+        public boolean ridden;
+        /** Magma cubes: the squish factor that spreads the slabs apart. */
+        public float squish;
+        /** Withers: the side heads' aim, yaw (absolute, degrees) and pitch. */
+        public final float[] sideHeadYaw = new float[2];
+        public final float[] sideHeadPitch = new float[2];
+        /** Guardians: spine extension (1 out, 0 pulled in), tail phase, and the eye's offset toward the viewer. */
+        public float spikes = 1f;
+        public float tailPhase;
         public boolean eyeLow;
         public float eyeX;
         /** Ender dragons: wing-beat phase, and yaw (degrees) and height for history offsets 0..23, interleaved. */
@@ -89,8 +99,10 @@ public final class EntityModels {
             sneaking = angry = tame = carrying = screaming = hanging = sitting = sprinting = false;
             entityId = ticksExisted = 0;
             jump = rearing = grazing = 0f;
-            foal = saddled = chested = longEars = retracted = eyeLow = false;
-            eyeX = animTime = 0f;
+            foal = saddled = chested = longEars = tailSwish = ridden = eyeLow = false;
+            eyeX = animTime = mouth = squish = tailPhase = 0f;
+            spikes = 1f;
+            sideHeadYaw[0] = sideHeadYaw[1] = sideHeadPitch[0] = sideHeadPitch[1] = 0f;
             heldItem = 0;
             aimedBow = false;
             riding = false;

@@ -1,0 +1,34 @@
+# build output
+.gradle/
+.kotlin/
+**/build/
+
+# IDE and OS files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# read-only upstream checkouts
+external/
+
+# agent handoff notes
+docs/handoff/
+
+# logs, crash dumps, secrets
+run/
+logs/
+*.log
+*.hprof
+hs_err_pid*
+.env
+.env.*
+!.env.example
+local.properties
+
+# run-settings directories left at the root by test runs
+/wayland/
+/x11/
+/low_latency/
+/uncapped/

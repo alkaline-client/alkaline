@@ -87,6 +87,15 @@ final class MobSelector {
                 choice.texture = "entity/endermite";
                 choice.deathRotation = 180f;
             }
+            case EntityTypes.MAGMA_CUBE -> {
+                choice.kind = EntityModels.Kind.MAGMA_CUBE;
+                choice.texture = "entity/slime/magmacube";
+                choice.scale = Math.max(1, entity.metadata.getByte(16, 1));
+            }
+            case EntityTypes.SNOW_GOLEM -> {
+                choice.kind = EntityModels.Kind.SNOW_GOLEM;
+                choice.texture = "entity/snowman";
+            }
             default -> {
                 return false;
             }

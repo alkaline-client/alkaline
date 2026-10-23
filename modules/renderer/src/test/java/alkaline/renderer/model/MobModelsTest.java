@@ -72,4 +72,40 @@ class MobModelsTest {
         assertEquals(4, endermite.partCount());
         assertEquals(new ModelBox(0, 5, -3, 0, -2.5f, 6, 4, 5, 0f, false), firstBox(endermite, "segment1"));
     }
+
+    @Test
+    void magmaCubeIsACoreAndEightSlabs() {
+        CuboidModel cube = model(EntityModels.Kind.MAGMA_CUBE);
+        assertEquals(9, cube.partCount());
+        assertEquals(new ModelBox(0, 16, -2, 18, -2, 4, 4, 4, 0f, false), firstBox(cube, "core"));
+        assertEquals(new ModelBox(24, 19, -4, 19, -4, 8, 1, 8, 0f, false), firstBox(cube, "segment3"));
+    }
+
+    @Test
+    void snowGolemArmsSwingWithTheBodyYaw() {
+        CuboidModel golem = model(EntityModels.Kind.SNOW_GOLEM);
+        assertEquals(5, golem.partCount());
+        assertEquals(new ModelBox(0, 36, -6, -12, -6, 12, 12, 12, -0.5f, false), firstBox(golem, "bottom_body"));
+        ModelPose pose = new ModelPose(golem);
+        EntityModels.Motion motion = new EntityModels.Motion();
+        EntityModels.animate(EntityModels.Kind.SNOW_GOLEM, motion, pose);
+        assertEquals(5f, pose.pivotX(MobModels.SNOW_RIGHT_HAND), 1e-6f);
+        assertEquals(1f, pose.rotationZ(MobModels.SNOW_RIGHT_HAND), 1e-6f);
+    }
+
+    @Test
+    void zombieVillagerKeepsTheBipedPartOrder() {
+        CuboidModel zombie = model(EntityModels.Kind.ZOMBIE_VILLAGER);
+        assertEquals(EntityModels.BIPED_PARTS, zombie.partCount());
+        assertEquals(EntityModels.HAT, zombie.partIndex("hat"));
+        assertEquals(2, zombie.parts().get(EntityModels.HEAD).boxes().size());
+        assertEquals(new ModelBox(24, 32, -1, -3, -6, 2, 4, 2, 0f, false), zombie.parts().get(0).boxes().get(1));
+    }
+
+    @Test
+    void mooshroomMushroomsAreSixCrossedPlanes() {
+        CuboidModel mushrooms = model(EntityModels.Kind.MOOSHROOM_MUSHROOMS);
+        assertEquals(7, mushrooms.partCount());
+        assertEquals(16, mushrooms.textureWidth());
+    }
 }

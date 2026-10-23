@@ -30,7 +30,8 @@ public final class EntityModels {
     public enum Kind {
         PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, SKELETON, ENDERMAN, CREEPER, SPIDER, PIG,
         COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
-        WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE
+        WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE,
+        MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -201,7 +202,7 @@ public final class EntityModels {
         };
     }
 
-    private static CuboidModel biped(String id, int width, int height, float inflate) {
+    static CuboidModel biped(String id, int width, int height, float inflate) {
         return CuboidModel.builder(id, width, height)
                 .part("head", null, 0, 0, 0, box(0, 0, -4, -8, -4, 8, 8, 8, inflate))
                 .part("body", null, 0, 0, 0, box(16, 16, -4, 0, -2, 8, 12, 4, inflate))
@@ -294,7 +295,7 @@ public final class EntityModels {
         float swing = motion.limbSwing * 0.6662f;
         float amount = motion.limbSwingAmount;
         switch (kind) {
-            case PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER -> biped(motion, pose);
+            case PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, ZOMBIE_VILLAGER -> biped(motion, pose);
             case SKELETON -> {
                 biped(motion, pose);
                 zombieArms(motion, pose);

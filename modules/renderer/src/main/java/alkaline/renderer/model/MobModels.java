@@ -34,6 +34,10 @@ final class MobModels {
             case OCELOT -> ocelot();
             case SILVERFISH -> segments("silverfish", SILVERFISH_BOXES, SILVERFISH_UV, true);
             case ENDERMITE -> segments("endermite", ENDERMITE_BOXES, ENDERMITE_UV, false);
+            case MAGMA_CUBE -> magmaCube();
+            case SNOW_GOLEM -> snowGolem();
+            case ZOMBIE_VILLAGER -> zombieVillager();
+            case MOOSHROOM_MUSHROOMS -> mushrooms();
             default -> throw new IllegalArgumentException("No mob model for " + kind);
         };
     }
@@ -48,6 +52,9 @@ final class MobModels {
             case OCELOT -> ocelot(motion, pose, headYaw, headPitch);
             case SILVERFISH -> wriggle(motion, pose, SILVERFISH_BOXES.length, 0.05f, 0.2f, true);
             case ENDERMITE -> wriggle(motion, pose, ENDERMITE_BOXES.length, 0.01f, 0.1f, false);
+            case SNOW_GOLEM -> snowGolem(pose, headYaw, headPitch);
+            case MAGMA_CUBE, MOOSHROOM_MUSHROOMS -> {
+            }
             default -> throw new IllegalArgumentException("No mob animation for " + kind);
         }
     }
@@ -286,6 +293,81 @@ final class MobModels {
             pose.rotation(segments + 2, 0, pose.rotationY(1), 0);
             pose.pivot(segments + 2, pose.pivotX(1), pose.pivotY(segments + 2), pose.pivotZ(segments + 2));
         }
+    }
+
+    // ---- magma cube, snow golem, zombie villager, mooshroom mushrooms -------------------------------------------
+
+    /** ModelMagmaCube: the core, then eight one-texel slabs (its squish offsets are zero without a squish factor). */
+    private static CuboidModel magmaCube() {
+        CuboidModel.Builder builder = CuboidModel.builder("magma_cube", 64, 32)
+                .part("core", null, 0, 0, 0, box(0, 16, -2, 18, -2, 4, 4, 4, 0));
+        for (int index = 0; index < 8; index++) {
+            int u = index == 2 || index == 3 ? 24 : 0;
+            int v = index == 2 ? 10 : index == 3 ? 19 : index;
+            builder.part("segment" + index, null, 0, 0, 0, box(u, v, -4, 16 + index, -4, 8, 1, 8, 0));
+        }
+        return builder.build();
+    }
+
+    static final int SNOW_BODY = 0, SNOW_BOTTOM = 1, SNOW_HEAD = 2, SNOW_RIGHT_HAND = 3, SNOW_LEFT_HAND = 4;
+
+    /** ModelSnowMan: three inflate -0.5 snowballs and two stick arms, on a 64x64 texture. */
+    private static CuboidModel snowGolem() {
+        return CuboidModel.builder("snow_golem", 64, 64)
+                .part("body", null, 0, 13, 0, box(0, 16, -5, -10, -5, 10, 10, 10, -0.5f))
+                .part("bottom_body", null, 0, 24, 0, box(0, 36, -6, -12, -6, 12, 12, 12, -0.5f))
+                .part("head", null, 0, 4, 0, box(0, 0, -4, -8, -4, 8, 8, 8, -0.5f))
+                .part("right_hand", null, 0, 6, 0, box(32, 0, -1, 0, -1, 12, 2, 2, -0.5f))
+                .part("left_hand", null, 0, 6, 0, box(32, 0, -1, 0, -1, 12, 2, 2, -0.5f))
+                .build();
+    }
+
+    private static void snowGolem(ModelPose pose, float headYaw, float headPitch) {
+        pose.rotation(SNOW_HEAD, headPitch, headYaw, 0);
+        float bodyYaw = headYaw * 0.25f;
+        float s = sin(bodyYaw);
+        float c = cos(bodyYaw);
+        pose.rotation(SNOW_BODY, 0, bodyYaw, 0);
+        pose.rotation(SNOW_RIGHT_HAND, 0, bodyYaw, 1f);
+        pose.rotation(SNOW_LEFT_HAND, 0, PI + bodyYaw, -1f);
+        pose.pivot(SNOW_RIGHT_HAND, c * 5f, 6, -s * 5f);
+        pose.pivot(SNOW_LEFT_HAND, -c * 5f, 6, s * 5f);
+    }
+
+    /**
+     * ModelZombieVillager: a biped on a 64x64 sheet whose head is a villager's, with the nose, then the usual hat
+     * part so armor and child layouts treat it as any biped.
+     */
+    private static CuboidModel zombieVillager() {
+        return CuboidModel.builder("zombie_villager", 64, 64)
+                .part("head", null, 0, 0, 0, box(0, 32, -4, -10, -4, 8, 10, 8, 0), box(24, 32, -1, -3, -6, 2, 4, 2, 0))
+                .part("body", null, 0, 0, 0, box(16, 16, -4, 0, -2, 8, 12, 4, 0))
+                .part("right_arm", null, -5, 2, 0, box(40, 16, -3, -2, -2, 4, 12, 4, 0))
+                .part("left_arm", null, 5, 2, 0, mirrored(40, 16, -1, -2, -2, 4, 12, 4, 0))
+                .part("right_leg", null, -1.9f, 12, 0, box(0, 16, -2, 0, -2, 4, 12, 4, 0))
+                .part("left_leg", null, 1.9f, 12, 0, mirrored(0, 16, -2, 0, -2, 4, 12, 4, 0))
+                .part("hat", "head", 0, 0, 0, box(32, 0, -4, -8, -4, 8, 8, 8, 0.5f))
+                .build();
+    }
+
+    /**
+     * LayerMooshroomMushroom as geometry: three red mushrooms (two crossed planes each, the block texture's 16x16
+     * sheet), two standing on the back and one on the head. Positions are the layer's translations and 42, 84 and
+     * 12 degree turns re-expressed in model units; only part 0 (the head) takes the cow's pose.
+     */
+    private static CuboidModel mushrooms() {
+        float quarter = PI / 4f;
+        float back = 42f * DEGREES;
+        CuboidModel.Builder builder = CuboidModel.builder("mooshroom_mushrooms", 16, 16)
+                .part("head", null, 0, 4, -8);
+        ModelBox plane = box(0, 0, -8, -16, 0, 16, 16, 0, 0);
+        builder.part("head_a", "head", 0, -3.2f, -3.2f, 0, 12f * DEGREES + quarter, 0, plane)
+                .part("head_b", "head", 0, -3.2f, -3.2f, 0, 12f * DEGREES - quarter, 0, plane)
+                .part("back1_a", null, 3.2f, 2.4f, 8, 0, back + quarter, 0, plane)
+                .part("back1_b", null, 3.2f, 2.4f, 8, 0, back - quarter, 0, plane)
+                .part("back2_a", null, -2.03f, 2.4f, -0.2f, 0, 2 * back + quarter, 0, plane)
+                .part("back2_b", null, -2.03f, 2.4f, -0.2f, 0, 2 * back - quarter, 0, plane);
+        return builder.build();
     }
 
     // ---- helpers -------------------------------------------------------------------------------------------

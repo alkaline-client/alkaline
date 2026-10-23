@@ -479,8 +479,9 @@ final class EntityView implements AutoCloseable {
                 }
             }
             case EntityTypes.ZOMBIE, EntityTypes.GIANT -> {
-                kind = EntityModels.Kind.BIPED;
-                texture = texture("entity/zombie/zombie");
+                boolean villager = entity.metadata.getByte(13, 0) == 1;
+                kind = villager ? EntityModels.Kind.ZOMBIE_VILLAGER : EntityModels.Kind.BIPED;
+                texture = texture(villager ? "entity/zombie/zombie_villager" : "entity/zombie/zombie");
                 biped = zombieArms = true;
                 scale = entity.type == EntityTypes.GIANT ? 6f : 1f;
             }
@@ -519,6 +520,10 @@ final class EntityView implements AutoCloseable {
             case EntityTypes.COW, EntityTypes.MOOSHROOM -> {
                 kind = EntityModels.Kind.COW;
                 texture = texture(entity.type == EntityTypes.COW ? "entity/cow/cow" : "entity/cow/mooshroom");
+                if (entity.type == EntityTypes.MOOSHROOM) {
+                    extraKind = EntityModels.Kind.MOOSHROOM_MUSHROOMS;
+                    extraTexture = "blocks/mushroom_red";
+                }
             }
             case EntityTypes.SHEEP -> {
                 kind = EntityModels.Kind.SHEEP;
@@ -636,9 +641,13 @@ final class EntityView implements AutoCloseable {
             VulkanTexture extra = texture(extraTexture);
             ModelPose extraPose = poses.get(extraKind);
             if (extra != null && !child && !invisible) {
-                extraPose.copyFrom(pose, Math.min(pose.model().partCount(), extraPose.model().partCount()));
+                extraPose.copyFrom(pose, extraKind == EntityModels.Kind.MOOSHROOM_MUSHROOMS ? 1
+                        : Math.min(pose.model().partCount(), extraPose.model().partCount()));
                 models.submit(gpu.get(extraKind), extra, extraPose, root, extraTint, overlay, light);
             }
+        }
+        if (kind == EntityModels.Kind.SNOW_GOLEM && !invisible) {
+            renderPumpkinHead(pose, light);
         }
         if (biped && !child) {
             renderArmor(entity, pose, light, hit.tintArmor() ? overlay : 0);
@@ -841,6 +850,28 @@ final class EntityView implements AutoCloseable {
         Mat4.scale(part, 0.5f, 0.5f, 0.5f, part);
         Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
         submitItem(held, stack, part, light);
+    }
+
+    /** LayerSnowmanHead: a pumpkin block on the head, 0.625 scale, turned to face forward. */
+    private void renderPumpkinHead(ModelPose pose, int light) {
+        ItemStack pumpkin = new ItemStack(86, 1, 0, null);
+        GpuItem block = gpuItem(catalog.model(pumpkin, -1, false));
+        if (block == null) {
+            return;
+        }
+        PoseMath.resolve(pose, root, matrices);
+        int base = 2 * PoseMath.FLOATS_PER_PART; // the golem's head is part 2
+        Mat4.identity(part);
+        for (int row = 0; row < 3; row++) {
+            for (int column = 0; column < 4; column++) {
+                part[column * 4 + row] = matrices[base + row * 4 + column];
+            }
+        }
+        Mat4.translate(part, 0f, -0.34375f, 0f, part);
+        Mat4.rotate(part, (float) Math.PI, 0f, 1f, 0f, part);
+        Mat4.scale(part, 0.625f, -0.625f, -0.625f, part);
+        Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
+        submitItem(block, pumpkin, part, light);
     }
 
     /** ItemCameraTransforms.applyTransform. */

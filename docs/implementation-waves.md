@@ -439,7 +439,7 @@ Read docs/agent-brief.md first. You integrate wave 1. You are the only session a
 | 2A Objects | Sonnet High | new object model files, the object branch of `EntityView` | 25641 |
 | 2B Block breaking | Sonnet High | new break-overlay files in renderer and world | 25642 |
 | 2C CTM completion | Opus High | `ConnectedTextures`, `ChunkMesher`, `BlockPalette` | 25643 |
-| 2D Server resource packs | Opus Medium | `ResourcePacks`, its new download code, its prompt screen | 25644 |
+| 2D Server resource packs | **Done** on `wave2/2D` (planning session) | `ResourcePacks`, its new download code, its prompt screen | 25644 |
 | 2E Remaining screens | **Already built**: skip | new screen files in `modules/ui` | 25645 |
 | 2F Small parity fixes | Haiku Extra | `LocalPlayer` and input timing only | 25646 |
 
@@ -495,7 +495,7 @@ Read docs/agent-brief.md first and follow it. Task id 2C, branch wave2/2C, serve
 </done_when>
 ```
 
-### 2D Server resource packs (Opus 5.5 Medium)
+### 2D Server resource packs (done on `wave2/2D` by the planning session)
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 2D, branch wave2/2D, server port 25644.

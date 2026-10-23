@@ -29,7 +29,8 @@ public final class EntityModels {
     /** Every model the entity renderer draws. */
     public enum Kind {
         PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, SKELETON, ENDERMAN, CREEPER, SPIDER, PIG,
-        COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST
+        COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
+        WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -57,10 +58,21 @@ public final class EntityModels {
         /** Endermen: carrying a block, screaming. */
         public boolean carrying;
         public boolean screaming;
+        /** Entity id and tick count, for animations that run on whole ticks per entity (the witch's nose). */
+        public int entityId;
+        public int ticksExisted;
+        /** Bats hanging from a ceiling; tameable cats sitting; mobs sprinting. */
+        public boolean hanging;
+        public boolean sitting;
+        public boolean sprinting;
+        /** Rabbit hop progress, 0..1 through the jump. */
+        public float jump;
 
         public void reset() {
             limbSwing = limbSwingAmount = ageInTicks = headYaw = headPitch = swingProgress = 0f;
-            sneaking = angry = tame = carrying = screaming = false;
+            sneaking = angry = tame = carrying = screaming = hanging = sitting = sprinting = false;
+            entityId = ticksExisted = 0;
+            jump = 0f;
             heldItem = 0;
             aimedBow = false;
             riding = false;
@@ -185,6 +197,7 @@ public final class EntityModels {
             case BLAZE -> blaze();
             case SQUID -> squid();
             case GHAST -> ghast();
+            default -> MobModels.build(kind);
         };
     }
 
@@ -350,6 +363,7 @@ public final class EntityModels {
                     pose.rotation(tentacle, 0.2f * sin(motion.ageInTicks * 0.3f + (tentacle - 1)) + 0.4f, 0, 0);
                 }
             }
+            default -> MobModels.animate(kind, motion, pose);
         }
     }
 

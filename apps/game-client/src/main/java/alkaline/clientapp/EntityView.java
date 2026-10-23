@@ -109,6 +109,7 @@ final class EntityView implements AutoCloseable {
     private float viewYaw;
     private float viewPitch;
     private final EntityModels.Motion motion = new EntityModels.Motion();
+    private final MobSelector.Choice choice = new MobSelector.Choice();
     private final float[] root = new float[16];
     private final float[] part = new float[16];
     private final float[] item = new float[16];
@@ -466,6 +467,7 @@ final class EntityView implements AutoCloseable {
         int extraTint = 0xFFFFFFFF;
         EntityModels.Kind extraKind = null;
         motion.reset();
+        float deathRotation = 90f;
         switch (entity.category == Entity.Category.PLAYER ? -1 : entity.type) {
             case -1 -> {
                 texture = skin(entity.uuid, players.get(entity.uuid));
@@ -572,7 +574,16 @@ final class EntityView implements AutoCloseable {
                 scale = 4.5f;
             }
             default -> {
-                return; // Mobs without a model yet (witch, bat, horse, rabbit...) are not drawn.
+                if (!MobSelector.select(entity, partialTick, motion, choice)) {
+                    return; // Mobs without a model yet are not drawn.
+                }
+                kind = choice.kind;
+                texture = texture(choice.texture);
+                scale = choice.scale;
+                y += choice.lift;
+                biped = choice.biped;
+                zombieArms = choice.zombieArms;
+                deathRotation = choice.deathRotation;
             }
         }
         if (texture == null) {
@@ -591,6 +602,8 @@ final class EntityView implements AutoCloseable {
         motion.onGround = entity.onGround;
         motion.heldItem = entity.equipment[0] != null ? 1 : 0;
         motion.riding = entity.vehicle >= 0;
+        motion.entityId = entity.id;
+        motion.ticksExisted = entity.ticksExisted;
         if (entity.category == Entity.Category.PLAYER && entity.usingItem() && entity.equipment[0] != null) {
             // RenderPlayer.setModelVisibilities: blocking raises the sword, drawing a bow aims both arms.
             int heldId = entity.equipment[0].id();
@@ -608,7 +621,7 @@ final class EntityView implements AutoCloseable {
         if (zombieArms) {
             EntityModels.zombieArms(motion, pose);
         }
-        livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, biped && motion.sneaking);
+        livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, biped && motion.sneaking, deathRotation);
         int overlay = entity.hurtTime > 0 || entity.deathTime > 0 ? hit.argb() : 0;
         boolean child = EntityTypes.child(entity);
         // RendererLivingEntity.renderModel: an invisible body is skipped; its armor and held item still draw.
@@ -640,13 +653,13 @@ final class EntityView implements AutoCloseable {
      * from model space (y down) with the renderer's scale, and lifted by vanilla's 1.5078125.
      */
     private void livingRoot(float x, float y, float z, float bodyYaw, Entity entity, float partialTick, float scale,
-                            boolean sneakingBiped) {
+                            boolean sneakingBiped, float deathRotation) {
         Mat4.identity(root);
         Mat4.translate(root, x, y, z, root);
         Mat4.rotate(root, (float) Math.toRadians(180.0 - bodyYaw), 0f, 1f, 0f, root);
         if (entity.deathTime > 0) {
             float tilt = (float) Math.sqrt(Math.max(0f, (entity.deathTime + partialTick - 1f) / 20f * 1.6f));
-            Mat4.rotate(root, (float) Math.toRadians(Math.min(1f, tilt) * 90f), 0f, 0f, 1f, root);
+            Mat4.rotate(root, (float) Math.toRadians(Math.min(1f, tilt) * deathRotation), 0f, 0f, 1f, root);
         }
         Mat4.scale(root, -scale, -scale, scale, root);
         Mat4.translate(root, 0f, -1.5078125f, 0f, root);
@@ -687,6 +700,18 @@ final class EntityView implements AutoCloseable {
                 headScale = 1f;
                 headLift = 5f / 16f;
                 headForward = 2f / 16f;
+                headParts = new int[]{0};
+            }
+            case RABBIT -> { // ModelRabbit.render: head, ears and nose lowered, the rest halved
+                headScale = 1f;
+                headLift = 5f / 16f;
+                headForward = 2f / 16f;
+                headParts = new int[]{7, 8, 9, 11};
+            }
+            case OCELOT -> { // ModelOcelot.render
+                headScale = 0.75f;
+                headLift = 10f / 16f;
+                headForward = 4f / 16f;
                 headParts = new int[]{0};
             }
             default -> {

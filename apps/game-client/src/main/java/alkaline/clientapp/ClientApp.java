@@ -75,6 +75,13 @@ final class ClientApp implements AutoCloseable {
     private final String startupPacks;
     /** Bumped per Apply, so only the latest reload swaps in. */
     private final java.util.concurrent.atomic.AtomicInteger packReload = new java.util.concurrent.atomic.AtomicInteger();
+    /** The player's pack selection as last applied; a server pack layers over it. Render thread. */
+    private String appliedPacks;
+    private final ServerPacks serverPacks;
+    /** The current server's accepted pack, above the player's own; null when none. Render thread. */
+    private Path serverPack;
+    /** Bumped when a server pack is offered or the player leaves, so older downloads stop and are ignored. */
+    private final java.util.concurrent.atomic.AtomicInteger serverPackRound = new java.util.concurrent.atomic.AtomicInteger();
     private MenuBackground background;
     private boolean loaded;
     private float mouseX;
@@ -154,6 +161,8 @@ final class ClientApp implements AutoCloseable {
                         MinecraftInstallation.gameDirectory().resolve("resourcepacks")));
         String selection = config.snapshot().get(ClientSettings.RESOURCE_PACKS);
         startupPacks = selection;
+        appliedPacks = selection;
+        serverPacks = new ServerPacks(packsHome.resolve("server-resource-packs"));
         assetLoad = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
             vanillaAssets = openVanillaAssets();
             return vanillaAssets == null ? null : alkaline.renderer.asset.ResourcePacks.layer(selected(selection),
@@ -727,6 +736,7 @@ final class ClientApp implements AutoCloseable {
                 menu.openSign(java.util.List.of(lines));
                 return kotlin.Unit.INSTANCE;
             }));
+            created.onResourcePackOffered((url, hash) -> serverPackOffered(created, url, hash));
             session.sendClientSettings("en_US", config.snapshot().get(ClientSettings.WORLD_RENDER_DISTANCE));
             play = created;
             menuBackground = background;
@@ -746,6 +756,12 @@ final class ClientApp implements AutoCloseable {
 
     /** Leaves the game (or reports that it ended) and restores the menu. Render thread, outside frames. */
     private void endGame(String reason) {
+        // Minecraft.loadWorld(null) clears the server's pack: stop its download and drop it from the assets.
+        serverPackRound.incrementAndGet();
+        if (serverPack != null) {
+            serverPack = null;
+            reloadResourcePacks(appliedPacks);
+        }
         if (play != null) {
             play.close();
             play = null;
@@ -938,29 +954,158 @@ final class ClientApp implements AutoCloseable {
     }
 
     /**
+     * The server offered a resource pack (NetHandlerPlayClient.handleResourcePack): a saved server's choice
+     * applies, otherwise the player is asked. Render thread.
+     */
+    private void serverPackOffered(PlaySession session, String url, String hash) {
+        if (!ServerPacks.downloadable(url)) {
+            // level:// names a singleplayer world's pack, and Alkaline has no saves to read it from.
+            System.out.println("[resource pack] cannot use " + url);
+            session.resourcePackStatus(hash, alkaline.game.net.ServerSession.PACK_FAILED);
+            return;
+        }
+        alkaline.client.servers.ServerList list = services.servers();
+        alkaline.client.servers.ServerEntry entry = list.find(joinedAddress);
+        switch (entry == null ? alkaline.client.servers.ServerEntry.Packs.PROMPT : entry.packs()) {
+            case ENABLED -> useServerPack(session, url, hash);
+            case DISABLED -> session.resourcePackStatus(hash, alkaline.game.net.ServerSession.PACK_DECLINED);
+            case PROMPT -> {
+                String name = entry != null ? entry.name() : joinedAddress;
+                ui.post(() -> {
+                    menu.offerServerPack(name, use -> {
+                        mainThreadTasks.add(() -> serverPackAnswered(session, entry, use, url, hash));
+                        return kotlin.Unit.INSTANCE;
+                    });
+                    return kotlin.Unit.INSTANCE;
+                });
+            }
+        }
+    }
+
+    /** The player chose; a saved server remembers it (ServerList.func_147414_b). Render thread. */
+    private void serverPackAnswered(PlaySession session, alkaline.client.servers.ServerEntry entry, boolean use,
+            String url, String hash) {
+        if (entry != null) {
+            services.servers().replace(entry, entry.withPacks(use ? alkaline.client.servers.ServerEntry.Packs.ENABLED
+                    : alkaline.client.servers.ServerEntry.Packs.DISABLED));
+        }
+        if (play != session) {
+            return;
+        }
+        if (use) {
+            useServerPack(session, url, hash);
+        } else {
+            session.resourcePackStatus(hash, alkaline.game.net.ServerSession.PACK_DECLINED);
+        }
+    }
+
+    /**
+     * Accepts the pack, fetches it off the render thread (or reuses the stored copy whose hash matches), layers it
+     * over the player's packs, and reports loaded or failed. Render thread.
+     */
+    private void useServerPack(PlaySession session, String url, String hash) {
+        session.resourcePackStatus(hash, alkaline.game.net.ServerSession.PACK_ACCEPTED);
+        int round = serverPackRound.incrementAndGet();
+        serverPackProgress("Downloading server pack", -1f);
+        alkaline.client.account.MinecraftSession account = services.accounts().session();
+        String username = account != null ? account.profile().name() : "Player";
+        String uuid = account != null ? account.profile().uuid() : "";
+        Thread.ofVirtual().name("alkaline-server-pack").start(() -> {
+            try {
+                Path file = serverPacks.cached(hash);
+                if (file == null) {
+                    int[] shown = {-1};
+                    file = serverPacks.download(url, hash, username, uuid, (received, total) -> {
+                        // Only whole percents (or megabytes, size unknown) reach the UI.
+                        int step = total > 0 ? (int) (received * 100 / total) : (int) (received >> 20);
+                        if (step != shown[0]) {
+                            shown[0] = step;
+                            serverPackProgress(total > 0 ? "Downloading server pack" : "Downloading server pack · "
+                                    + step + " MB", total > 0 ? step / 100f : -1f);
+                        }
+                    }, () -> round != serverPackRound.get());
+                }
+                Path ready = file;
+                mainThreadTasks.add(() -> {
+                    if (round != serverPackRound.get() || play != session) {
+                        return;
+                    }
+                    serverPack = ready;
+                    serverPackProgress("Applying server pack", -1f);
+                    reloadResourcePacks(appliedPacks, loaded -> {
+                        if (play == session) {
+                            session.resourcePackStatus(hash, loaded ? alkaline.game.net.ServerSession.PACK_LOADED
+                                    : alkaline.game.net.ServerSession.PACK_FAILED);
+                        }
+                        serverPackProgress(null, 0f);
+                    });
+                });
+            } catch (IOException | RuntimeException failure) {
+                System.err.println("[resource pack] " + url + " failed: " + failure.getMessage());
+                mainThreadTasks.add(() -> {
+                    if (round == serverPackRound.get() && play == session) {
+                        session.resourcePackStatus(hash, alkaline.game.net.ServerSession.PACK_FAILED);
+                        serverPackProgress(null, 0f);
+                    }
+                });
+            }
+        });
+    }
+
+    /** Shows the server pack's progress ({@code status} null hides it); any thread. */
+    private void serverPackProgress(String status, float progress) {
+        ui.post(() -> {
+            if (status == null) {
+                menu.setServerPackProgress(null);
+            } else {
+                menu.setServerPackStatus(status);
+                menu.setServerPackProgress(progress);
+            }
+            return kotlin.Unit.INSTANCE;
+        });
+    }
+
+    /**
      * Applies a pack selection: the layered assets, block palette and fonts load off the render thread, then
      * {@link #swapAssets} replaces everything drawn from the old ones. A newer Apply supersedes an older one.
      */
     private void reloadResourcePacks(String selection) {
+        reloadResourcePacks(selection, loaded -> { });
+    }
+
+    /** As {@link #reloadResourcePacks(String)}, then tells {@code done} on the render thread whether it applied. */
+    private void reloadResourcePacks(String selection, java.util.function.Consumer<Boolean> done) {
         AssetSource vanilla = vanillaAssets;
         if (vanilla == null) {
+            done.accept(false);
             return;
         }
+        Path server = serverPack;
         int reload = packReload.incrementAndGet();
         ui.post(() -> {
             menu.setResourcePackStatus("Reloading assets…");
             return kotlin.Unit.INSTANCE;
         });
         Thread.ofPlatform().name("alkaline-pack-reload").daemon().start(() -> {
-            AssetSource layered = alkaline.renderer.asset.ResourcePacks.layer(selected(selection), vanilla);
+            java.util.List<alkaline.renderer.asset.ResourcePacks.Pack> packs = new java.util.ArrayList<>();
+            if (server != null) {
+                packs.add(new alkaline.renderer.asset.ResourcePacks.Pack("server/" + server.getFileName(), server,
+                        "Server resource pack", "", null, alkaline.renderer.asset.ResourcePacks.FORMAT));
+            }
+            packs.addAll(selected(selection));
+            AssetSource layered = alkaline.renderer.asset.ResourcePacks.layer(packs, vanilla);
             try {
                 BlockPalette loadedPalette = BlockPalette.load(layered);
                 ChatText loadedText = ChatText.load(layered);
                 if (reload != packReload.get()) {
                     layered.close();
+                    mainThreadTasks.add(() -> done.accept(false));
                     return;
                 }
-                mainThreadTasks.add(() -> swapAssets(layered, loadedPalette, loadedText, selection));
+                mainThreadTasks.add(() -> {
+                    swapAssets(layered, loadedPalette, loadedText, selection);
+                    done.accept(true);
+                });
             } catch (IOException | RuntimeException failure) {
                 try {
                     layered.close();
@@ -968,6 +1113,7 @@ final class ClientApp implements AutoCloseable {
                     // Reported below.
                 }
                 String reason = failure.getMessage();
+                mainThreadTasks.add(() -> done.accept(false));
                 ui.post(() -> {
                     menu.setResourcePackStatus("Could not load the packs: " + reason);
                     return kotlin.Unit.INSTANCE;
@@ -980,6 +1126,7 @@ final class ClientApp implements AutoCloseable {
     private void swapAssets(AssetSource layered, BlockPalette loadedPalette, ChatText loadedText, String selection) {
         AssetSource previous = assets;
         assets = layered;
+        appliedPacks = selection;
         palette = loadedPalette;
         chatText = loadedText;
         itemCatalog.assets(layered);

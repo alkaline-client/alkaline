@@ -25,7 +25,7 @@ enum class PlayPhase { MENU, CONNECTING, PLAYING, PAUSED }
  * What covers the game while playing: nothing, the ClickGUI, the HUD editor, a container screen (the inventory
  * or a window the server opened), or the sign editor.
  */
-enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN }
+enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN, SERVER_PACK }
 
 /**
  * A container screen's input: pointer events by window slot ({@code -999} outside the window, -1 inside it but
@@ -160,7 +160,7 @@ class MenuController @JvmOverloads constructor(
     /** Opens or closes the ClickGUI in game (its key, or the pause card). Call on the UI thread. */
     fun toggleClickGui() {
         when {
-            overlay == Overlay.INVENTORY || overlay == Overlay.SIGN -> {}
+            overlay == Overlay.INVENTORY || overlay == Overlay.SIGN || overlay == Overlay.SERVER_PACK -> {}
             overlay != Overlay.NONE -> closeOverlay()
             profiles != null && (play == PlayPhase.PLAYING || play == PlayPhase.PAUSED) -> overlay = Overlay.CLICK_GUI
         }
@@ -191,6 +191,40 @@ class MenuController @JvmOverloads constructor(
             overlay = Overlay.NONE
             if (play == PlayPhase.PLAYING) actions.resumeGame()
         }
+    }
+
+    /** A server's resource pack offer waiting for the player: the server's name and where the answer goes. */
+    class ServerPackOffer(val server: String, internal val answer: (Boolean) -> Unit)
+
+    var serverPackOffer by mutableStateOf<ServerPackOffer?>(null)
+        private set
+
+    /** The server pack being fetched or applied: null when none, a negative value while its size is unknown. */
+    var serverPackProgress by mutableStateOf<Float?>(null)
+
+    /** What the server pack is doing, shown beside [serverPackProgress]. */
+    var serverPackStatus by mutableStateOf("")
+
+    /**
+     * The server offered a resource pack and the player has not chosen for this server (GuiYesNo in
+     * NetHandlerPlayClient.handleResourcePack). Escape declines, as No does.
+     */
+    fun offerServerPack(server: String, answer: (Boolean) -> Unit) {
+        serverPackOffer?.answer?.invoke(false)
+        closeOverlay()
+        serverPackOffer = ServerPackOffer(server, answer)
+        overlay = Overlay.SERVER_PACK
+    }
+
+    /** The player answered the offer. */
+    fun answerServerPack(use: Boolean) {
+        val offer = serverPackOffer ?: return
+        serverPackOffer = null
+        if (overlay == Overlay.SERVER_PACK) {
+            overlay = Overlay.NONE
+            if (play == PlayPhase.PLAYING) actions.resumeGame()
+        }
+        offer.answer(use)
     }
 
     /** The sign editor's four lines while it is open. */
@@ -229,6 +263,10 @@ class MenuController @JvmOverloads constructor(
         if (overlay == Overlay.NONE) return
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
         if (overlay == Overlay.SIGN) actions.signDone(signLines)
+        if (overlay == Overlay.SERVER_PACK) {
+            answerServerPack(false)
+            return
+        }
         typing = false
         overlay = Overlay.NONE
         if (play == PlayPhase.PLAYING) actions.resumeGame()
@@ -319,6 +357,8 @@ class MenuController @JvmOverloads constructor(
     /** The session ended; back to the server list, with [reason] shown when it was not the player's choice. */
     fun left(reason: String?) {
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
+        serverPackOffer = null
+        serverPackProgress = null
         typing = false
         overlay = Overlay.NONE
         play = PlayPhase.MENU
@@ -367,7 +407,7 @@ class MenuController @JvmOverloads constructor(
                 closeHudEditor()
                 return true
             }
-            Overlay.CLICK_GUI, Overlay.INVENTORY, Overlay.SIGN -> {
+            Overlay.CLICK_GUI, Overlay.INVENTORY, Overlay.SIGN, Overlay.SERVER_PACK -> {
                 closeOverlay()
                 return true
             }

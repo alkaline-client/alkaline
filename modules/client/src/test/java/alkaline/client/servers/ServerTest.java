@@ -93,4 +93,37 @@ class ServerTest {
                     new ServerEntry("lobby.example.net", "lobby.example.net")}, reloaded.servers().toArray());
         }
     }
+
+    @Test
+    void resourcePackChoicesImportFromVanillaAndPersist(@TempDir Path directory) throws IOException {
+        NBTTagCompound root = new NBTTagCompound();
+        NBTTagList list = new NBTTagList();
+        String[] names = {"Ask", "Use", "Never"};
+        for (int index = 0; index < names.length; index++) {
+            NBTTagCompound server = new NBTTagCompound();
+            server.setString("name", names[index]);
+            server.setString("ip", names[index].toLowerCase() + ".example.net");
+            if (index > 0) {
+                server.setBoolean("acceptTextures", index == 1);
+            }
+            list.appendTag(server);
+        }
+        root.setTag("servers", list);
+        Path vanilla = directory.resolve("servers.dat");
+        CompressedStreamTools.write(root, vanilla.toFile());
+        Path file = directory.resolve("servers.json");
+        try (ServerList servers = new ServerList(file, vanilla)) {
+            assertEquals(List.of(ServerEntry.Packs.PROMPT, ServerEntry.Packs.ENABLED, ServerEntry.Packs.DISABLED),
+                    servers.servers().stream().map(ServerEntry::packs).toList());
+            ServerEntry ask = servers.find(" ASK.example.net ");
+            assertNotNull(ask);
+            servers.replace(ask, ask.withPacks(ServerEntry.Packs.DISABLED));
+        }
+        Files.delete(vanilla);
+        try (ServerList reloaded = new ServerList(file, vanilla)) {
+            assertEquals(ServerEntry.Packs.DISABLED, reloaded.find("ask.example.net").packs());
+            assertEquals(ServerEntry.Packs.ENABLED, reloaded.find("use.example.net").packs());
+            assertEquals(null, reloaded.find("direct.example.net"));
+        }
+    }
 }

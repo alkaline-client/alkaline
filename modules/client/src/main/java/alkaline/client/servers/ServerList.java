@@ -101,6 +101,16 @@ public final class ServerList implements AutoCloseable {
         }
     }
 
+    /** The first saved entry for {@code address} (as typed when joining), or null for a direct connection. */
+    public ServerEntry find(String address) {
+        for (ServerEntry entry : servers) {
+            if (entry.address().equalsIgnoreCase(address.strip())) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
     /** Moves an entry by {@code delta} places, clamped to the list. */
     public synchronized void move(ServerEntry entry, int delta) {
         List<ServerEntry> next = new ArrayList<>(servers);
@@ -130,6 +140,9 @@ public final class ServerList implements AutoCloseable {
             Map<String, Object> value = new LinkedHashMap<>();
             value.put("name", entry.name());
             value.put("address", entry.address());
+            if (entry.packs() != ServerEntry.Packs.PROMPT) {
+                value.put("resourcePacks", entry.packs().name().toLowerCase(java.util.Locale.ROOT));
+            }
             entries.add(value);
         }
         Map<String, Object> root = new LinkedHashMap<>();
@@ -159,7 +172,8 @@ public final class ServerList implements AutoCloseable {
                     if (value instanceof Map<?, ?> entry && entry.get("address") instanceof String address
                             && result.size() < MAX_SERVERS) {
                         try {
-                            result.add(new ServerEntry(entry.get("name") instanceof String name ? name : "", address));
+                            result.add(new ServerEntry(entry.get("name") instanceof String name ? name : "", address,
+                                    packs(entry.get("resourcePacks"))));
                         } catch (IllegalArgumentException invalid) {
                             // Skip entries without an address.
                         }
@@ -170,6 +184,17 @@ public final class ServerList implements AutoCloseable {
             System.err.println("Reading " + file + " failed: " + failure.getMessage());
         }
         return result;
+    }
+
+    private static ServerEntry.Packs packs(Object saved) {
+        if (saved instanceof String name) {
+            for (ServerEntry.Packs packs : ServerEntry.Packs.values()) {
+                if (packs.name().equalsIgnoreCase(name)) {
+                    return packs;
+                }
+            }
+        }
+        return ServerEntry.Packs.PROMPT;
     }
 
     /** Vanilla's servers.dat: uncompressed NBT, {@code servers} list of {@code {name, ip}} compounds. */
@@ -188,7 +213,10 @@ public final class ServerList implements AutoCloseable {
                 NBTTagCompound server = list.getCompoundTagAt(index);
                 String address = server.getString("ip");
                 if (!address.isBlank()) {
-                    result.add(new ServerEntry(server.getString("name"), address));
+                    // ServerData.getNBTCompound: acceptTextures is absent while the player has not chosen.
+                    ServerEntry.Packs packs = !server.hasKey("acceptTextures") ? ServerEntry.Packs.PROMPT
+                            : server.getBoolean("acceptTextures") ? ServerEntry.Packs.ENABLED : ServerEntry.Packs.DISABLED;
+                    result.add(new ServerEntry(server.getString("name"), address, packs));
                 }
             }
         } catch (IOException | RuntimeException failure) {

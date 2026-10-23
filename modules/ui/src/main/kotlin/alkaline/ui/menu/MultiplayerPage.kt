@@ -37,6 +37,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -378,6 +381,7 @@ private fun ServerActions(
 private fun EditCard(entry: ServerEntry, onDone: (ServerEntry?) -> Unit) {
     var name by remember { mutableStateOf(entry.name()) }
     var address by remember { mutableStateOf(entry.address()) }
+    var packs by remember { mutableStateOf(entry.packs()) }
     val valid = ServerAddress.isValid(address)
     Surface(
         shape = RoundedCornerShape(24.dp),
@@ -387,11 +391,12 @@ private fun EditCard(entry: ServerEntry, onDone: (ServerEntry?) -> Unit) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             PillField(name, { name = it }, "Name", AlkalineIcons.Edit, Modifier.fillMaxWidth())
             PillField(address, { address = it }, "Address", AlkalineIcons.Globe, Modifier.fillMaxWidth(),
-                onSubmit = { if (valid) onDone(ServerEntry(name, address)) })
+                onSubmit = { if (valid) onDone(ServerEntry(name, address, packs)) })
+            PackChoice(packs) { packs = it }
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 TextButton(onClick = { onDone(null) }) { Text("Cancel") }
                 Spacer(Modifier.width(8.dp))
-                Button(onClick = { onDone(ServerEntry(name, address)) }, enabled = valid) { Text("Save") }
+                Button(onClick = { onDone(ServerEntry(name, address, packs)) }, enabled = valid) { Text("Save") }
             }
         }
     }
@@ -417,3 +422,26 @@ private fun EmptyServers(searching: Boolean) {
 /** A search term that is also a plausible address: a dotted host, a port, an IPv6 literal, or localhost. */
 private fun looksLikeAddress(text: String): Boolean =
     ServerAddress.isValid(text) && (text.contains('.') || text.contains(':') || text.equals("localhost", true))
+
+/** What the server's resource pack offers do: ask each time, use them, or decline them (vanilla's edit screen). */
+@Composable
+private fun PackChoice(packs: ServerEntry.Packs, onChange: (ServerEntry.Packs) -> Unit) {
+    val choices = listOf(ServerEntry.Packs.PROMPT to "Ask", ServerEntry.Packs.ENABLED to "Use", ServerEntry.Packs.DISABLED to "Never")
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(start = 4.dp)) {
+        Text("Server resource packs", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        SingleChoiceSegmentedButtonRow {
+            for ((index, choice) in choices.withIndex()) {
+                SegmentedButton(
+                    selected = packs == choice.first,
+                    onClick = { onChange(choice.first) },
+                    shape = SegmentedButtonDefaults.itemShape(index, choices.size),
+                    colors = SegmentedButtonDefaults.colors(
+                        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    ),
+                    label = { Text(choice.second) },
+                )
+            }
+        }
+    }
+}

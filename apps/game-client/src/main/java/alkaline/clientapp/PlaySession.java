@@ -356,6 +356,21 @@ public final class PlaySession implements AutoCloseable {
         windowOpenedByServer = action;
     }
 
+    /** Declines until the client handles offers (NetHandlerPlayClient.handleResourcePack). */
+    private java.util.function.BiConsumer<String, String> resourcePackOffered =
+            (url, hash) -> resourcePackStatus(hash, ServerSession.PACK_DECLINED);
+
+    /** The server offered a resource pack (its address and hash); the handler answers with {@link #resourcePackStatus}. */
+    void onResourcePackOffered(java.util.function.BiConsumer<String, String> action) {
+        resourcePackOffered = action;
+    }
+
+    /** Resource Pack Status: {@link ServerSession#PACK_ACCEPTED}, then loaded or failed, or declined. */
+    void resourcePackStatus(String hash, int status) {
+        System.out.println("[resource pack] status " + status + " (0 loaded, 1 declined, 2 failed, 3 accepted)");
+        session.sendResourcePackStatus(hash, status);
+    }
+
     void onSignEditorOpened(Consumer<String[]> action) {
         signEditorOpened = action;
     }
@@ -867,11 +882,7 @@ public final class PlaySession implements AutoCloseable {
                     }
                 }
             }
-            case ServerSession.ResourcePack pack -> {
-                // Server resource packs are not supported yet; vanilla answers a refusal the same way.
-                System.out.println("[resource pack] declined " + pack.url());
-                session.sendResourcePackStatus(pack.hash(), ServerSession.PACK_DECLINED);
-            }
+            case ServerSession.ResourcePack pack -> resourcePackOffered.accept(pack.url(), pack.hash());
             case ServerSession.PlayerListHeaderFooter tab -> {
                 playerListHeader = chat.legacy(tab.headerJson());
                 playerListFooter = chat.legacy(tab.footerJson());

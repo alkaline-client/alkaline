@@ -108,4 +108,25 @@ class MobModelsTest {
         assertEquals(7, mushrooms.partCount());
         assertEquals(16, mushrooms.textureWidth());
     }
+
+    @Test
+    void horseHasThirtyNineParts() {
+        CuboidModel horse = model(EntityModels.Kind.HORSE);
+        assertEquals(39, horse.partCount());
+        assertEquals(128, horse.textureWidth());
+        assertEquals(new ModelBox(0, 34, -5, -8, -19, 10, 10, 24, 0f, false), firstBox(horse, "body"));
+        assertEquals(HorseModels.HEAD, horse.partIndex("head"));
+        assertEquals(HorseModels.HEAD, horse.parts().get(HorseModels.HEAD_UPPER).parent());
+        assertEquals(HorseModels.HEAD_GROUP_END, horse.partIndex("left_chest"));
+    }
+
+    @Test
+    void rearingHorseRaisesTheHeadAndTilts() {
+        ModelPose pose = new ModelPose(model(EntityModels.Kind.HORSE));
+        EntityModels.Motion motion = new EntityModels.Motion();
+        motion.rearing = 1f;
+        EntityModels.animate(EntityModels.Kind.HORSE, motion, pose);
+        assertEquals(-6f, pose.pivotY(HorseModels.HEAD), 1e-5f);
+        assertEquals((float) Math.toRadians(-45), pose.rotationX(HorseModels.BODY), 1e-5f);
+    }
 }

@@ -38,6 +38,7 @@ final class MobModels {
             case SNOW_GOLEM -> snowGolem();
             case ZOMBIE_VILLAGER -> zombieVillager();
             case MOOSHROOM_MUSHROOMS -> mushrooms();
+            case HORSE -> HorseModels.build();
             default -> throw new IllegalArgumentException("No mob model for " + kind);
         };
     }
@@ -53,6 +54,7 @@ final class MobModels {
             case SILVERFISH -> wriggle(motion, pose, SILVERFISH_BOXES.length, 0.05f, 0.2f, true);
             case ENDERMITE -> wriggle(motion, pose, ENDERMITE_BOXES.length, 0.01f, 0.1f, false);
             case SNOW_GOLEM -> snowGolem(pose, headYaw, headPitch);
+            case HORSE -> HorseModels.animate(motion, pose);
             case MAGMA_CUBE, MOOSHROOM_MUSHROOMS -> {
             }
             default -> throw new IllegalArgumentException("No mob animation for " + kind);

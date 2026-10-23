@@ -31,7 +31,7 @@ public final class EntityModels {
         PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, SKELETON, ENDERMAN, CREEPER, SPIDER, PIG,
         COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
         WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE,
-        MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS
+        MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS, HORSE
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -68,12 +68,20 @@ public final class EntityModels {
         public boolean sprinting;
         /** Rabbit hop progress, 0..1 through the jump. */
         public float jump;
+        /** Horses: foal, saddled, chested, mule-eared (donkey and mule); rearing and grazing 0..1. */
+        public boolean foal;
+        public boolean saddled;
+        public boolean chested;
+        public boolean longEars;
+        public float rearing;
+        public float grazing;
 
         public void reset() {
             limbSwing = limbSwingAmount = ageInTicks = headYaw = headPitch = swingProgress = 0f;
             sneaking = angry = tame = carrying = screaming = hanging = sitting = sprinting = false;
             entityId = ticksExisted = 0;
-            jump = 0f;
+            jump = rearing = grazing = 0f;
+            foal = saddled = chested = longEars = false;
             heldItem = 0;
             aimedBow = false;
             riding = false;

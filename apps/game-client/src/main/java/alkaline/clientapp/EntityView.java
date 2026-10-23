@@ -166,8 +166,9 @@ final class EntityView implements AutoCloseable {
         for (int upload = 0; upload < UPLOADS_PER_FRAME && !pendingTextures.isEmpty(); upload++) {
             String path = pendingTextures.poll();
             // Custom armor textures name full asset paths; the rest are short paths under textures/.
-            VulkanTexture texture = load(path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png",
-                    new TextureOptions(ImageSampling.NEAREST, false, false, 1));
+            TextureOptions nearest = new TextureOptions(ImageSampling.NEAREST, false, false, 1);
+            VulkanTexture texture = path.indexOf('+') >= 0 ? layered(path, nearest)
+                    : load(path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png", nearest);
             if (texture == null) {
                 failedTextures.add(path);
             } else {
@@ -198,6 +199,16 @@ final class EntityView implements AutoCloseable {
     private VulkanTexture load(String path, TextureOptions options) {
         RgbaImage image = image(path);
         return image == null ? null : renderer.createTexture(image, options);
+    }
+
+    /** A texture made of several {@code +}-joined paths drawn over one another (horse coat, marking, armor). */
+    private VulkanTexture layered(String key, TextureOptions options) {
+        String[] paths = key.split("\\+");
+        RgbaImage[] images = new RgbaImage[paths.length];
+        for (int index = 0; index < paths.length; index++) {
+            images[index] = image("assets/minecraft/textures/" + paths[index] + ".png");
+        }
+        return images[0] == null ? null : renderer.createTexture(ImageLayers.composite(images), options);
     }
 
     private RgbaImage image(String path) {
@@ -677,11 +688,60 @@ final class EntityView implements AutoCloseable {
         }
     }
 
+    private final float[] foalRoot = new float[16];
+
+    /**
+     * ModelHorse.render for a foal (size 0.5): the legs, the trunk and the head each draw under their own scale and
+     * lift, the head lowering further while it grazes.
+     */
+    private void submitFoal(VulkanTexture texture, ModelPose pose, int light, int overlay) {
+        float size = 0.5f;
+        float grazing = motion.grazing;
+        System.arraycopy(root, 0, foalRoot, 0, 16);
+        int parts = pose.model().partCount();
+        for (int group = 0; group < 3; group++) {
+            int from = group == 0 ? 0 : group == 1 ? 12 : 18;
+            int to = group == 0 ? 12 : group == 1 ? 18 : 25;
+            System.arraycopy(foalRoot, 0, root, 0, 16);
+            if (group == 0) {
+                Mat4.scale(root, size, 0.5f + size * 0.5f, size, root);
+                Mat4.translate(root, 0f, 0.95f * (1f - size), 0f, root);
+            } else if (group == 1) {
+                Mat4.scale(root, size, size, size, root);
+                Mat4.translate(root, 0f, 1.35f * (1f - size), 0f, root);
+            } else {
+                float head = 0.5f + size * size * 0.5f;
+                Mat4.scale(root, head, head, head, root);
+                if (grazing <= 0f) {
+                    Mat4.translate(root, 0f, 1.35f * (1f - size), 0f, root);
+                } else {
+                    Mat4.translate(root, 0f, 0.9f * (1f - size) * grazing + 1.35f * (1f - size) * (1f - grazing),
+                            0.15f * (1f - size) * grazing, root);
+                }
+            }
+            for (int part = 0; part < parts; part++) {
+                foalVisible[part] = pose.visible(part);
+                pose.visible(part, foalVisible[part] && part >= from && part < to);
+            }
+            models.submit(gpu.get(EntityModels.Kind.HORSE), texture, pose, root, 0xFFFFFFFF, overlay, light);
+            for (int part = 0; part < parts; part++) {
+                pose.visible(part, foalVisible[part]);
+            }
+        }
+        System.arraycopy(foalRoot, 0, root, 0, 16);
+    }
+
+    private final boolean[] foalVisible = new boolean[CuboidModel.MAX_PARTS];
+
     /**
      * ModelBiped / ModelQuadruped child rendering: the head drawn larger relative to a half-size body. Returns
      * false for kinds without a child layout (then nothing is drawn rather than an adult-sized child).
      */
     private boolean submitChild(EntityModels.Kind kind, VulkanTexture texture, ModelPose pose, int light, int overlay) {
+        if (kind == EntityModels.Kind.HORSE) {
+            submitFoal(texture, pose, light, overlay);
+            return true;
+        }
         float headScale;
         float headLift;
         float headForward;

@@ -249,11 +249,14 @@ The legacy repo's git index is corrupt. The user has explicitly asked to start t
 
 Start every task in its own worktree from `main`, after wave 0 is pushed.
 
+Before running a task, grep for its feature. Several prompts were written from an older decision record, and 1C and
+2E turned out to be built already.
+
 | Task | Model | Owns | Port |
 |---|---|---|---|
 | 1A Remaining mobs | Sonnet Medium | `EntityModels.java`, new model files, their tests | 25631 |
 | 1B Chat | Opus (reworked by the planning session) | new chat files in `modules/ui` and `apps/game-client` | 25632 |
-| 1C Chest-like screens | Opus (done by the planning session) | inventory or window screen files in `modules/ui`, `Window` screen code | 25633 |
+| 1C Chest-like screens | **Already built**: skip | inventory or window screen files in `modules/ui`, `Window` screen code | 25633 |
 | 1D Sound | Opus High | new `audio` package, its build dependencies | 25634 |
 | 1E Enchantment glint | Opus Medium | `ModelRenderer`, item shaders, `ItemIcons`, `CustomItems` glint | 25635 |
 
@@ -319,7 +322,11 @@ Follow AGENTS.md's simplicity rule and Material 3 Expressive: one input field at
 </done_when>
 ```
 
-### 1C Chest-like container screens (done by the planning session, Opus 5.5)
+### 1C Chest-like container screens (already built: skip)
+
+Checked on 2026-10-23: `Window.open` and `ContainerScreen` already cover every chest-like window. A large chest
+opened with its lid animating, six rows and its title, and a shift-clicked stack reached the player's inventory on
+the server (`clear Player minecraft:diamond -1 0` found 5). The prompt below is kept for reference only.
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 1C, branch wave1/1C, server port 25633.
@@ -433,7 +440,7 @@ Read docs/agent-brief.md first. You integrate wave 1. You are the only session a
 | 2B Block breaking | Sonnet High | new break-overlay files in renderer and world | 25642 |
 | 2C CTM completion | Opus High | `ConnectedTextures`, `ChunkMesher`, `BlockPalette` | 25643 |
 | 2D Server resource packs | Opus Medium | `ResourcePacks`, its new download code, its prompt screen | 25644 |
-| 2E Remaining screens | Opus Medium | new screen files in `modules/ui` | 25645 |
+| 2E Remaining screens | **Already built**: skip | new screen files in `modules/ui` | 25645 |
 | 2F Small parity fixes | Haiku Extra | `LocalPlayer` and input timing only | 25646 |
 
 The integrator merges in this order: 2F, 2C, 2B, 2A, 2E, 2D.
@@ -512,7 +519,10 @@ Read docs/agent-brief.md first and follow it. Task id 2D, branch wave2/2D, serve
 <done_when>Unit tests cover hash verification, the size cap and URL validation. At runtime, serve a small test pack from a local `python3 -m http.server` in a scratch dir, set resource-pack=<url> and resource-pack-sha1 in server.properties, join, accept, and screenshot a changed texture. Then decline on a second join and confirm the server log shows the declined status.</done_when>
 ```
 
-### 2E Remaining container screens (Opus 5.5 Medium)
+### 2E Remaining container screens (already built: skip)
+
+`ContainerScreen` already has the brewing stand, enchanting table, anvil, beacon, villager and horse screens and
+their packets. Run this prompt only if a runtime check of one of them fails.
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 2E, branch wave2/2E, server port 25645.
@@ -525,6 +535,8 @@ Read docs/agent-brief.md first and follow it. Task id 2E, branch wave2/2E, serve
 ```
 
 ### 2F Small vanilla parity fixes (Haiku 5.5 Extra)
+
+`rightClickDelayTimer` already exists in `PlaySession`; item 2 may only need its test.
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 2F, branch wave2/2F, server port 25646.
@@ -567,6 +579,9 @@ Read docs/agent-brief.md first.
 The integrator merges in this order: 3C, 3D, 3B, 3A. 3E runs on the merged main and is then merged on its own.
 
 ### 3A Name tags and scoreboard (Opus 5.5 Medium)
+
+The sidebar scoreboard already exists (`PlaySession` and `HudBridge` pass `sidebarTitle` and `sidebar`); check it,
+then focus on name tags, team formatting and the below-name score.
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 3A, branch wave3/3A, server port 25651.

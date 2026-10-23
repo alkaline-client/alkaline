@@ -48,6 +48,24 @@ final class MobSelector {
     }
 
     /**
+     * ModelGuardian's eye follows the viewer: it drops a texel when the viewer is below the guardian's eye, and
+     * slides sideways by the square root of how far the viewer is off the guardian's heading. {@code x, y, z} are
+     * the guardian's feet relative to the camera.
+     */
+    private static void guardianEye(Entity entity, float partialTick, float x, float y, float z,
+                                    EntityModels.Motion motion) {
+        float eye = alkaline.game.entity.EntityTypes.height(entity) * 0.5f;
+        motion.eyeLow = -(y + eye) <= 0f;
+        float length = (float) Math.sqrt(x * x + z * z);
+        if (length < 1e-4f) {
+            return;
+        }
+        double yaw = Math.toRadians(entity.previousYaw + (entity.yaw - entity.previousYaw) * partialTick);
+        double side = -Math.sin(yaw) * (z / length) + Math.cos(yaw) * (-x / length);
+        motion.eyeX = (float) Math.sqrt(Math.abs(side)) * 2f * (float) Math.signum(side);
+    }
+
+    /**
      * RenderHorse: metadata 19 is the type (horse, donkey, mule, zombie, skeleton), 20 the coat and marking, 22
      * the armor, 16 the flags. A horse's coat, marking and armor are one {@code +}-joined texture key that
      * {@link ImageLayers} composites, as vanilla's LayeredTexture does.
@@ -92,7 +110,8 @@ final class MobSelector {
     }
 
     /** Fills {@code choice} and the variant-driven fields of {@code motion}; false when the type has no model. */
-    static boolean select(Entity entity, float partialTick, EntityModels.Motion motion, Choice choice) {
+    static boolean select(Entity entity, float partialTick, float x, float y, float z, EntityModels.Motion motion,
+                          Choice choice) {
         choice.reset();
         switch (entity.type) {
             case EntityTypes.WITCH -> {
@@ -150,6 +169,26 @@ final class MobSelector {
                 if (!selectHorse(entity, motion, choice)) {
                     return false;
                 }
+            }
+            case EntityTypes.GUARDIAN -> {
+                choice.kind = EntityModels.Kind.GUARDIAN;
+                int flags = entity.metadata.getInt(16, 0);
+                boolean elder = (flags & 4) != 0;
+                choice.texture = elder ? "entity/guardian_elder" : "entity/guardian";
+                choice.scale = elder ? 2.35f : 1f;
+                motion.retracted = (flags & 2) != 0;
+                guardianEye(entity, partialTick, x, y, z, motion);
+            }
+            case EntityTypes.WITHER -> {
+                choice.kind = EntityModels.Kind.WITHER;
+                int invulnerable = entity.metadata.getInt(20, 0);
+                choice.texture = invulnerable > 0 && (invulnerable > 80 || invulnerable / 5 % 2 != 1)
+                        ? "entity/wither/wither_invulnerable" : "entity/wither/wither";
+                choice.scale = invulnerable > 0 ? 2f - (invulnerable - partialTick) / 220f * 0.5f : 2f;
+            }
+            case EntityTypes.ENDER_DRAGON -> {
+                choice.kind = EntityModels.Kind.ENDER_DRAGON;
+                choice.texture = "entity/enderdragon/dragon";
             }
             default -> {
                 return false;

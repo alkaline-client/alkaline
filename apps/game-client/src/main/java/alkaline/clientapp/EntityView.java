@@ -109,6 +109,7 @@ final class EntityView implements AutoCloseable {
     private float viewYaw;
     private float viewPitch;
     private final EntityModels.Motion motion = new EntityModels.Motion();
+    private final DragonTracker dragons = new DragonTracker();
     private final MobSelector.Choice choice = new MobSelector.Choice();
     private final float[] root = new float[16];
     private final float[] part = new float[16];
@@ -563,6 +564,7 @@ final class EntityView implements AutoCloseable {
                 kind = EntityModels.Kind.VILLAGER;
                 int profession = entity.metadata.getInt(16, 0);
                 texture = texture(VILLAGERS[profession >= 0 && profession < 5 ? profession : 5]);
+                scale = EntityTypes.child(entity) ? 0.46875f : 0.9375f; // RenderVillager.preRenderCallback
             }
             case EntityTypes.IRON_GOLEM -> {
                 kind = EntityModels.Kind.IRON_GOLEM;
@@ -590,7 +592,7 @@ final class EntityView implements AutoCloseable {
                 scale = 4.5f;
             }
             default -> {
-                if (!MobSelector.select(entity, partialTick, motion, choice)) {
+                if (!MobSelector.select(entity, partialTick, x, y, z, motion, choice)) {
                     return; // Mobs without a model yet are not drawn.
                 }
                 kind = choice.kind;
@@ -618,6 +620,9 @@ final class EntityView implements AutoCloseable {
         motion.onGround = entity.onGround;
         motion.heldItem = entity.equipment[0] != null ? 1 : 0;
         motion.riding = entity.vehicle >= 0;
+        if (kind == EntityModels.Kind.ENDER_DRAGON) {
+            dragons.update(entity, partialTick, motion);
+        }
         motion.entityId = entity.id;
         motion.ticksExisted = entity.ticksExisted;
         if (entity.category == Entity.Category.PLAYER && entity.usingItem() && entity.equipment[0] != null) {
@@ -638,8 +643,12 @@ final class EntityView implements AutoCloseable {
             EntityModels.zombieArms(motion, pose);
         }
         livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, biped && motion.sneaking, deathRotation);
+        if (kind == EntityModels.Kind.ENDER_DRAGON) {
+            dragonRoot(x, y, z);
+        }
         int overlay = entity.hurtTime > 0 || entity.deathTime > 0 ? hit.argb() : 0;
-        boolean child = EntityTypes.child(entity);
+        // Villagers draw whole at half scale (set above), not as a separate head and body.
+        boolean child = EntityTypes.child(entity) && kind != EntityModels.Kind.VILLAGER;
         // RendererLivingEntity.renderModel: an invisible body is skipped; its armor and held item still draw.
         boolean invisible = entity.invisible();
         if (!invisible && child && !submitChild(kind, texture, pose, light, overlay)) {
@@ -666,6 +675,22 @@ final class EntityView implements AutoCloseable {
                     entity.equipment[0] != null && entity.equipment[0].id() == 261 && entity.usingItem()
                             ? entity.usingTicks : -1, hookOwners.contains(entity.id));
         }
+    }
+
+    /**
+     * RenderDragon.rotateCorpse replaces the yaw turn: heading from the history's yaw, a pitch from its height
+     * change, and a block forward; the usual flip follows.
+     */
+    private void dragonRoot(float x, float y, float z) {
+        float heading = motion.movement[7 * 2];
+        float climb = motion.movement[5 * 2 + 1] - motion.movement[10 * 2 + 1];
+        Mat4.identity(root);
+        Mat4.translate(root, x, y, z, root);
+        Mat4.rotate(root, (float) Math.toRadians(-heading), 0f, 1f, 0f, root);
+        Mat4.rotate(root, (float) Math.toRadians(climb * 10f), 1f, 0f, 0f, root);
+        Mat4.translate(root, 0f, 0f, 1f, root);
+        Mat4.scale(root, -1f, -1f, 1f, root);
+        Mat4.translate(root, 0f, -1.5078125f, 0f, root);
     }
 
     /**

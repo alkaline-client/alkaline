@@ -129,4 +129,44 @@ class MobModelsTest {
         assertEquals(-6f, pose.pivotY(HorseModels.HEAD), 1e-5f);
         assertEquals((float) Math.toRadians(-45), pose.rotationX(HorseModels.BODY), 1e-5f);
     }
+
+    @Test
+    void guardianHasTwelveSpinesAnEyeAndAThreePieceTail() {
+        CuboidModel guardian = model(EntityModels.Kind.GUARDIAN);
+        assertEquals(17, guardian.partCount());
+        assertEquals(5, guardian.parts().get(0).boxes().size());
+        assertTrue(guardian.parts().get(0).boxes().get(2).mirror());
+        assertEquals(new ModelBox(8, 0, -1, 15, 0, 2, 2, 1, 0f, false), firstBox(guardian, "eye"));
+        ModelPose pose = new ModelPose(guardian);
+        EntityModels.Motion motion = new EntityModels.Motion();
+        EntityModels.animate(EntityModels.Kind.GUARDIAN, motion, pose);
+        assertEquals(16f + 8f * (1f + (float) Math.cos(8) * 0.01f), pose.pivotY(BossModels.GUARDIAN_SPINES + 8),
+                1e-4f);
+    }
+
+    @Test
+    void witherHasThreeHeadsAndARibcage() {
+        CuboidModel wither = model(EntityModels.Kind.WITHER);
+        assertEquals(6, wither.partCount());
+        assertEquals(-8f, wither.parts().get(1).pivotX(), 1e-6f);
+        assertEquals(4, wither.parts().get(BossModels.WITHER_SPINE).boxes().size());
+    }
+
+    @Test
+    void dragonBuildsBothSidesMirroredAndStaysInThePartLimit() {
+        CuboidModel dragon = model(EntityModels.Kind.ENDER_DRAGON);
+        assertEquals(38, dragon.partCount());
+        assertEquals(256, dragon.textureWidth());
+        assertEquals(new ModelBox(0, 0, -12, 0, -16, 24, 24, 64, 0f, false), firstBox(dragon, "body"));
+        ModelPart right = dragon.parts().get(dragon.partIndex("wing_r"));
+        ModelPart left = dragon.parts().get(dragon.partIndex("wing_l"));
+        assertEquals(-left.pivotX(), right.pivotX(), 1e-6f);
+        assertTrue(left.boxes().get(0).mirror());
+        assertEquals(0f, left.boxes().get(0).x(), 1e-6f);
+        // Steady flight: the neck and tail chains lie straight, the tail turned half a circle.
+        ModelPose pose = new ModelPose(dragon);
+        EntityModels.animate(EntityModels.Kind.ENDER_DRAGON, new EntityModels.Motion(), pose);
+        assertEquals((float) Math.PI, pose.rotationY(BossModels.DRAGON_TAIL), 1e-5f);
+        assertEquals(0f, pose.rotationY(BossModels.DRAGON_NECK), 1e-5f);
+    }
 }

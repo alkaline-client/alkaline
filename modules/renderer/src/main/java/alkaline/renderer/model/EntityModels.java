@@ -31,7 +31,8 @@ public final class EntityModels {
         PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, SKELETON, ENDERMAN, CREEPER, SPIDER, PIG,
         COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
         WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE,
-        MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS, HORSE
+        MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS, HORSE,
+        GUARDIAN, WITHER, ENDER_DRAGON
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -75,13 +76,21 @@ public final class EntityModels {
         public boolean longEars;
         public float rearing;
         public float grazing;
+        /** Guardians: spines pulled in, and the eye's offset toward the viewer. */
+        public boolean retracted;
+        public boolean eyeLow;
+        public float eyeX;
+        /** Ender dragons: wing-beat phase, and yaw (degrees) and height for history offsets 0..23, interleaved. */
+        public float animTime;
+        public final float[] movement = new float[48];
 
         public void reset() {
             limbSwing = limbSwingAmount = ageInTicks = headYaw = headPitch = swingProgress = 0f;
             sneaking = angry = tame = carrying = screaming = hanging = sitting = sprinting = false;
             entityId = ticksExisted = 0;
             jump = rearing = grazing = 0f;
-            foal = saddled = chested = longEars = false;
+            foal = saddled = chested = longEars = retracted = eyeLow = false;
+            eyeX = animTime = 0f;
             heldItem = 0;
             aimedBow = false;
             riding = false;

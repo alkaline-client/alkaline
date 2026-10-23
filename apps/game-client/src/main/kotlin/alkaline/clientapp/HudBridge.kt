@@ -10,6 +10,7 @@ import alkaline.ui.hud.ContainerKind
 import alkaline.ui.hud.ContainerView
 import alkaline.ui.hud.EnchantOffer
 import alkaline.ui.hud.HudChat
+import alkaline.ui.hud.HudChatAction
 import alkaline.ui.hud.HudEffect
 import alkaline.ui.hud.HudFrame
 import alkaline.ui.hud.HudItem
@@ -37,7 +38,11 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
         if (play !== chatOwner || play.chatVersion() != chatVersion) {
             chatOwner = play
             chatVersion = play.chatVersion()
-            chatCache = play.chat().map { HudChat(it.text(), it.tick()) }
+            chatCache = play.chat().map { line ->
+                HudChat(line.text(), line.tick(), line.serial(), line.actions().map {
+                    HudChatAction(it.start(), it.end(), it.click(), it.value(), it.hover(), it.insertion())
+                })
+            }
         }
         return chatCache
     }

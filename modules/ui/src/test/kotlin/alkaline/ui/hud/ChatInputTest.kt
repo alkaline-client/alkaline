@@ -10,11 +10,13 @@ class ChatInputTest {
     private class Recorder : ChatInput.Host {
         val sent = ArrayList<String>()
         val completions = ArrayList<String>()
-        val listings = ArrayList<String>()
+        val opened = ArrayList<String>()
+        val copied = ArrayList<String>()
         var closed = 0
         override fun send(message: String) { sent += message }
         override fun complete(text: String) { completions += text }
-        override fun listing(text: String) { listings += text }
+        override fun openUrl(url: String) { opened += url }
+        override fun copy(text: String) { copied += text }
         override fun close() { closed++ }
     }
 
@@ -157,12 +159,17 @@ class ChatInputTest {
         chat.tab()
         chat.completed(listOf("Steve", "Stella"))
         assertEquals("say Ste", chat.text)
-        assertTrue(host.listings.isEmpty())
+        assertTrue(chat.suggestions.isEmpty())
         chat.tab()
         assertEquals(2, host.completions.size)
         chat.completed(listOf("Steve", "Stella"))
         assertEquals("say Steve", chat.text)
-        assertEquals(listOf("Steve, Stella"), host.listings)
+        assertEquals(listOf("Steve", "Stella"), chat.suggestions)
+        assertEquals(0, chat.suggestion)
+        chat.tab()
+        assertEquals(1, chat.suggestion)
+        type("say Stella!")
+        assertTrue(chat.suggestions.isEmpty())
     }
 
     @Test
@@ -173,7 +180,7 @@ class ChatInputTest {
         chat.completed(listOf("/gamemode", "/gamemode"))
         assertEquals("/gamemode", chat.text)
         assertEquals(9, chat.caret)
-        assertTrue(host.listings.isEmpty())
+        assertTrue(chat.suggestions.isEmpty())
     }
 
     @Test
@@ -223,5 +230,46 @@ class ChatInputTest {
         assertEquals(listOf(19f, -19f, 7f, -1f), moved)
         chat.close()
         assertNull(chat.scroller)
+    }
+
+    @Test
+    fun `run_command sends without entering the history and keeps the chat open`() {
+        chat.open()
+        chat.click("run_command", "/play bedwars", null, shift = false)
+        assertEquals(listOf("/play bedwars"), host.sent)
+        assertEquals(0, host.closed)
+        chat.older()
+        assertEquals("", chat.text)
+    }
+
+    @Test
+    fun `suggest_command replaces the line and shift-click inserts at the caret`() {
+        chat.open()
+        type("hello")
+        chat.click("suggest_command", "/msg Steve ", "Steve", shift = false)
+        assertEquals("/msg Steve ", chat.text)
+        assertEquals(11, chat.caret)
+        chat.edit("/msg  hi", 5, 5)
+        chat.click("run_command", "/ignored", "Alex", shift = true)
+        assertEquals("/msg Alex hi", chat.text)
+        assertEquals(9, chat.caret)
+        assertTrue(host.sent.isEmpty())
+    }
+
+    @Test
+    fun `a link waits to be opened or copied`() {
+        chat.open()
+        chat.click("open_url", "https://example.com", null, shift = false)
+        assertEquals("https://example.com", chat.pendingUrl)
+        assertTrue(host.opened.isEmpty())
+        chat.copyPending()
+        assertEquals(listOf("https://example.com"), host.copied)
+        assertNull(chat.pendingUrl)
+        chat.click("open_url", "https://example.com/a", null, shift = false)
+        chat.openPending()
+        assertEquals(listOf("https://example.com/a"), host.opened)
+        chat.click("open_url", "https://example.com/b", null, shift = false)
+        chat.close()
+        assertNull(chat.pendingUrl)
     }
 }

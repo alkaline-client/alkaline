@@ -43,11 +43,11 @@ public final class PlaySession implements AutoCloseable {
     record Effect(int id, int amplifier, int ticksLeft) {
     }
 
-    /** A chat line (§ formatted) and the tick it arrived; a nonzero {@code id} is replaced by the next line with it. */
-    record ChatLine(String text, long tick, int id) {
-        ChatLine(String text, long tick) {
-            this(text, tick, 0);
-        }
+    /**
+     * A received chat line (§ formatted), what its parts do when clicked or hovered, the tick it arrived, and its
+     * place in arrival order (which keeps the open chat's scroll position steady as lines arrive).
+     */
+    record ChatLine(String text, java.util.List<ChatText.Action> actions, long tick, long serial) {
     }
 
     private final ServerSession session;
@@ -380,16 +380,6 @@ public final class PlaySession implements AutoCloseable {
                 player.pitch, gameMode == 1 ? 5.0 : 4.5);
         session.sendTabComplete(text, block != null, block != null ? block.x() : 0, block != null ? block.y() : 0,
                 block != null ? block.z() : 0);
-    }
-
-    /** A line only this client shows (GuiNewChat.printChatMessageWithOptionalDeletion), replacing the last with its id. */
-    void localChat(String text, int id) {
-        chatLines.removeIf(line -> line.id() == id);
-        chatLines.addFirst(new ChatLine(text, ticks, id));
-        while (chatLines.size() > CHAT_HISTORY) {
-            chatLines.removeLast();
-        }
-        chatVersion++;
     }
 
     /** The inventory screen opened (vanilla reports it with Client Status 2, the open-inventory achievement). */
@@ -797,12 +787,13 @@ public final class PlaySession implements AutoCloseable {
                 }
             }
             case ServerSession.Chat message -> {
-                String text = chat.legacy(message.json());
                 if (message.position() == 2) {
-                    actionBar = text;
+                    actionBar = chat.legacy(message.json());
                     actionBarTicks = 60;
                 } else {
-                    chatLines.addFirst(new ChatLine(text, ticks));
+                    ChatText.Rich rich = chat.rich(message.json());
+                    String text = rich.text();
+                    chatLines.addFirst(new ChatLine(text, rich.actions(), ticks, chatVersion));
                     while (chatLines.size() > CHAT_HISTORY) {
                         chatLines.removeLast();
                     }

@@ -58,8 +58,8 @@ interface ChatHost {
     /** Asks the server to tab-complete [text]. */
     fun complete(text: String)
 
-    /** Shows [text] as a line in the chat (tab completion's candidates). */
-    fun listing(text: String)
+    /** Puts [text] on the clipboard. */
+    fun copy(text: String)
 }
 
 /** The ClickGUI's sidebar sections (the HUD editor sits at the bottom of the sidebar and opens over the game). */
@@ -213,7 +213,8 @@ class MenuController @JvmOverloads constructor(
     val chat = ChatInput(object : ChatInput.Host {
         override fun send(message: String) { chatHost?.send(message) }
         override fun complete(text: String) { chatHost?.complete(text) }
-        override fun listing(text: String) { chatHost?.listing(text) }
+        override fun openUrl(url: String) = actions.openUrl(url)
+        override fun copy(text: String) { chatHost?.copy(text) }
         override fun close() = closeOverlay()
     })
 
@@ -394,6 +395,10 @@ class MenuController @JvmOverloads constructor(
     fun back(): Boolean {
         if (capturing != null) {
             finishCapture(null)
+            return true
+        }
+        if (overlay == Overlay.CHAT && chat.pendingUrl != null) {
+            chat.dismissPending()
             return true
         }
         when (overlay) {

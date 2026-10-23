@@ -23,8 +23,11 @@ class ChatInput(private val host: Host) {
         /** Asks the server to complete [text] (everything before the cursor); the answer arrives in [completed]. */
         fun complete(text: String)
 
-        /** Shows [text] as a line in the chat itself (tab completion's candidates). */
-        fun listing(text: String)
+        /** Opens [url] in the browser, after the player confirmed it. */
+        fun openUrl(url: String)
+
+        /** Puts [text] on the clipboard. */
+        fun copy(text: String)
 
         /** Closes the chat. */
         fun close()
@@ -68,6 +71,19 @@ class ChatInput(private val host: Host) {
     /** Lines the scrollback shows at once (GuiNewChat.getLineCount at full height), and so what a page moves. */
     val visibleLines: Int get() = 20
 
+    /**
+     * The server's candidates while Tab cycles through more than one, and which is in the field. Vanilla prints them
+     * as a chat line each Tab; here they sit above the field and go away with the next edit.
+     */
+    var suggestions by mutableStateOf(emptyList<String>())
+        private set
+    var suggestion by mutableStateOf(-1)
+        private set
+
+    /** A link the player clicked, waiting for them to open or copy it (GuiConfirmOpenLink); null otherwise. */
+    var pendingUrl by mutableStateOf<String?>(null)
+        private set
+
     private val sent = ArrayList<String>()
     private var historyCursor = 0
     private var historyBuffer = ""
@@ -90,6 +106,7 @@ class ChatInput(private val host: Host) {
     fun close() {
         open = false
         resetCompletion()
+        pendingUrl = null
         scroller = null
     }
 
@@ -191,8 +208,53 @@ class ChatInput(private val host: Host) {
     private fun cycle() {
         val start = wordStart()
         if (matchIndex >= matches.size) matchIndex = 0
-        if (matches.size > 1) host.listing(matches.joinToString(", "))
+        suggestions = if (matches.size > 1) matches.map { it.replace(FORMATTING, "") } else emptyList()
+        suggestion = if (matches.size > 1) matchIndex else -1
         replaceWord(start, matches[matchIndex++].replace(FORMATTING, ""))
+    }
+
+    /**
+     * A click on a part of a chat line (GuiScreen.handleComponentClick): with Shift, its insertion is typed at the
+     * caret; otherwise run_command sends its command (kept out of the Up history, and the chat stays open),
+     * suggest_command replaces the line, and open_url asks first.
+     */
+    fun click(click: String?, value: String?, insertion: String?, shift: Boolean) {
+        if (shift) {
+            if (insertion != null) insert(insertion)
+            return
+        }
+        when (click) {
+            "run_command" -> value?.let { host.send(filter(it).take(MAX_LENGTH)) }
+            "suggest_command" -> value?.let { resetCompletion(); show(filter(it).take(MAX_LENGTH)) }
+            "open_url" -> pendingUrl = value
+        }
+    }
+
+    /** The link waiting in [pendingUrl] opens in the browser; the chat stays open, as after GuiConfirmOpenLink. */
+    fun openPending() {
+        pendingUrl?.let(host::openUrl)
+        pendingUrl = null
+    }
+
+    /** The link waiting in [pendingUrl] goes to the clipboard instead. */
+    fun copyPending() {
+        pendingUrl?.let(host::copy)
+        pendingUrl = null
+    }
+
+    fun dismissPending() {
+        pendingUrl = null
+    }
+
+    private fun insert(inserted: String) {
+        resetCompletion()
+        val from = minOf(anchor, caret)
+        val to = maxOf(anchor, caret)
+        val room = (MAX_LENGTH - text.length + (to - from)).coerceAtLeast(0)
+        val typed = filter(inserted).take(room)
+        text = text.substring(0, from) + typed + text.substring(to)
+        caret = from + typed.length
+        anchor = caret
     }
 
     /** Where the word before the caret starts (GuiTextField.func_146197_a(-1, caret, false)). */
@@ -221,6 +283,8 @@ class ChatInput(private val host: Host) {
     private fun resetCompletion() {
         waiting = false
         found = false
+        suggestions = emptyList()
+        suggestion = -1
     }
 
     private fun commonPrefix(strings: List<String>): String {

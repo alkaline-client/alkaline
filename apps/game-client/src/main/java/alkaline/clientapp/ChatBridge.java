@@ -5,13 +5,10 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * Takes what the player types in chat from the UI thread to the main thread, where the game's session is, and
- * sends it from there.
+ * Takes what the player types in chat from the UI thread to the main thread, where the game's session and SDL are,
+ * and sends or copies it from there.
  */
 final class ChatBridge implements ChatHost {
-    /** GuiChat's tab-completion list is one line that the next Tab replaces. */
-    private static final int LISTING_ID = 1;
-
     private final Supplier<PlaySession> play;
     private final Consumer<Runnable> mainThread;
 
@@ -31,8 +28,9 @@ final class ChatBridge implements ChatHost {
     }
 
     @Override
-    public void listing(String text) {
-        onPlay(session -> session.localChat(text, LISTING_ID));
+    public void copy(String text) {
+        // SDL expects its calls on the main thread.
+        mainThread.accept(() -> org.lwjgl.sdl.SDLClipboard.SDL_SetClipboardText(text));
     }
 
     private void onPlay(Consumer<PlaySession> action) {

@@ -79,6 +79,9 @@ public final class SkyRenderer implements AutoCloseable {
     private final CustomSky custom;
     private final VulkanTexture[] layerTextures;
     private final java.util.EnumMap<CustomSky.Blend, VulkanPipeline> layerPipelines = new java.util.EnumMap<>(CustomSky.Blend.class);
+    /** Per layer: the smoothed biomes-and-heights brightness and when it last stepped (0: not yet drawn). */
+    private final float[] layerPosition;
+    private final long[] layerPositionNanos;
 
     /** @param target offscreen color format the world renders into, or null for the main pass */
     public SkyRenderer(VulkanRenderer renderer, AssetSource assets, RenderTargetFormat target) {
@@ -97,6 +100,8 @@ public final class SkyRenderer implements AutoCloseable {
             snow = track(created, texture(renderer, assets, "environment/snow"));
             custom = assets == null ? CustomSky.NONE : CustomSky.load(assets);
             layerTextures = new VulkanTexture[custom.layers().size()];
+            layerPosition = new float[layerTextures.length];
+            layerPositionNanos = new long[layerTextures.length];
             for (int index = 0; index < layerTextures.length; index++) {
                 CustomSky.Layer layer = custom.layers().get(index);
                 layerTextures[index] = track(created, skyTexture(renderer, assets, layer.source()));
@@ -343,7 +348,7 @@ public final class SkyRenderer implements AutoCloseable {
             if (layerTextures[index] == null || !layer.active(sky.worldTime)) {
                 continue;
             }
-            float brightness = layer.position((int) Math.floor(sky.eyeY)) * layer.weather(sky.rain, sky.thunder)
+            float brightness = position(index, layer, sky) * layer.weather(sky.rain, sky.thunder)
                     * layer.fade(sky.worldTime);
             brightness = Math.max(0f, Math.min(1f, brightness));
             if (brightness < 1.0E-4F) {
@@ -386,6 +391,27 @@ public final class SkyRenderer implements AutoCloseable {
             frame.bindStreamVertices(0, offset);
             frame.draw(36, 1, 0, 0);
         }
+    }
+
+    /**
+     * CustomSkyLayer.getPositionBrightness: the biomes and heights condition at the viewer's Entity.getPosition,
+     * smoothed per layer over its transition, starting from the first value drawn.
+     */
+    private float position(int index, CustomSky.Layer layer, Sky sky) {
+        if (!layer.positional()) {
+            return 1f;
+        }
+        double feetY = Double.isNaN(sky.feetY) ? sky.eyeY - 1.62 : sky.feetY;
+        float raw = layer.position((int) Math.floor(feetY + 0.5), sky.biome);
+        long now = System.nanoTime();
+        if (layerPositionNanos[index] == 0L) {
+            layerPosition[index] = raw;
+        } else {
+            layerPosition[index] = CustomSky.smooth(layerPosition[index], raw,
+                    (now - layerPositionNanos[index]) / 1.0E9F, layer.transition());
+        }
+        layerPositionNanos[index] = now;
+        return layerPosition[index];
     }
 
     /** CustomSkyLayer.renderSide: cell {@code side} of the 3x2 texture on the plane y = -100. */

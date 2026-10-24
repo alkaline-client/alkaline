@@ -323,6 +323,271 @@ class ConnectedTexturesTest {
         assertFalse(rule("glass.properties", "method", "fixed", "tiles", "0", "connect", "block").connectTile());
     }
 
+    // ---- methods added for wave 2: compact, overlays, conditions ---------------------------------------------
+
+    @Test
+    void newMethodsParseWithTheirDefaultTileSheets() {
+        ConnectedTextures.Rule compact = rule("glass.properties", "method", "ctm_compact");
+        assertEquals(ConnectedTextures.Method.CTM_COMPACT, compact.method());
+        assertEquals(5, compact.tiles().size());
+        ConnectedTextures.Rule overlay = rule("glass.properties", "method", "overlay");
+        assertEquals(ConnectedTextures.Method.OVERLAY, overlay.method());
+        assertEquals(17, overlay.tiles().size());
+        assertEquals(MaterialPass.CUTOUT, overlay.layer());
+        // The plain ctm sheet skips MCPatcher's unused cells: 0-11 16-27 32-43 48-58.
+        ConnectedTextures.Rule ctm = rule("glass.properties", "method", "ctm");
+        assertEquals(47, ctm.tiles().size());
+        assertEquals(DIRECTORY + "16.png", ctm.tiles().get(12));
+        assertEquals(DIRECTORY + "58.png", ctm.tiles().get(46));
+        assertEquals(ConnectedTextures.Method.OVERLAY_CTM, rule("glass.properties", "method", "overlay_ctm").method());
+        assertEquals(ConnectedTextures.Method.OVERLAY_RANDOM,
+                rule("glass.properties", "method", "overlay_random", "tiles", "0-2").method());
+    }
+
+    @Test
+    void overlaysNeverDrawInTheSolidLayer() {
+        assertNull(rule("glass.properties", "method", "overlay", "layer", "solid"));
+        assertEquals(MaterialPass.TRANSLUCENT,
+                rule("glass.properties", "method", "overlay", "layer", "translucent").layer());
+    }
+
+    @Test
+    void renderPassAndUnknownConnectRejectTheRule() {
+        assertNull(rule("glass.properties", "method", "ctm", "tiles", "0-46", "renderPass", "1"));
+        assertNull(rule("glass.properties", "method", "ctm", "tiles", "0-46", "connect", "sideways"));
+    }
+
+    @Test
+    void compactQuartersFollowConnectedTexturesCompact() {
+        ConnectedTextures.Rule compact = rule("glass.properties", "method", "ctm_compact");
+        // Index 0 (alone): tile 0 everywhere; 26 (surrounded): tile 1; 46 (no corners): tile 4.
+        for (int quarter = 0; quarter < 4; quarter++) {
+            assertEquals(0, ConnectedTextures.compactTile(compact, 0, quarter));
+            assertEquals(1, ConnectedTextures.compactTile(compact, 26, quarter));
+            assertEquals(4, ConnectedTextures.compactTile(compact, 46, quarter));
+        }
+        // Index 1 (a right neighbor): the left half keeps tile 0, the right half joins with tile 3.
+        assertArrayEquals(new int[]{0, 3, 0, 3}, quarters(compact, 1));
+        // Index 12 (a neighbor below): top half tile 0, bottom half tile 2.
+        assertArrayEquals(new int[]{0, 0, 2, 2}, quarters(compact, 12));
+        // Index 13: getQuadsCompact4(0, 3, 2, 1).
+        assertArrayEquals(new int[]{0, 3, 2, 1}, quarters(compact, 13));
+    }
+
+    @Test
+    void compactIndexOverridesGiveTheWholeFaceOneTile() {
+        ConnectedTextures.Rule compact = rule("glass.properties", "method", "ctm_compact", "tiles", "0-5", "ctm.26", "5",
+                "ctm.47", "1", "ctm.3", "9");
+        assertArrayEquals(new int[]{5, 5, 5, 5}, quarters(compact, 26));
+        // Out-of-range indexes and tiles are ignored.
+        assertArrayEquals(new int[]{3, 0, 3, 0}, quarters(compact, 3));
+    }
+
+    private static int[] quarters(ConnectedTextures.Rule rule, int index) {
+        int[] tiles = new int[4];
+        for (int quarter = 0; quarter < 4; quarter++) {
+            tiles[quarter] = ConnectedTextures.compactTile(rule, index, quarter);
+        }
+        return tiles;
+    }
+
+    /** Bordering blocks for overlays: bits 0-3 the sides (left, down, right, up), 4-7 the corners after them. */
+    private static ConnectedTextures.OverlayNeighbors bordering(int face, int overlay, int matching) {
+        ConnectedTextures.Neighbors over = neighbors(face, overlay);
+        ConnectedTextures.Neighbors match = neighbors(face, matching);
+        return new ConnectedTextures.OverlayNeighbors() {
+            @Override
+            public boolean overlay(int dx, int dy, int dz) {
+                return over.connects(dx, dy, dz);
+            }
+
+            @Override
+            public boolean matching(int dx, int dy, int dz) {
+                return match.connects(dx, dy, dz);
+            }
+        };
+    }
+
+    private static List<Integer> overlayTiles(int overlay, int matching) {
+        ConnectedTextures.Rule rule = rule("glass.properties", "method", "overlay");
+        int[] out = new int[2];
+        int count = ConnectedTextures.overlay(rule, UP, 64, bordering(UP, overlay, matching), out);
+        List<Integer> tiles = new java.util.ArrayList<>();
+        for (int index = 0; index < count; index++) {
+            tiles.add(out[index]);
+        }
+        return tiles;
+    }
+
+    @Test
+    void overlayTilesFollowTheBorderingSides() {
+        // Mask bits: 1 left, 2 down, 4 right, 8 up.
+        assertEquals(List.of(), overlayTiles(0, 0));
+        assertEquals(List.of(8), overlayTiles(0x0F, 0));
+        assertEquals(List.of(5), overlayTiles(1 | 4 | 2, 0));
+        assertEquals(List.of(6), overlayTiles(1 | 2 | 8, 0));
+        assertEquals(List.of(12), overlayTiles(4 | 2 | 8, 0));
+        assertEquals(List.of(13), overlayTiles(1 | 4 | 8, 0));
+        assertEquals(List.of(9), overlayTiles(1, 0));
+        assertEquals(List.of(7), overlayTiles(4, 0));
+        assertEquals(List.of(1), overlayTiles(2, 0));
+        assertEquals(List.of(15), overlayTiles(8, 0));
+    }
+
+    @Test
+    void overlayCornersAddTheirTileBesideTwoSides() {
+        // Right and down border, plus the up-left corner: tiles 3 and 16 (corner bit 7 is up-left).
+        assertEquals(List.of(3), overlayTiles(4 | 2, 0));
+        assertEquals(List.of(3, 16), overlayTiles(4 | 2 | 1 << 7, 0));
+        // Left and up border, plus the down-right corner (bit 5): tiles 11 and 0.
+        assertEquals(List.of(11, 0), overlayTiles(1 | 8 | 1 << 5, 0));
+    }
+
+    @Test
+    void aLoneOverlayCornerNeedsAMatchingSideNextToIt() {
+        // Only the down-left corner (bit 4) borders: drawn when the block left or below matches the rule.
+        assertEquals(List.of(), overlayTiles(1 << 4, 0));
+        assertEquals(List.of(2), overlayTiles(1 << 4, 1));
+        assertEquals(List.of(2), overlayTiles(1 << 4, 2));
+        assertEquals(List.of(), overlayTiles(1 << 4, 4));
+    }
+
+    @Test
+    void overlayVariantsPickOneTileLikeTheirPlainMethods() {
+        ConnectedTextures.Rule fixed = rule("glass.properties", "method", "overlay_fixed", "tiles", "0");
+        assertEquals(0, ConnectedTextures.tile(fixed, UP, 0, 64, 0, joining()));
+        ConnectedTextures.Rule ctm = rule("glass.properties", "method", "overlay_ctm", "tiles", "0-46");
+        assertEquals(26, ConnectedTextures.tile(ctm, DOWN, 0, 64, 0, neighbors(DOWN, 0xFF)));
+        ConnectedTextures.Rule overlay = rule("glass.properties", "method", "overlay");
+        assertEquals(-1, ConnectedTextures.tile(overlay, UP, 0, 64, 0, joining()));
+    }
+
+    @Test
+    void heightsTakeSeveralRangesAndMinMaxHeight() {
+        ConnectedTextures.Rule ranges = rule("glass.properties", "method", "fixed", "tiles", "0", "heights", "0-5 60-70");
+        assertTrue(ranges.applies(3, 1));
+        assertFalse(ranges.applies(30, 1));
+        assertTrue(ranges.applies(64, 1));
+        ConnectedTextures.Rule minMax = rule("glass.properties", "method", "fixed", "tiles", "0", "minHeight", "10",
+                "maxHeight", "20");
+        assertFalse(minMax.applies(9, 1));
+        assertTrue(minMax.applies(20, 1));
+        assertFalse(minMax.applies(21, 1));
+        assertTrue(rule("glass.properties", "method", "fixed", "tiles", "0").applies(-5, 1));
+    }
+
+    @Test
+    void biomesMatchOptiFineNamesAndNegation() {
+        ConnectedTextures.Rule desert = rule("glass.properties", "method", "fixed", "tiles", "0", "biomes",
+                "Desert extremeHills+ JungleEdgeM nether");
+        assertTrue(desert.applies(64, 2));
+        assertTrue(desert.applies(64, 34));
+        assertTrue(desert.applies(64, 151));
+        assertTrue(desert.applies(64, 8));
+        assertFalse(desert.applies(64, 1));
+        ConnectedTextures.Rule notPlains = rule("glass.properties", "method", "fixed", "tiles", "0", "biomes", "!plains");
+        assertFalse(notPlains.applies(64, 1));
+        assertTrue(notPlains.applies(64, 2));
+        // Ids no biome registers stay out of a negated list.
+        assertFalse(notPlains.applies(64, 200));
+    }
+
+    @Test
+    void connectMaterialAndOverlayConnectionsParse() {
+        ConnectedTextures.Rule rule = rule("block1.properties", "method", "overlay", "connect", "material",
+                "connectBlocks", "dirt grass:0", "connectTiles", "sand", "tintIndex", "0", "tintBlock", "grass");
+        assertEquals(ConnectedTextures.CONNECT_MATERIAL, rule.connect());
+        assertTrue(rule.connectsTo(3, 5, "blocks/sand"));
+        assertTrue(rule.connectsTo(2, 0, "blocks/sand"));
+        assertFalse(rule.connectsTo(2, 1, "blocks/sand"));
+        assertFalse(rule.connectsTo(3, 0, "blocks/dirt"));
+        assertEquals(0, rule.tintIndex());
+        assertEquals(2 << 4, rule.tintBlock());
+    }
+
+    @Test
+    void skipAndDefaultTilesStayApart() {
+        ConnectedTextures.Rule rule = rule("glass.properties", "method", "random", "tiles", "<skip> <default> 3");
+        assertEquals(List.of(ConnectedTextures.SKIP_TILE, ConnectedTextures.DEFAULT_TILE, DIRECTORY + "3.png"), rule.tiles());
+    }
+
+    @Test
+    void textureRulesComeBeforeBlockRules() {
+        // "a/block20" sorts before "glass" by path, but OptiFine tries texture rules first.
+        ConnectedTextures rules = connected(DIRECTORY + "a/block20.properties", "method=fixed\ntiles=0",
+                DIRECTORY + "glass.properties", "method=fixed\ntiles=1");
+        int[] order = rules.candidates(20, 0, "blocks/glass", UP);
+        assertEquals(2, order.length);
+        assertEquals(DIRECTORY + "glass.properties", rules.rules().get(order[0]).path());
+        assertEquals(DIRECTORY + "a/block20.properties", rules.rules().get(order[1]).path());
+        // Another block with that texture only meets the texture rule.
+        assertEquals(1, rules.candidates(95, 0, "blocks/glass", UP).length);
+    }
+
+    /** Rules as {@link ConnectedTextures#load} reads them from an in-memory pack of (path, properties text) pairs. */
+    private static ConnectedTextures connected(String... pathsAndTexts) {
+        java.util.Map<String, String> files = new java.util.TreeMap<>();
+        for (int index = 0; index < pathsAndTexts.length; index += 2) {
+            files.put(pathsAndTexts[index], pathsAndTexts[index + 1]);
+        }
+        return ConnectedTextures.load(new alkaline.renderer.asset.AssetSource() {
+            @Override
+            public java.io.InputStream open(String path) {
+                String text = files.get(path);
+                return text == null ? null
+                        : new java.io.ByteArrayInputStream(text.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+            }
+
+            @Override
+            public List<String> list(String prefix) {
+                return files.keySet().stream().filter(path -> path.startsWith(prefix)).toList();
+            }
+
+            @Override
+            public String describe() {
+                return "test rules";
+            }
+        });
+    }
+
+    @Test
+    void randomFollowsOptiFinesPositionHash() {
+        ConnectedTextures.Rule random = rule("glass.properties", "method", "random", "tiles", "0-6");
+        // Config.getRandom(pos, side) for the top face (side 1) at (3, 64, -7), then % 7.
+        int hash = ConnectedTextures.intHash(1 + 37);
+        hash = ConnectedTextures.intHash(hash + 3);
+        hash = ConnectedTextures.intHash(hash + -7);
+        hash = ConnectedTextures.intHash(hash + 64);
+        assertEquals((hash & Integer.MAX_VALUE) % 7, ConnectedTextures.tile(random, UP, 3, 64, -7, joining()));
+        // A linked rule reads the lowest block of a column of the same block.
+        ConnectedTextures.Rule linked = rule("glass.properties", "method", "random", "tiles", "0-6", "linked", "true");
+        ConnectedTextures.Neighbors below = new ConnectedTextures.Neighbors() {
+            @Override
+            public boolean connects(int dx, int dy, int dz) {
+                return false;
+            }
+
+            @Override
+            public boolean sameBlock(int dx, int dy, int dz) {
+                return dx == 0 && dz == 0 && dy == -1;
+            }
+        };
+        assertEquals(ConnectedTextures.tile(random, UP, 3, 63, -7, joining()),
+                ConnectedTextures.tile(linked, UP, 3, 64, -7, below));
+    }
+
+    @Test
+    void repeatIgnoresSymmetry() {
+        ConnectedTextures.Rule plain = rule("glass.properties", "method", "repeat", "width", "2", "height", "2",
+                "tiles", "0-3");
+        ConnectedTextures.Rule opposite = rule("glass.properties", "method", "repeat", "width", "2", "height", "2",
+                "tiles", "0-3", "symmetry", "opposite");
+        for (int x = 0; x < 4; x++) {
+            assertEquals(ConnectedTextures.tile(plain, WEST + 1, x, 64, x, joining()),
+                    ConnectedTextures.tile(opposite, WEST + 1, x, 64, x, joining()));
+        }
+    }
+
     // ---- known deviations from OptiFine (see the handoff note) -----------------------------------------------
 
     @Test

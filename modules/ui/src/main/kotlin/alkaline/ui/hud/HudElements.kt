@@ -355,7 +355,7 @@ private fun Status(frame: HudFrame, preview: Boolean) {
                 stats.level.toString(),
                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold,
                     shadow = Shadow(Color.Black, Offset(1.5f, 1.5f), 1f)),
-                color = Color(0xFF80FF20),
+                color = Color(HudTextColors.xpBar()),
                 textAlign = TextAlign.Center,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = Px * 4),
             )

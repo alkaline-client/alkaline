@@ -23,6 +23,9 @@ import alkaline.renderer.model.ObjectModels;
 import alkaline.renderer.model.ProjectileModels;
 import alkaline.renderer.model.ModelPose;
 import alkaline.renderer.model.PoseMath;
+import alkaline.renderer.texture.EmissiveTextures;
+import alkaline.renderer.texture.RandomEntities;
+import alkaline.renderer.texture.TextureAnimations;
 import alkaline.renderer.vulkan.model.ModelRenderer;
 import alkaline.renderer.vulkan.resource.RenderTargetFormat;
 import alkaline.renderer.vulkan.resource.TextureOptions;
@@ -93,6 +96,49 @@ final class EntityView implements AutoCloseable {
     private final Map<String, VulkanTexture> textures = new HashMap<>();
     private final Set<String> failedTextures = new HashSet<>();
     private final ArrayDeque<String> pendingTextures = new ArrayDeque<>();
+    /**
+     * OptiFine's random entities and emissive textures: the packs' rules, the entity whose textures are being
+     * picked (null outside a living entity), and each loaded texture's glowing {@code <name><suffix>.png}.
+     */
+    private final RandomEntities randomEntities;
+    private final String emissiveSuffix;
+    private final java.util.IdentityHashMap<VulkanTexture, VulkanTexture> emissive = new java.util.IdentityHashMap<>();
+    private Entity randomEntity;
+    private final RandomSubject subject = new RandomSubject();
+    private int moonPhase;
+    private long worldTime;
+    private int weather;
+    private java.util.function.IntBinaryOperator biomes = (x, z) -> 1;
+    /**
+     * OptiFine's texture animations over entity textures: per animated texture, every look composed so far (each
+     * uploaded once, in {@link #beforeFrame}) and the one the current tick shows. Drawing only picks.
+     */
+    private final TextureAnimations animations;
+    private final Map<String, Animated> animated = new HashMap<>();
+    /** Distinct looks one animated texture keeps; past it, new looks wait and the last one stays on screen. */
+    private static final int MAX_ANIMATION_STATES = 256;
+    /** New looks composed and uploaded per frame (each upload waits for the GPU queue). */
+    private static final int ANIMATION_UPLOADS_PER_FRAME = 2;
+    private static final TextureOptions ANIMATION_OPTIONS = new TextureOptions(ImageSampling.NEAREST, false, false, 1);
+
+    private static final class Animated {
+        final TextureAnimations.Target target;
+        final RgbaImage base;
+        final VulkanTexture glow;
+        final long[] states = new long[MAX_ANIMATION_STATES];
+        final VulkanTexture[] looks = new VulkanTexture[MAX_ANIMATION_STATES];
+        int count;
+        VulkanTexture current;
+
+        Animated(TextureAnimations.Target target, RgbaImage base, VulkanTexture glow) {
+            this.target = target;
+            this.base = base;
+            this.glow = glow;
+        }
+    }
+
+    /** This entity's light at full block light (EmissiveTextures.beginRenderEmissive: block 240, sky kept). */
+    private int emissiveLight;
     private final Map<String, VulkanTexture> skinTextures = new HashMap<>();
     /** Item models drawn while not yet uploaded; uploaded in {@link #beforeFrame}. */
     private final Set<String> pendingItems = new java.util.LinkedHashSet<>();
@@ -160,12 +206,17 @@ final class EntityView implements AutoCloseable {
         }
     }
 
+    private alkaline.renderer.world.CustomColors customColors = alkaline.renderer.world.CustomColors.NONE;
+
     EntityView(VulkanRenderer renderer, AssetSource assets, RenderTargetFormat target, Skins skins,
                ItemCatalog catalog) {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.assets = assets;
         this.skins = Objects.requireNonNull(skins, "skins");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
+        randomEntities = RandomEntities.load(assets);
+        emissiveSuffix = EmissiveTextures.suffix(assets);
+        animations = TextureAnimations.load(assets);
         models = new ModelRenderer(renderer, target);
         glints = new GlintStyles(renderer, catalog, models::prepare);
         arrowModel = models.upload(ProjectileModels.arrow());
@@ -193,6 +244,84 @@ final class EntityView implements AutoCloseable {
         handPose = new ModelPose(EntityModels.model(EntityModels.Kind.PLAYER));
     }
 
+    /** The packs' custom colors (OptiFine sheep.<dye> fleece colors). */
+    void customColors(alkaline.renderer.world.CustomColors colors) {
+        customColors = Objects.requireNonNull(colors, "colors");
+    }
+
+    /**
+     * The world state OptiFine's random entity rules read: moon phase, world time, weather ({@link
+     * RandomEntities#CLEAR}, RAIN or THUNDER) and the biome of a column (for spawn biomes). Call once per frame.
+     */
+    void world(int moonPhase, long worldTime, int weather, java.util.function.IntBinaryOperator biomes) {
+        this.moonPhase = moonPhase;
+        this.worldTime = worldTime;
+        this.weather = weather;
+        this.biomes = Objects.requireNonNull(biomes, "biomes");
+    }
+
+    /** RandomEntity's view of the entity being drawn. */
+    private final class RandomSubject implements RandomEntities.Subject {
+        @Override
+        public int randomId() {
+            UUID uuid = randomEntity.uuid;
+            if (uuid != null) {
+                return (int) (uuid.getLeastSignificantBits() & 0x7FFFFFFFL);
+            }
+            // Vanilla gives a mob a random client-side UUID; a mix of the entity id is as random and stays put.
+            long mixed = randomEntity.id * 0x9E3779B97F4A7C15L;
+            mixed = (mixed ^ mixed >>> 32) * 0xD6E8FEB86659FD93L;
+            return (int) ((mixed ^ mixed >>> 32) & 0x7FFFFFFFL);
+        }
+
+        @Override
+        public int spawnBiome() {
+            return biomes.applyAsInt(randomEntity.spawnX, randomEntity.spawnZ);
+        }
+
+        @Override
+        public int spawnY() {
+            return randomEntity.spawnY;
+        }
+
+        @Override
+        public int health() {
+            return randomEntity.living() ? (int) randomEntity.health() : 0;
+        }
+
+        @Override
+        public int maxHealth() {
+            return randomEntity.living() ? (int) randomEntity.maxHealth : 0;
+        }
+
+        @Override
+        public String name() {
+            String name = randomEntity.metadata.getString(2, "");
+            return name.isEmpty() ? null : name;
+        }
+
+        @Override
+        public int profession() {
+            return randomEntity.category == Entity.Category.MOB && randomEntity.type == EntityTypes.VILLAGER
+                    ? randomEntity.metadata.getInt(16, 0) : -1;
+        }
+
+        @Override
+        public int collar() {
+            if (randomEntity.category != Entity.Category.MOB || randomEntity.type != EntityTypes.WOLF) {
+                return Integer.MIN_VALUE;
+            }
+            // EntityWolf: tamed is flag 4 of byte 16; the collar is EnumDyeColor.byDyeDamage(byte 20).
+            return (randomEntity.metadata.getByte(16, 0) & 4) == 0 ? -1
+                    : 15 - (randomEntity.metadata.getByte(20, 14) & 15);
+        }
+
+        @Override
+        public int baby() {
+            return randomEntity.living() ? EntityTypes.child(randomEntity) ? 1 : 0 : -1;
+        }
+    }
+
     // ---- assets -------------------------------------------------------------------------------------------
 
     /** Loads a few queued textures and item models; call outside frames. */
@@ -208,15 +337,28 @@ final class EntityView implements AutoCloseable {
             String path = pendingTextures.poll();
             // Custom armor textures name full asset paths; the rest are short paths under textures/.
             TextureOptions nearest = new TextureOptions(ImageSampling.NEAREST, false, false, 1);
+            String asset = path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png";
+            TextureAnimations.Target animation = path.indexOf('+') >= 0 ? null : animations.target(asset);
+            RgbaImage animationBase = animation == null ? null : image(asset);
             VulkanTexture texture = path.indexOf('+') >= 0 ? layered(path, nearest)
-                    : load(path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png", nearest);
+                    : animationBase != null ? renderer.createTexture(animationBase, nearest) : load(asset, nearest);
             if (texture == null) {
                 failedTextures.add(path);
             } else {
                 textures.put(path, texture);
+                String glow = path.indexOf('+') >= 0 || assets == null ? null : EmissiveTextures.emissivePath(assets,
+                        path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png", emissiveSuffix);
+                VulkanTexture glowing = glow == null ? null : load(glow, nearest);
+                if (glowing != null) {
+                    emissive.put(texture, glowing);
+                }
+                if (animationBase != null) {
+                    animated.put(path, new Animated(animation, animationBase, glowing));
+                }
             }
         }
         uploadObjects();
+        animate(ANIMATION_OPTIONS);
         if (catalog.generation() != gpuGeneration) {
             // The assets changed (resource packs): drop every item uploaded from the old ones.
             closeItems();
@@ -267,6 +409,41 @@ final class EntityView implements AutoCloseable {
         pendingBolts.clear();
     }
 
+    /** Advances the packs' texture animations one game tick; their new looks upload in the next beforeFrame. */
+    void tick() {
+        animations.tick();
+    }
+
+    /**
+     * Picks each animated texture's look for the current tick, composing and uploading looks not seen before
+     * (a few per frame). Outside frames only.
+     */
+    private void animate(TextureOptions options) {
+        int uploads = 0;
+        for (Animated texture : animated.values()) {
+            long state = texture.target.state();
+            VulkanTexture look = null;
+            for (int index = 0; index < texture.count; index++) {
+                if (texture.states[index] == state) {
+                    look = texture.looks[index];
+                    break;
+                }
+            }
+            if (look == null && texture.count < MAX_ANIMATION_STATES && uploads < ANIMATION_UPLOADS_PER_FRAME) {
+                look = renderer.createTexture(texture.target.compose(texture.base), options);
+                texture.states[texture.count] = state;
+                texture.looks[texture.count++] = look;
+                if (texture.glow != null) {
+                    emissive.put(look, texture.glow);
+                }
+                uploads++;
+            }
+            if (look != null) {
+                texture.current = look;
+            }
+        }
+    }
+
     private VulkanTexture load(String path, TextureOptions options) {
         RgbaImage image = image(path);
         return image == null ? null : renderer.createTexture(image, options);
@@ -298,7 +475,16 @@ final class EntityView implements AutoCloseable {
      * Keyed by the short path, which callers pass as constants, so a frame builds no strings.
      */
     private VulkanTexture texture(String path) {
+        if (randomEntity != null && path != null) {
+            path = randomEntities.texture(path, subject, moonPhase, worldTime, weather);
+        }
         VulkanTexture texture = textures.get(path);
+        if (texture != null && !animated.isEmpty()) {
+            Animated animation = animated.get(path);
+            if (animation != null && animation.current != null) {
+                return animation.current;
+            }
+        }
         if (texture == null && !failedTextures.contains(path) && !pendingTextures.contains(path)) {
             pendingTextures.add(path);
         }
@@ -552,10 +738,16 @@ final class EntityView implements AutoCloseable {
                     (int) Math.floor(entity.renderZ(partialTick)));
             int light = lightmap[(packed >> 4 & 15) * 16 + (packed & 15)];
             packedLight = packed;
+            emissiveLight = lightmap[(packed >> 4 & 15) * 16 + 15];
             if (entity.category == Entity.Category.OBJECT) {
                 renderObject(entity, (float) x, (float) y, (float) z, light, partialTick);
             } else {
-                renderLiving(entity, players, (float) x, (float) y, (float) z, light, hit, partialTick);
+                randomEntity = randomEntities.isEmpty() ? null : entity;
+                try {
+                    renderLiving(entity, players, (float) x, (float) y, (float) z, light, hit, partialTick);
+                } finally {
+                    randomEntity = null;
+                }
             }
         }
     }
@@ -636,7 +828,8 @@ final class EntityView implements AutoCloseable {
                 if ((fleece & 16) == 0) {
                     extraKind = EntityModels.Kind.SHEEP_WOOL;
                     extraTexture = "entity/sheep/sheep_fur";
-                    extraTint = fleeceColor(fleece & 15);
+                    int custom = customColors.sheep(fleece & 15);
+                    extraTint = custom >= 0 ? 0xFF000000 | custom : fleeceColor(fleece & 15);
                 }
             }
             case EntityTypes.CHICKEN -> {
@@ -756,6 +949,7 @@ final class EntityView implements AutoCloseable {
         }
         if (!child && !invisible) {
             models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light);
+            submitEmissive(gpu.get(kind), texture, pose, 0xFFFFFFFF, overlay);
         }
         if (extraKind != null) {
             VulkanTexture extra = texture(extraTexture);
@@ -764,6 +958,7 @@ final class EntityView implements AutoCloseable {
                 extraPose.copyFrom(pose, extraKind == EntityModels.Kind.MOOSHROOM_MUSHROOMS ? 1
                         : Math.min(pose.model().partCount(), extraPose.model().partCount()));
                 models.submit(gpu.get(extraKind), extra, extraPose, root, extraTint, overlay, light);
+                submitEmissive(gpu.get(extraKind), extra, extraPose, extraTint, overlay);
             }
         }
         if (kind == EntityModels.Kind.GUARDIAN && animState != null && !invisible) {
@@ -780,6 +975,18 @@ final class EntityView implements AutoCloseable {
             renderHeld(entity.equipment[0], pose, motion.sneaking, light,
                     entity.equipment[0] != null && entity.equipment[0].id() == 261 && entity.usingItem()
                             ? entity.usingTicks : -1, hookOwners.contains(entity.id));
+        }
+    }
+
+    /**
+     * RendererLivingEntity.renderModel's emissive pass: the same model again with the texture's glowing image at
+     * full block light, when it has one. Drawn right after the base so its equal depth passes over it.
+     */
+    private void submitEmissive(ModelRenderer.GpuModel model, VulkanTexture texture, ModelPose pose, int tint,
+                                int overlay) {
+        VulkanTexture glowing = emissive.get(texture);
+        if (glowing != null) {
+            models.submit(model, glowing, pose, root, tint, overlay, emissiveLight);
         }
     }
 
@@ -1793,6 +2000,14 @@ final class EntityView implements AutoCloseable {
         models.close();
         for (VulkanTexture texture : textures.values()) {
             texture.close();
+        }
+        for (VulkanTexture texture : new java.util.HashSet<>(emissive.values())) {
+            texture.close();
+        }
+        for (Animated texture : animated.values()) {
+            for (int index = 0; index < texture.count; index++) {
+                texture.looks[index].close();
+            }
         }
         for (VulkanTexture texture : skinTextures.values()) {
             texture.close();

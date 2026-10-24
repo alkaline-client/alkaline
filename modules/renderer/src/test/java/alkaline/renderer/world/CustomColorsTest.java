@@ -213,4 +213,145 @@ class CustomColorsTest {
         CustomColors colors = CustomColors.load(new MemoryAssets().text("color.properties", "lilypad=5ea334\n"));
         assertEquals(-1, colors.waterParticle(1, 0.8F, 0.4F, 64));
     }
+
+    // ---- smoothing and fading --------------------------------------------------------------------------------
+
+    /** Biome = x for x 0..3 (grid columns), plains' climate. */
+    private static final CustomColors.Biomes COLUMNS = new CustomColors.Biomes() {
+        @Override
+        public int biome(int x, int z) {
+            return Math.max(0, Math.min(3, x));
+        }
+
+        @Override
+        public float temperature(int biome, int x, int y, int z) {
+            return 0.8F;
+        }
+
+        @Override
+        public float rainfall(int biome) {
+            return 0.4F;
+        }
+    };
+
+    @Test
+    void smoothingAveragesTheSevenBySevenColumnsAroundTheBlock() {
+        CustomColors colors = CustomColors.load(new MemoryAssets()
+                .text("colormap/fog0.properties", "format=grid\n")
+                .png("colormap/fog0.png", 4, 1, (x, y) -> (x * 50) << 16 | 7));
+        // Columns -3..3 read biomes 0,0,0,0,1,2,3: red (0*4 + 50 + 100 + 150) / 7 = 42, rounded down.
+        assertEquals(42 << 16 | 7, colors.fog().smooth(COLUMNS, 0, 64, 0, 3));
+        // Radius 0 is the block's own column.
+        assertEquals(100 << 16 | 7, colors.fog().smooth(COLUMNS, 2, 64, 0, 0));
+        CustomColors.Colormap fixed = new CustomColors.Colormap(CustomColors.Colormap.FIXED, 0x123456, null, 0, 0, 0);
+        assertEquals(0x123456, fixed.smooth(COLUMNS, 0, 64, 0, 3));
+    }
+
+    @Test
+    void faderStartsAtItsFirstColorAndMovesByTheShareOfASecond() {
+        CustomColors.Fader fader = new CustomColors.Fader();
+        fader.fade(1f, 0f, 0f, 1000);
+        assertEquals(1f, fader.red, 1e-6f);
+        fader.fade(0f, 0f, 1f, 1250);
+        assertEquals(0.75f, fader.red, 1e-6f);
+        assertEquals(0.25f, fader.blue, 1e-6f);
+        // No time passed: no step.
+        fader.fade(0f, 0f, 1f, 1250);
+        assertEquals(0.75f, fader.red, 1e-6f);
+        // A second or more jumps to the target.
+        fader.fade(0f, 0f, 1f, 5000);
+        assertEquals(0f, fader.red, 1e-6f);
+        assertEquals(1f, fader.blue, 1e-6f);
+        // Changes under 0.004 in every channel are ignored.
+        fader.fade(0.003f, 0f, 1f, 5500);
+        assertEquals(0f, fader.red, 1e-6f);
+    }
+
+    @Test
+    void skyFogAndUnderwaterUseTheSmoothedColormap() {
+        CustomColors colors = CustomColors.load(new MemoryAssets()
+                .text("colormap/fog0.properties", "format=grid\n")
+                .png("colormap/fog0.png", 4, 1, (x, y) -> (x * 50) << 16 | 7));
+        Sky sky = new Sky();
+        sky.customColors = colors;
+        sky.biome = 3;
+        sky.update(6000, 0f, 0f, 0f, 0.8f, 1f, 0f, 0f, 70.0, 32, Sky.Medium.AIR);
+        float alone = sky.fogColor[0];
+        sky.biomes = COLUMNS;
+        sky.feetX = 0.5;
+        sky.feetZ = 0.5;
+        sky.update(6000, 0f, 0f, 0f, 0.8f, 1f, 0f, 0f, 70.0, 32, Sky.Medium.AIR);
+        // At 32 chunks the fog takes none of the sky color: biome 3's own 150 red against the 7x7 average of 42.
+        assertEquals(42f / 150f, sky.fogColor[0] / alone, 0.01f);
+    }
+
+    // ---- redstone, XP orbs, dyes, text and maps --------------------------------------------------------------
+
+    @Test
+    void redstonePaletteIsIndexedByPower() {
+        CustomColors colors = CustomColors.load(new MemoryAssets()
+                .png("colormap/redstone.png", 16, 1, (x, y) -> x * 16 << 16));
+        assertEquals(0, colors.redstone(0));
+        assertEquals(15 * 16 << 16, colors.redstone(15));
+        assertEquals(15 * 16 << 16, colors.redstone(40));
+        assertEquals(-1, CustomColors.NONE.redstone(3));
+        CustomColors older = CustomColors.load(new MemoryAssets()
+                .png("colormap/redstonecolor.png", 16, 1, (x, y) -> 0x0000FF));
+        assertEquals(0x0000FF, older.redstone(7));
+    }
+
+    @Test
+    void xpOrbCyclesThroughItsPaletteWithTheSine() {
+        CustomColors colors = CustomColors.load(new MemoryAssets()
+                .text("color.properties", "xporb.time=1256\n")
+                .png("colormap/xporb.png", 5, 1, (x, y) -> x + 1));
+        // sin 0 = 0: the middle entry, round(1 * 4 / 2) = 2.
+        assertEquals(3, colors.xpOrb(0f));
+        assertEquals(5, colors.xpOrb((float) Math.PI / 2));
+        assertEquals(1, colors.xpOrb((float) -Math.PI / 2));
+        // 1256 ms per cycle halves the timer's speed: 628 / 1256.
+        assertEquals(5f, colors.xpOrbTimer(10f), 1e-5f);
+        assertEquals(-1, CustomColors.NONE.xpOrb(0f));
+        assertEquals(10f, CustomColors.NONE.xpOrbTimer(10f), 0f);
+    }
+
+    @Test
+    void sheepAndCollarColorsAreKeyedByDyeName() {
+        CustomColors colors = CustomColors.load(new MemoryAssets().text("color.properties",
+                "sheep.white=ff0000\nsheep.lightBlue=00ff00\ncollar.black=0000ff\nsheep.nonsense=ffffff\n"));
+        assertEquals(0xFF0000, colors.sheep(0));
+        assertEquals(0x00FF00, colors.sheep(3));
+        assertEquals(-1, colors.sheep(1));
+        assertEquals(0x0000FF, colors.collar(15));
+        assertEquals(-1, colors.collar(0));
+    }
+
+    @Test
+    void textCodesCoverTheFormatColorsAndTheirShadows() {
+        CustomColors colors = CustomColors.load(new MemoryAssets().text("color.properties",
+                "text.code.0=111111\ntext.code.31=222222\ntext.code.32=333333\ntext.xpbar=444444\n"
+                        + "text.boss=555555\ntext.sign=666666\n"));
+        assertEquals(0x111111, colors.textCode(0));
+        assertEquals(0x222222, colors.textCode(31));
+        assertEquals(-1, colors.textCode(1));
+        assertEquals(-1, colors.textCode(32));
+        assertEquals(0x444444, colors.xpBarText());
+        assertEquals(0x555555, colors.bossText());
+        assertEquals(0x666666, colors.signText());
+    }
+
+    @Test
+    void mapColorsAreKeyedByOptiFinesNames() {
+        CustomColors colors = CustomColors.load(new MemoryAssets().text("color.properties",
+                "map.grass=010101\nmap.white=020202\nmap.orange=030303\nmap.lightBlue=040404\n"
+                        + "map.podzol=050505\nmap.netherrack=060606\nmap.unknown=070707\n"));
+        assertEquals(0x010101, colors.map(1));
+        assertEquals(0x020202, colors.map(8));
+        assertEquals(0x030303, colors.map(15));
+        assertEquals(0x040404, colors.map(17));
+        assertEquals(0x050505, colors.map(34));
+        assertEquals(0x060606, colors.map(35));
+        assertEquals(-1, colors.map(2));
+        assertEquals(-1, colors.map(64));
+    }
 }

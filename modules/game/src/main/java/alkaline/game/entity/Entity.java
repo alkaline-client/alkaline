@@ -42,6 +42,12 @@ public final class Entity {
     public double x;
     public double y;
     public double z;
+    /** Entity.getPosition when it spawned (block of the feet + 0.5), for OptiFine's random entity rules. */
+    public final int spawnX;
+    public final int spawnY;
+    public final int spawnZ;
+    /** generic.maxHealth from Entity Properties, 0 until the server sends it. */
+    public float maxHealth;
     public double previousX;
     public double previousY;
     public double previousZ;
@@ -103,6 +109,9 @@ public final class Entity {
         this.x = previousX = targetX = x;
         this.y = previousY = targetY = y;
         this.z = previousZ = targetZ = z;
+        spawnX = (int) Math.floor(x);
+        spawnY = (int) Math.floor(y + 0.5);
+        spawnZ = (int) Math.floor(z);
         this.yaw = previousYaw = targetYaw = yaw;
         this.pitch = previousPitch = targetPitch = pitch;
         headYaw = previousHeadYaw = yaw;

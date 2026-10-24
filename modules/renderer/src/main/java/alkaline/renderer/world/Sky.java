@@ -25,6 +25,22 @@ public final class Sky {
      * underwater colormaps up at (posY + 1). NaN (the default) means the eye height minus 1.62.
      */
     public double feetY = Double.NaN;
+    /**
+     * Where OptiFine averages the sky, fog and underwater colormaps around the viewer (radius 3 around its feet x and
+     * z), and the clock in milliseconds their colors fade by. Without biomes the colormaps are read at {@link #biome}
+     * alone; without a clock (Long.MIN_VALUE) they do not fade.
+     */
+    public CustomColors.Biomes biomes;
+    public double feetX;
+    public double feetZ;
+    public long millis = Long.MIN_VALUE;
+    private final CustomColors.Fader skyFader = new CustomColors.Fader();
+    private final CustomColors.Fader fogFader = new CustomColors.Fader();
+    private final CustomColors.Fader underwaterFader = new CustomColors.Fader();
+    /** The last smoothed lookup per colormap (sky, fog, underwater): the colormap, block and color. */
+    private final CustomColors.Colormap[] cachedMaps = new CustomColors.Colormap[3];
+    private final int[] cachedBlocks = new int[9];
+    private final int[] cachedColors = new int[3];
     private double entityY;
     public float rainfall = 0.4F;
     private float temperature = 0.8F;
@@ -148,10 +164,16 @@ public final class Sky {
         CustomColors.Colormap custom = customColors.sky();
         if (custom != null) {
             // CustomColors.getSkyColor: the colormap's color scaled by the vanilla sky over plains' 0.5, 0.66275, 1.
-            int color = custom.color(biome, temperature, rainfall, (int) Math.floor(entityY + 1.0));
+            int color = colormap(custom, 0);
             red = (color >> 16 & 255) / 255.0F * (red / 0.5F);
             green = (color >> 8 & 255) / 255.0F * (green / 0.66275F);
             blue = (color & 255) / 255.0F * blue;
+            if (millis != Long.MIN_VALUE) {
+                skyFader.fade(red, green, blue, millis);
+                red = skyFader.red;
+                green = skyFader.green;
+                blue = skyFader.blue;
+            }
         }
         skyColor[0] = red;
         skyColor[1] = green;
@@ -191,10 +213,16 @@ public final class Sky {
         CustomColors.Colormap customFog = customColors.fog();
         if (customFog != null) {
             // CustomColors.getFogColor: the colormap's color scaled by the vanilla fog over its 0.753, 0.8471, 1.
-            int color = customFog.color(biome, temperature, rainfall, (int) Math.floor(entityY + 1.0));
+            int color = colormap(customFog, 1);
             red = (color >> 16 & 255) / 255.0F * (red / 0.753F);
             green = (color >> 8 & 255) / 255.0F * (green / 0.8471F);
             blue = (color & 255) / 255.0F * blue;
+            if (millis != Long.MIN_VALUE) {
+                fogFader.fade(red, green, blue, millis);
+                red = fogFader.red;
+                green = fogFader.green;
+                blue = fogFader.blue;
+            }
         }
         if (renderDistanceChunks >= 4 && sunrise[3] > 0.0F) {
             // Looking toward the sun (or the setting sun) tints the fog with the sunrise color.
@@ -228,10 +256,16 @@ public final class Sky {
             blue = 0.2F;
             CustomColors.Colormap customWater = customColors.underwater();
             if (customWater != null) {
-                int color = customWater.color(biome, temperature, rainfall, (int) Math.floor(entityY + 1.0));
+                int color = colormap(customWater, 2);
                 red = (color >> 16 & 255) / 255.0F;
                 green = (color >> 8 & 255) / 255.0F;
                 blue = (color & 255) / 255.0F;
+                if (millis != Long.MIN_VALUE) {
+                    underwaterFader.fade(red, green, blue, millis);
+                    red = underwaterFader.red;
+                    green = underwaterFader.green;
+                    blue = underwaterFader.blue;
+                }
             }
         } else if (inside == Medium.LAVA) {
             red = 0.6F;
@@ -274,6 +308,28 @@ public final class Sky {
             fogEnd = reach;
             fogDensity = 0.0F;
         }
+    }
+
+    /**
+     * A sky, fog or underwater colormap at the viewer (posX, posY + 1, posZ): averaged over 7x7 columns with
+     * {@link #biomes} (recomputed only when the block or colormap changes), else at the eye's biome.
+     */
+    private int colormap(CustomColors.Colormap map, int slot) {
+        int y = (int) Math.floor(entityY + 1.0);
+        if (biomes == null) {
+            return map.color(biome, temperature, rainfall, y);
+        }
+        int x = (int) Math.floor(feetX);
+        int z = (int) Math.floor(feetZ);
+        if (cachedMaps[slot] != map || cachedBlocks[slot * 3] != x || cachedBlocks[slot * 3 + 1] != y
+                || cachedBlocks[slot * 3 + 2] != z) {
+            cachedMaps[slot] = map;
+            cachedBlocks[slot * 3] = x;
+            cachedBlocks[slot * 3 + 1] = y;
+            cachedBlocks[slot * 3 + 2] = z;
+            cachedColors[slot] = map.smooth(biomes, x, y, z, 3);
+        }
+        return cachedColors[slot];
     }
 
     /** BiomeGenBase.getSkyColorByTemp. */

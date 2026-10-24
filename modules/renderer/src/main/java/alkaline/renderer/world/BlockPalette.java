@@ -68,13 +68,40 @@ public final class BlockPalette {
     final int[] overlayLayer;
     final byte[] overlayOrient;
     final int[] overlayTint;
-    /** Per choice and face (as {@link #choiceAppearance}): the connected-texture rule, or -1. */
+    /**
+     * Per choice and face (as {@link #choiceAppearance}): where the face's connected-texture rules start in
+     * {@link #ctmLists}, or -1 for none.
+     */
     final int[] choiceCtm;
+    /**
+     * Per choice of a model that is not a cube: where its quads' entries start in {@link #quadCtm}, or -1 when none
+     * of its quads has connected-texture rules.
+     */
+    final int[] choiceQuadCtm;
+    /** Per model quad of such a choice (in model order): where the quad's rules start in {@link #ctmLists}, or -1. */
+    final int[] quadCtm;
+    /** Rule lists, each the rule indices a face tries in order, ended by -1. */
+    final int[] ctmLists;
     /** The active packs' connected-texture rules, and where each rule's tile layers start in {@link #ctmTiles}. */
     final ConnectedTextures ctm;
     final int[] ctmTileStart;
-    /** Tile layers of every used rule, -1 for a tile that keeps the face's texture. */
+    /** Tile layers of every used rule: {@link #KEEP_TILE} keeps the face's texture, {@link #SKIP_TILE} gives none. */
     final int[] ctmTiles;
+    static final int KEEP_TILE = -1;
+    static final int SKIP_TILE = -2;
+    /** Per rule: the tint of its overlay tiles (its tintBlock's color with a tintIndex, else none). */
+    final int[] ctmTint;
+    /** Whether some rule in use has a biome condition (the mesher then reads the section's biomes). */
+    final boolean ctmBiomes;
+    /**
+     * Per entry and face: the texture layer a neighbor shows on that face (ConnectedTextures.getNeighbourIcon: the
+     * model's first quad culled by that face, else its first unculled quad facing it), or -1.
+     */
+    final int[] entryFaceLayer;
+    /** Per quad: whether its texture is a pane edge ({@code glass_pane_top*}), which OptiFine's CTM hides between panes. */
+    final boolean[] quadPaneEdge;
+    /** Per texture layer: its emissive layer ({@code <texture><suffix>.png}, OptiFine's emissive textures), or -1. */
+    final int[] emissiveLayer;
     /** Water's tint (a custom water colormap's plains color, or none). */
     final int waterTint;
     /** The active packs' custom colors, for the sky and items. */
@@ -116,9 +143,17 @@ public final class BlockPalette {
         overlayOrient = compiler.overlayOrient.toBytes();
         overlayTint = compiler.overlayTint.toArray();
         choiceCtm = compiler.choiceCtm.toArray();
+        choiceQuadCtm = compiler.choiceQuadCtm.toArray();
+        quadCtm = compiler.quadCtm.toArray();
+        ctmLists = compiler.ctmLists.toArray();
         ctm = compiler.ctm;
         ctmTileStart = compiler.ctmTileStart;
         ctmTiles = compiler.ctmTiles.toArray();
+        ctmTint = compiler.ctmTint;
+        ctmBiomes = compiler.ctmBiomes;
+        entryFaceLayer = compiler.entryFaceLayer.toArray();
+        quadPaneEdge = compiler.quadPaneEdge.toBooleans();
+        emissiveLayer = compiler.emissiveLayer;
         waterTint = compiler.waterTint;
         customColors = compiler.colors;
         waterStill = compiler.layer("blocks/water_still");
@@ -138,6 +173,11 @@ public final class BlockPalette {
     /** The active packs' custom colors (sky, fog, potions, eggs). */
     public CustomColors customColors() {
         return customColors;
+    }
+
+    /** Whether meshing reads biomes ({@link BlockSource#fillBiomes}): some connected texture has a biome condition. */
+    public boolean needsBiomes() {
+        return ctmBiomes;
     }
 
     /** Texture paths by layer, for the renderer's texture array. */
@@ -285,9 +325,18 @@ public final class BlockPalette {
         final Ints overlayOrient = new Ints();
         final Ints overlayTint = new Ints();
         final Ints choiceCtm = new Ints();
+        final Ints choiceQuadCtm = new Ints();
+        final Ints quadCtm = new Ints();
+        final Ints ctmLists = new Ints();
+        private final Map<String, Integer> ctmListIndex = new HashMap<>();
         final ConnectedTextures ctm;
         final int[] ctmTileStart;
         final Ints ctmTiles = new Ints();
+        int[] ctmTint;
+        boolean ctmBiomes;
+        final Ints entryFaceLayer = new Ints();
+        final Ints quadPaneEdge = new Ints();
+        int[] emissiveLayer;
         /** Cube description of each model: per face base quad, overlay quad (-1) and orientations. */
         private final List<int[]> cubeFaces = new ArrayList<>();
 
@@ -353,8 +402,13 @@ public final class BlockPalette {
                             for (int face = 0; face < 6; face++) {
                                 int appearance = faces == null ? -1 : appearance(model, face, faces, tint);
                                 choiceAppearance.add(appearance);
-                                choiceCtm.add(appearance < 0 ? -1 : ctmRule(id, meta, appearance, face));
+                                choiceCtm.add(appearance < 0 ? -1
+                                        : ctmList(id, meta, textures.get(appearanceLayer.get(appearance)), face));
                             }
+                            choiceQuadCtm.add(faces == null ? quadRules(id, meta, model) : -1);
+                        }
+                        for (int face = 0; face < 6; face++) {
+                            entryFaceLayer.add(choices.isEmpty() ? -1 : faceLayer(model(choices.getFirst().model()), face));
                         }
                     }
                     if (any) {
@@ -364,11 +418,58 @@ public final class BlockPalette {
                         entryFirstChoice.truncate(base);
                         entryChoiceCount.truncate(base);
                         entryTint.truncate(base);
+                        entryFaceLayer.truncate(base * 6);
                     }
                 }
             }
             registerConnectedTiles();
+            registerEmissive();
             return new BlockPalette(this);
+        }
+
+        /**
+         * ConnectedTextures.getNeighbourIcon: the texture a model shows a neighbor on a face, from its quads culled
+         * by that face, else from its unculled quads facing that way; -1 for none.
+         */
+        private int faceLayer(int model, int face) {
+            int[] faces = cubeFaces.get(model);
+            int start = modelQuadStart.get(model);
+            if (faces != null) {
+                return quadLayer.get(start + faces[face * 4]);
+            }
+            int count = modelQuadCount.get(model);
+            for (int quad = start; quad < start + count; quad++) {
+                if (quadCullFace.get(quad) == face) {
+                    return quadLayer.get(quad);
+                }
+            }
+            for (int quad = start; quad < start + count; quad++) {
+                if (quadCullFace.get(quad) < 0 && quadFace.get(quad) == face) {
+                    return quadLayer.get(quad);
+                }
+            }
+            return -1;
+        }
+
+        /** The rule lists of a model's quads for a block state, as an offset into {@link #quadCtm}, or -1 for none. */
+        private int quadRules(int id, int meta, int model) {
+            if (ctm == ConnectedTextures.NONE) {
+                return -1;
+            }
+            int start = modelQuadStart.get(model);
+            int count = modelQuadCount.get(model);
+            int first = quadCtm.size();
+            boolean any = false;
+            for (int quad = start; quad < start + count; quad++) {
+                int list = ctmList(id, meta, textures.get(quadLayer.get(quad)), quadFace.get(quad));
+                quadCtm.add(list);
+                any |= list >= 0;
+            }
+            if (!any) {
+                quadCtm.truncate(first);
+                return -1;
+            }
+            return first;
         }
 
         /**
@@ -394,7 +495,7 @@ public final class BlockPalette {
                     yield variant == 2 || variant == 3 ? grass : NO_TINT;
                 }
                 case LILY_PAD -> lilyPad;
-                case REDSTONE -> redstone(meta);
+                case REDSTONE -> colors.redstone(meta) >= 0 ? colors.redstone(meta) : redstone(meta);
                 case STEM -> (meta & 7) * 32 << 16 | (255 - (meta & 7) * 8) << 8 | (meta & 7) * 4;
             };
         }
@@ -421,31 +522,44 @@ public final class BlockPalette {
             }
         }
 
-        /** The first connected-texture rule matching a cube face, or -1. Tiles are registered after every model. */
-        private int ctmRule(int id, int meta, int appearance, int face) {
-            String texture = textures.get(appearanceLayer.get(appearance));
-            List<ConnectedTextures.Rule> rules = ctm.rules();
-            for (int index = 0; index < rules.size(); index++) {
-                if (rules.get(index).matches(id, meta, texture, face)) {
-                    return index;
-                }
+        /**
+         * The connected-texture rules a face (of a cube or a model quad) tries, as an offset into {@link #ctmLists},
+         * or -1 for none. Equal lists are stored once. Tiles are registered after every model.
+         */
+        private int ctmList(int id, int meta, String texture, int face) {
+            int[] candidates = ctm.candidates(id, meta, texture, face);
+            if (candidates.length == 0) {
+                return -1;
             }
-            return -1;
+            String key = Arrays.toString(candidates);
+            Integer existing = ctmListIndex.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            int start = ctmLists.size();
+            for (int rule : candidates) {
+                ctmLists.add(rule);
+            }
+            ctmLists.add(-1);
+            ctmListIndex.put(key, start);
+            return start;
         }
 
         /**
          * Registers the tiles of every rule in use as layers after all model textures (so model layers keep low
-         * indices), as far as the renderer's two texture arrays hold them; faces of rules left out keep their
-         * texture.
+         * indices), as far as the renderer's two texture arrays hold them; rules left out are dropped from the
+         * lists, so their faces go on to the next rule.
          */
         private void registerConnectedTiles() {
-            int[] rules = choiceCtm.toArray();
+            int[] lists = ctmLists.toArray();
             boolean[] used = new boolean[ctm.rules().size()];
-            for (int rule : rules) {
+            for (int rule : lists) {
                 if (rule >= 0) {
                     used[rule] = true;
                 }
             }
+            ctmTint = new int[used.length];
+            Arrays.fill(ctmTint, NO_TINT);
             for (int index = 0; index < used.length; index++) {
                 if (!used[index]) {
                     continue;
@@ -453,7 +567,7 @@ public final class BlockPalette {
                 ConnectedTextures.Rule rule = ctm.rules().get(index);
                 int fresh = 0;
                 for (String tile : rule.tiles()) {
-                    fresh += layers.containsKey(tile) || tile.equals(ConnectedTextures.DEFAULT_TILE) ? 0 : 1;
+                    fresh += layers.containsKey(tile) || tile.startsWith("<") ? 0 : 1;
                 }
                 if (textures.size() + fresh > MAX_TEXTURES) {
                     System.err.println("Connected texture " + rule.path() + " skipped: too many block textures.");
@@ -461,13 +575,84 @@ public final class BlockPalette {
                 }
                 ctmTileStart[index] = ctmTiles.size();
                 for (String tile : rule.tiles()) {
-                    ctmTiles.add(tile.equals(ConnectedTextures.DEFAULT_TILE) ? -1 : layer(tile));
+                    ctmTiles.add(tile.equals(ConnectedTextures.DEFAULT_TILE) ? KEEP_TILE
+                            : tile.equals(ConnectedTextures.SKIP_TILE) ? SKIP_TILE : layer(tile));
+                }
+                if (rule.tintIndex() >= 0 && rule.tintBlock() >= 0) {
+                    ctmTint[index] = tintColor(rule.tintBlock() >> 4, rule.tintBlock() & 15, 0);
+                }
+                ctmBiomes |= rule.biomes() != null;
+            }
+            for (int index = 0; index < lists.length; index++) {
+                if (lists[index] >= 0 && ctmTileStart[lists[index]] < 0) {
+                    // Dropped: shift the rest of the list over it.
+                    int end = index;
+                    while (lists[end] >= 0) {
+                        end++;
+                    }
+                    System.arraycopy(lists, index + 1, lists, index, end - index);
+                    index--;
                 }
             }
-            for (int index = 0; index < rules.length; index++) {
-                if (rules[index] >= 0 && ctmTileStart[rules[index]] < 0) {
+            for (int index = 0; index < lists.length; index++) {
+                ctmLists.set(index, lists[index]);
+            }
+            // A list that lost every rule: its faces have none.
+            for (int index = 0; index < choiceCtm.size(); index++) {
+                int list = choiceCtm.get(index);
+                if (list >= 0 && lists[list] < 0) {
                     choiceCtm.set(index, -1);
                 }
+            }
+            for (int index = 0; index < quadCtm.size(); index++) {
+                int list = quadCtm.get(index);
+                if (list >= 0 && lists[list] < 0) {
+                    quadCtm.set(index, -1);
+                }
+            }
+        }
+
+        /**
+         * OptiFine's emissive textures: with {@code optifine/emissive.properties} naming a {@code suffix.emissive},
+         * every block texture (connected-texture tiles too) that has a {@code <texture><suffix>.png} beside it gets
+         * that texture as its emissive layer, drawn over it at full block light.
+         */
+        private void registerEmissive() {
+            int count = textures.size();
+            emissiveLayer = new int[count];
+            Arrays.fill(emissiveLayer, -1);
+            String suffix = alkaline.renderer.texture.EmissiveTextures.suffix(assets);
+            if (suffix == null) {
+                return;
+            }
+            for (int layer = 0; layer < count; layer++) {
+                String texture = textures.get(layer);
+                if (texture.equals("missingno") || texture.endsWith(suffix) || texture.endsWith(suffix + ".png")) {
+                    continue;
+                }
+                String name = texture.startsWith("assets/")
+                        ? texture.substring(0, texture.length() - ".png".length()) + suffix + ".png" : texture + suffix;
+                String path = name.startsWith("assets/") ? name : "assets/minecraft/textures/" + name + ".png";
+                if (!layers.containsKey(name) && !exists(assets, path)) {
+                    continue;
+                }
+                if (textures.size() >= MAX_TEXTURES) {
+                    System.err.println("Emissive textures skipped from " + texture + ": too many block textures.");
+                    break;
+                }
+                emissiveLayer[layer] = layer(name);
+            }
+            emissiveLayer = Arrays.copyOf(emissiveLayer, textures.size());
+            for (int layer = count; layer < emissiveLayer.length; layer++) {
+                emissiveLayer[layer] = -1;
+            }
+        }
+
+        private static boolean exists(AssetSource assets, String path) {
+            try (InputStream input = assets.open(path)) {
+                return input != null;
+            } catch (IOException | RuntimeException unreadable) {
+                return false;
             }
         }
 
@@ -536,6 +721,7 @@ public final class BlockPalette {
                 quadPositions.addAll(quad.positions());
                 quadUvs.addAll(quad.uvs());
                 quadLayer.add(layer(quad.texture()));
+                quadPaneEdge.add(quad.texture().startsWith("blocks/glass_pane_top") ? 1 : 0);
                 quadTinted.add(quad.tintIndex() >= 0 ? 1 : 0);
                 quadCullFace.add(quad.cullFace());
                 quadFace.add(quad.face());

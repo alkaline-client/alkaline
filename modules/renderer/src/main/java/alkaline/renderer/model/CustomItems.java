@@ -123,7 +123,7 @@ public final class CustomItems {
 
     /** {@code nbt.<path>=<value>}: the value at the path compared exactly or by pattern. */
     public record NbtTest(String[] path, String value, Pattern pattern) {
-        boolean matches(String actual) {
+        public boolean matches(String actual) {
             if (actual == null) {
                 return false;
             }
@@ -374,7 +374,7 @@ public final class CustomItems {
         return resolved + extension;
     }
 
-    private static NbtTest nbtTest(String[] path, String value) {
+    public static NbtTest nbtTest(String[] path, String value) {
         Pattern pattern = null;
         if (value.startsWith("pattern:")) {
             pattern = Pattern.compile(glob(value.substring(8)), Pattern.DOTALL);

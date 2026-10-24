@@ -225,6 +225,17 @@ final class GameSounds {
         audio.play(event, player.x, player.y, player.z, volume, pitch);
     }
 
+    /** PlayerControllerMP.onPlayerDestroyBlock's playAuxSFX(2001): the break sound of a block the local player dug. */
+    void blockBroken(int x, int y, int z, int state) {
+        worldEffect(2001, x, y, z, state >> 4 | (state & 15) << 12);
+    }
+
+    /** PlayerControllerMP.onPlayerDamageBlock: the block's step sound, quieter and lower, every fourth tick. */
+    void blockHit(int x, int y, int z, int state) {
+        char type = type(state >> 4);
+        audio.play(stepSound(type), x + 0.5, y + 0.5, z + 0.5, (volume(type) + 1.0F) / 8.0F, frequency(type) * 0.5F);
+    }
+
     /** RenderGlobal.playAuxSFX's sounds, centered on the block (World.playSoundAtPos) unless noted. */
     private void worldEffect(int type, int x, int y, int z, int data) {
         float slight = random.nextFloat() * 0.1F + 0.9F;

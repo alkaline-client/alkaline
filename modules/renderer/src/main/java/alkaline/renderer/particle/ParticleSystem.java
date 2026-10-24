@@ -184,6 +184,22 @@ public final class ParticleSystem {
         return true;
     }
 
+    /**
+     * EntityFX.multiplyVelocity and multipleParticleScaleBy on the particle just spawned: the motion is scaled
+     * about the 0.1 upward launch and the size scaled (block hit debris uses 0.2 and 0.6). Does nothing when the
+     * last spawn was dropped.
+     */
+    public void shrinkLast(float velocity, float scale) {
+        if (count == 0) {
+            return;
+        }
+        int index = count - 1;
+        velocityX[index] *= velocity;
+        velocityY[index] = (velocityY[index] - 0.1f) * velocity + 0.1f;
+        velocityZ[index] *= velocity;
+        size[index] *= scale;
+    }
+
     /** EntityFX's randomized launch: jitter, normalize to a random speed, and add 0.1 upward. */
     private double[] launch(double vx, double vy, double vz) {
         vx += (random.nextDouble() * 2.0 - 1.0) * 0.4;

@@ -8,6 +8,7 @@ import alkaline.game.inventory.ItemStack;
 import alkaline.game.net.ServerSession;
 import alkaline.game.player.LocalPlayer;
 import alkaline.game.world.Biomes189;
+import alkaline.game.world.BlockDamage;
 import alkaline.game.world.ClientWorld;
 import alkaline.renderer.asset.AssetSource;
 import alkaline.renderer.image.ImageDecoder;
@@ -28,6 +29,7 @@ import alkaline.renderer.vulkan.resource.VulkanRenderTarget;
 import alkaline.renderer.vulkan.resource.VulkanRenderer;
 import alkaline.renderer.vulkan.resource.VulkanTexture;
 import alkaline.renderer.vulkan.world.CloudRenderer;
+import alkaline.renderer.vulkan.world.DamageOverlay;
 import alkaline.renderer.vulkan.world.SectionStreamer;
 import alkaline.renderer.vulkan.world.SkyRenderer;
 import alkaline.renderer.vulkan.world.WorldRenderer;
@@ -91,6 +93,13 @@ final class GameView implements MenuBackground {
     /** The hurt overlay, rebuilt when the Hit color setting changes. */
     private EntityView.HitColor hitColor;
     private WorldRenderer world;
+    /** The cracks of blocks being dug, and the buffers that carry them to the renderer each frame. */
+    private final DamageOverlay damageOverlay;
+    private final DamageOverlay.Blocks damageStates;
+    private int[] damageX = new int[8];
+    private int[] damageY = new int[8];
+    private int[] damageZ = new int[8];
+    private int[] damageStage = new int[8];
     private SectionStreamer streamer;
     private ClientWorld streamed;
     private Weather weather;
@@ -130,6 +139,15 @@ final class GameView implements MenuBackground {
             blit.close();
             throw failure;
         }
+        DamageOverlay overlay;
+        try {
+            overlay = new DamageOverlay(renderer, palette, SCENE_FORMAT);
+        } catch (RuntimeException | Error failure) {
+            world.close();
+            blit.close();
+            throw failure;
+        }
+        damageOverlay = overlay;
         entities = new EntityView(renderer, assets, SCENE_FORMAT, skins, catalog);
         CloudRenderer createdClouds = null;
         try {
@@ -142,6 +160,7 @@ final class GameView implements MenuBackground {
         particleSheet = sheet(VanillaParticles.SHEET);
         explosionSheet = sheet(VanillaParticles.EXPLOSION_SHEET);
         entityLight = (x, y, z) -> session.world().light(x, y, z);
+        damageStates = (x, y, z) -> session.world().state(x, y, z);
         effects = new ParticleEffects(particles, new ParticleEffects.Blocks() {
             @Override
             public int particleLayer(int state) {
@@ -151,6 +170,11 @@ final class GameView implements MenuBackground {
             @Override
             public int particleTint(int state) {
                 return palette.particleTint(state);
+            }
+
+            @Override
+            public void bounds(int state, float[] out) {
+                palette.bounds(state, out);
             }
         });
         effects.water(this::waterParticleTint);
@@ -548,6 +572,7 @@ final class GameView implements MenuBackground {
         entities.render(frame, play.entities().all(), play.players(), entityLight, lightmap,
                 fog, hitColor, partialTick, eyeX, eyeY, eyeZ, world.viewProjection(), cameraYaw, cameraPitch,
                 perspective > 0 ? selfModel : null);
+        drawDamage(frame, eyeX, eyeY, eyeZ);
         if (particleSheet != null) {
             world.cameraBasis(right, up);
             cameraPosition[0] = eyeX;
@@ -570,6 +595,30 @@ final class GameView implements MenuBackground {
         frame.bindImage(target);
         frame.draw(3, 1, 0, 0);
         frame.endRendering();
+    }
+
+    /** RenderGlobal.drawBlockDamageTexture: the cracks of every block being dug within 32 blocks. */
+    private void drawDamage(VulkanFrame frame, double eyeX, double eyeY, double eyeZ) {
+        BlockDamage cracks = play.damage();
+        cracks.cull(eyeX, eyeY, eyeZ);
+        int count = cracks.entries().size();
+        if (count == 0) {
+            return;
+        }
+        if (damageX.length < count) {
+            damageX = new int[count];
+            damageY = new int[count];
+            damageZ = new int[count];
+            damageStage = new int[count];
+        }
+        for (int index = 0; index < count; index++) {
+            BlockDamage.Entry entry = cracks.entries().get(index);
+            damageX[index] = entry.x();
+            damageY[index] = entry.y();
+            damageZ[index] = entry.z();
+            damageStage[index] = entry.stage();
+        }
+        world.renderDamage(frame, damageOverlay, count, damageX, damageY, damageZ, damageStage, damageStates);
     }
 
     /** The world options for a settings snapshot, rebuilt only when the snapshot changes. */
@@ -684,6 +733,7 @@ final class GameView implements MenuBackground {
         if (clouds != null) {
             clouds.close();
         }
+        damageOverlay.close();
         particleRenderer.close();
         if (particleSheet != null) {
             particleSheet.close();

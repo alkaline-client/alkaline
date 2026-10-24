@@ -21,6 +21,12 @@ public final class ParticleEffects {
 
         /** The particles' color multiplier for a state (0xRRGGBB). */
         int particleTint(int state);
+
+        /** The state's block bounds (Block.getBlockBounds*): min x, y, z, max x, y, z; whole cells by default. */
+        default void bounds(int state, float[] out) {
+            out[0] = out[1] = out[2] = 0f;
+            out[3] = out[4] = out[5] = 1f;
+        }
     }
 
     /** The world around the camera for rain splashes. */
@@ -47,6 +53,7 @@ public final class ParticleEffects {
     private final ParticleSystem system;
     private final Blocks blocks;
     private final SplittableRandom random;
+    private final float[] bounds = new float[6];
     private final Random rainRandom = new Random();
     private Level level = Level.ALL;
     private Water water = (x, y, z) -> -1;
@@ -179,15 +186,49 @@ public final class ParticleEffects {
         }
     }
 
+    /**
+     * EffectRenderer.addBlockHitEffects: one fragment a tick of digging, at a random point of the face being hit
+     * (a tenth of a block outside it), slow and small. {@code face} is the EnumFacing index (0 down ... 5 east).
+     */
+    public void blockHit(int x, int y, int z, int state, int face) {
+        int layer = blocks.particleLayer(state);
+        if (layer < 0) {
+            return;
+        }
+        blocks.bounds(state, bounds);
+        float margin = 0.1F;
+        double px = x + random.nextDouble() * (bounds[3] - bounds[0] - margin * 2.0F) + margin + bounds[0];
+        double py = y + random.nextDouble() * (bounds[4] - bounds[1] - margin * 2.0F) + margin + bounds[1];
+        double pz = z + random.nextDouble() * (bounds[5] - bounds[2] - margin * 2.0F) + margin + bounds[2];
+        switch (face) {
+            case 0 -> py = y + bounds[1] - margin;
+            case 1 -> py = y + bounds[4] + margin;
+            case 2 -> pz = z + bounds[2] - margin;
+            case 3 -> pz = z + bounds[5] + margin;
+            case 4 -> px = x + bounds[0] - margin;
+            case 5 -> px = x + bounds[3] + margin;
+            default -> {
+            }
+        }
+        if (system.spawn(VanillaParticles.BLOCK_CRACK, px, py, pz, 0, 0, 0, crackColor(state), layer)) {
+            system.shrinkLast(0.2f, 0.6f);
+        }
+    }
+
+    /** EntityDiggingFX's color: 0.6 gray times the block's tint. */
+    private int crackColor(int state) {
+        int tint = blocks.particleTint(state);
+        return VanillaParticles.argb(0.6f * (tint >> 16 & 0xFF) / 255f, 0.6f * (tint >> 8 & 0xFF) / 255f,
+                0.6f * (tint & 0xFF) / 255f, 1f);
+    }
+
     /** EffectRenderer.addBlockDestroyEffects: a 4x4x4 grid of fragments flying out from the center. */
     public void blockDestroyed(int x, int y, int z, int state) {
         int layer = blocks.particleLayer(state);
         if (layer < 0) {
             return;
         }
-        int tint = blocks.particleTint(state);
-        int color = VanillaParticles.argb(0.6f * (tint >> 16 & 0xFF) / 255f, 0.6f * (tint >> 8 & 0xFF) / 255f,
-                0.6f * (tint & 0xFF) / 255f, 1f);
+        int color = crackColor(state);
         for (int i = 0; i < 4; i++) {
             for (int j = 0; j < 4; j++) {
                 for (int k = 0; k < 4; k++) {

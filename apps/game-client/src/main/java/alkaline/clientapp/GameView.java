@@ -32,6 +32,7 @@ import alkaline.renderer.vulkan.world.SectionStreamer;
 import alkaline.renderer.vulkan.world.SkyRenderer;
 import alkaline.renderer.vulkan.world.WorldRenderer;
 import alkaline.renderer.world.BlockPalette;
+import alkaline.renderer.texture.RandomEntities;
 import alkaline.renderer.world.BlockSource;
 import alkaline.renderer.world.CustomColors;
 import alkaline.renderer.world.Lightmap;
@@ -121,6 +122,12 @@ final class GameView implements MenuBackground {
         @Override
         public float rainfall(int biome) {
             return Biomes189.rainfall(biome);
+        }
+    };
+    private final java.util.function.IntBinaryOperator columnBiomes = new java.util.function.IntBinaryOperator() {
+        @Override
+        public int applyAsInt(int x, int z) {
+            return skyBiomes.biome(x, z);
         }
     };
     private float zoomFactor = 1f;
@@ -576,6 +583,9 @@ final class GameView implements MenuBackground {
         world.fog(fog);
         play.animation().self(selfModel);
         entities.animation(play.animation());
+        // Weather.getWeather: thunder (World.getThunderStrength, already times rain) or rain over half strength.
+        entities.world(sky.moonPhase, worldTime, thunder * rain > 0.5f ? RandomEntities.THUNDER
+                : rain > 0.5f ? RandomEntities.RAIN : RandomEntities.CLEAR, columnBiomes);
         entities.render(frame, play.entities().all(), play.players(), entityLight, lightmap,
                 fog, hitColor, partialTick, eyeX, eyeY, eyeZ, world.viewProjection(), cameraYaw, cameraPitch,
                 perspective > 0 ? selfModel : null);

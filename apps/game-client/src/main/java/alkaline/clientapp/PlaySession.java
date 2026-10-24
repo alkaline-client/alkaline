@@ -901,6 +901,12 @@ public final class PlaySession implements AutoCloseable {
                 signEditorOpened.accept(lines.clone());
             }
             case ServerSession.EntityProperties properties -> {
+                Entity target = entities.get(properties.entityId());
+                for (ServerSession.Attribute attribute : properties.attributes()) {
+                    if (target != null && attribute.key().equals("generic.maxHealth")) {
+                        target.maxHealth = (float) LocalPlayer.attribute(attribute.base(), attribute.modifiers(), null);
+                    }
+                }
                 if (properties.entityId() == entities.selfId()) {
                     for (ServerSession.Attribute attribute : properties.attributes()) {
                         if (attribute.key().equals("generic.maxHealth")) {

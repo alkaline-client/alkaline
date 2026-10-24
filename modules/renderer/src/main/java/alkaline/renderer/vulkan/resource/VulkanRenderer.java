@@ -942,6 +942,15 @@ public final class VulkanRenderer implements Renderer {
         }
     }
 
+    /**
+     * Rebuilds the swapchain before the next frame after the window's pixel size changed. Wayland drivers need not
+     * report a resize as out of date, and the compositor then stretches the old images, blurring everything.
+     */
+    public void windowResized() {
+        requireOwnerAndOpen();
+        recreatePending = true;
+    }
+
     /** Recreates swapchain images, views, presentation semaphores, and the format-specific pipeline. */
     public void recreateSwapchain() {
         requireOwnerAndOpen();

@@ -18,6 +18,8 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 
 /**
  * Runs a Compose UI in-game. A dedicated thread owns an offscreen [ImageComposeScene] (Skia CPU raster),
@@ -80,12 +82,27 @@ class ComposeLayerHost(
         data class Run(val action: () -> Unit) : Command
         /** An AWT key event id (pressed, released or typed), key code, character and modifier mask. */
         data class Key(val id: Int, val code: Int, val character: Char, val modifiers: Int) : Command
+        /** Wakes the loop to run [composeTasks]. */
+        data object Wake : Command
     }
 
     private val commands = ArrayBlockingQueue<Command>(1024)
     private val latest = AtomicReference<Frame?>(null)
     private val free = ConcurrentLinkedQueue<Frame>()
     private val glassRegistry = GlassRegistry()
+
+    /**
+     * The scene's coroutine work (effects, and the snapshot notifications that recompute semantics) runs only on
+     * the UI thread. The default, Unconfined, ran it on whichever thread committed a state change, racing this
+     * thread's layout and draw ("multithreaded access to SnapshotStateObserver").
+     */
+    private val composeTasks = ConcurrentLinkedQueue<Runnable>()
+    private val uiDispatcher = object : CoroutineDispatcher() {
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            composeTasks.add(block)
+            commands.offer(Command.Wake)
+        }
+    }
     private val thread = Thread(::runLoop, "alkaline-ui").apply { isDaemon = true }
 
     /**
@@ -233,6 +250,10 @@ class ComposeLayerHost(
                     apply(command)
                     command = commands.poll()
                 }
+                while (true) {
+                    val task = composeTasks.poll() ?: break
+                    task.run()
+                }
                 Snapshot.sendApplyNotifications()
                 val now = System.nanoTime()
                 if ((dirty || scene!!.hasInvalidations()) && now - lastRender >= minFrameNanos) {
@@ -319,7 +340,7 @@ class ComposeLayerHost(
             val stale = free.poll() ?: break
             MemoryUtil.memFree(stale.pixels)
         }
-        scene = ImageComposeScene(sceneWidth, sceneHeight, Density(sceneDensity)) {
+        scene = ImageComposeScene(sceneWidth, sceneHeight, Density(sceneDensity), uiDispatcher) {
             CompositionLocalProvider(LocalGlassRegistry provides glassRegistry) {
                 content()
             }
@@ -357,6 +378,7 @@ class ComposeLayerHost(
                 )
                 dirty = true
             }
+            Command.Wake -> {}
             Command.Leave -> {
                 scene!!.sendPointerEvent(eventType = PointerEventType.Exit, position = Offset(-1f, -1f))
                 dirty = true

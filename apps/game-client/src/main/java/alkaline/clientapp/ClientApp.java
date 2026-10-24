@@ -1104,6 +1104,7 @@ final class ClientApp implements AutoCloseable {
         } else if ((type == SDLEvents.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED || type == SDLEvents.SDL_EVENT_WINDOW_RESIZED)
                 && event.window().windowID() == windowId) {
             refreshPixelScale();
+            renderer.windowResized();
             SdlWindow.PixelSize size = window.pixelSize();
             uiDensity = density(size);
             ui.resize(size.width(), size.height(), uiDensity);

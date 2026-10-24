@@ -36,6 +36,7 @@ public final class SectionStreamer implements AutoCloseable {
     private final ThreadLocal<ChunkMesher> meshers = ThreadLocal.withInitial(ChunkMesher::new);
     private final ThreadLocal<char[]> buffers = ThreadLocal.withInitial(() -> new char[BlockSource.VOLUME]);
     private final ThreadLocal<byte[]> lightBuffers = ThreadLocal.withInitial(() -> new byte[BlockSource.VOLUME]);
+    private final ThreadLocal<byte[]> biomeBuffers = ThreadLocal.withInitial(() -> new byte[BlockSource.COLUMNS]);
     private final AtomicLong generation = new AtomicLong();
     private final AtomicInteger inFlight = new AtomicInteger();
     private final AtomicLong meshNanos = new AtomicLong();
@@ -212,7 +213,12 @@ public final class SectionStreamer implements AutoCloseable {
                 char[] ids = buffers.get();
                 byte[] light = lightBuffers.get();
                 source.fill(x, y, z, ids, light);
-                ChunkMesh mesh = meshers.get().mesh(x, y, z, ids, light, palette, ambientOcclusion);
+                byte[] biomes = null;
+                if (palette.needsBiomes()) {
+                    biomes = biomeBuffers.get();
+                    source.fillBiomes(x, z, biomes);
+                }
+                ChunkMesh mesh = meshers.get().mesh(x, y, z, ids, light, biomes, palette, ambientOcclusion);
                 meshNanos.addAndGet(System.nanoTime() - start);
                 meshed.incrementAndGet();
                 results.add(new Result(jobGeneration, version, mesh));

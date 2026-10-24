@@ -1,6 +1,7 @@
 package alkaline.renderer.world;
 
 import alkaline.renderer.asset.AssetSource;
+import alkaline.renderer.world.vanilla.BiomeNames189;
 import alkaline.renderer.world.vanilla.Blocks189;
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,50 +16,121 @@ import java.util.Properties;
 /**
  * OptiFine / MCPatcher connected textures (CTM): {@code .properties} files under {@code optifine/ctm/} or
  * {@code mcpatcher/ctm/} that give matching block faces another tile chosen from their neighbors (glass that joins
- * into one pane, bookshelves, sandstone) or from their position (random and repeating patterns). Rules match by
- * block (with metadata) or by the face's texture, on chosen faces and heights; MCPatcher's file-name conventions
- * ({@code block<id>.properties}, {@code <texture>.properties}) apply when neither is given.
+ * into one pane, bookshelves, sandstone) or from their position (random and repeating patterns), or draw overlay
+ * tiles over them where other blocks border them. Rules match by block (with metadata) or by the face's texture, on
+ * chosen faces, heights and biomes; MCPatcher's file-name conventions ({@code block<id>.properties},
+ * {@code <texture>.properties}) apply when neither is given.
  *
- * <p>Methods: {@code ctm} (47 tiles), {@code horizontal}, {@code vertical}, {@code horizontal+vertical},
- * {@code vertical+horizontal}, {@code top}, {@code random} (with weights), {@code repeat} and {@code fixed}. The
- * tile tables are the format's own (the indices every CTM pack is drawn for). Overlay methods, {@code ctm_compact}
- * and biome conditions are not supported; such rules are skipped.
+ * <p>Methods: {@code ctm} (47 tiles), {@code ctm_compact} (5 tiles split into quarters), {@code horizontal},
+ * {@code vertical}, {@code horizontal+vertical}, {@code vertical+horizontal}, {@code top}, {@code random} (with
+ * weights), {@code repeat}, {@code fixed}, and the overlays {@code overlay} (17 border tiles),
+ * {@code overlay_ctm}, {@code overlay_fixed}, {@code overlay_random} and {@code overlay_repeat}. The tile tables are
+ * the format's own (the indices every CTM pack is drawn for).
+ *
+ * <p>As OptiFine 1.8.9 orders them, rules that match the face's texture come before rules that match the block,
+ * each group in file order. A face takes the first rule that gives it a tile; a rule outside its heights or biomes,
+ * or whose tile is {@code <skip>}, passes the face on to the next rule. Overlay rules draw their tiles and always
+ * pass the face on.
  */
 public final class ConnectedTextures {
     public static final ConnectedTextures NONE = new ConnectedTextures(List.of());
     private static final String[] ROOTS = {"assets/minecraft/optifine/ctm/", "assets/minecraft/mcpatcher/ctm/"};
     /** A tile entry that keeps the face's own texture. */
     public static final String DEFAULT_TILE = "<default>";
+    /** A tile entry that gives no tile, passing the face on to the next rule. */
+    public static final String SKIP_TILE = "<skip>";
 
-    public enum Method { CTM, HORIZONTAL, VERTICAL, HORIZONTAL_VERTICAL, VERTICAL_HORIZONTAL, TOP, RANDOM, REPEAT, FIXED }
+    public enum Method {
+        CTM, HORIZONTAL, VERTICAL, HORIZONTAL_VERTICAL, VERTICAL_HORIZONTAL, TOP, RANDOM, REPEAT, FIXED, CTM_COMPACT,
+        OVERLAY, OVERLAY_CTM, OVERLAY_FIXED, OVERLAY_RANDOM, OVERLAY_REPEAT;
+
+        /** Overlay methods draw extra tiles over the face instead of replacing its texture. */
+        public boolean overlay() {
+            return ordinal() >= OVERLAY.ordinal();
+        }
+    }
+
+    /** How a neighbor joins: the same block state, the same texture on that face, or the same material. */
+    public static final int CONNECT_BLOCK = 1;
+    public static final int CONNECT_TILE = 2;
+    public static final int CONNECT_MATERIAL = 3;
 
     /**
      * One rule.
      *
-     * @param blocks    matched block ids (empty: any)
-     * @param metadata  bit per allowed metadata value
-     * @param textures  matched face textures as palette names ({@code blocks/glass}), or empty
-     * @param faces     bit per face code (0 -x, 1 +x, 2 -y, 3 +y, 4 -z, 5 +z)
-     * @param tiles     tile textures as full asset paths, or {@link #DEFAULT_TILE}
-     * @param symmetry  0 none, 1 opposite, 2 all (random and repeat)
+     * @param blocks        matched block ids (empty: any)
+     * @param metadata      bit per allowed metadata value
+     * @param textures      matched face textures as palette names ({@code blocks/glass}), or empty
+     * @param faces         bit per face code (0 -x, 1 +x, 2 -y, 3 +y, 4 -z, 5 +z)
+     * @param tiles         tile textures as full asset paths, {@link #DEFAULT_TILE} or {@link #SKIP_TILE}
+     * @param symmetry      OptiFine's symmetry: 1 none, 2 opposite, 6 all (random)
+     * @param heights       inclusive block y ranges as pairs, or empty for any height
+     * @param biomes        a bit per biome id ({@link BiomeNames189#parse}), or null for any biome
+     * @param compact       ctm_compact's {@code ctm.<index>} overrides: a tile per CTM index (-1 none), or null
+     * @param connectBlocks overlays: the bordering blocks that draw ({@code id << 16 | metadata bits}), or empty
+     * @param connectTiles  overlays: the bordering textures that draw, or empty
+     * @param tintBlock     overlays: the block state ({@code id << 4 | meta}) whose tint colors the tiles, or -1
+     * @param layer         overlays: the pass the tiles draw in (cutout or translucent)
      */
     public record Rule(String path, Method method, int[] blocks, int metadata, List<String> textures, int faces,
-                       boolean connectTile, boolean innerSeams, List<String> tiles, int[] weights, int width,
-                       int height, int symmetry, int minHeight, int maxHeight, int weight) {
+                       int connect, boolean innerSeams, List<String> tiles, int[] weights, int width, int height,
+                       int symmetry, int randomLoops, boolean linked, int[] heights, long[] biomes, int[] compact,
+                       int[] connectBlocks, List<String> connectTiles, int tintIndex, int tintBlock,
+                       MaterialPass layer) {
+        public boolean connectTile() {
+            return connect == CONNECT_TILE;
+        }
+
         public boolean matches(int block, int meta, String texture, int face) {
-            if ((faces >> face & 1) == 0 || (metadata >> meta & 1) == 0) {
+            return (faces >> face & 1) != 0 && matchesBlock(block, meta)
+                    && (textures.isEmpty() || textures.contains(texture));
+        }
+
+        /** ConnectedProperties.matchesBlock: one of the blocks (any, without any), with an allowed metadata. */
+        public boolean matchesBlock(int block, int meta) {
+            if ((metadata >> meta & 1) == 0) {
                 return false;
             }
-            if (blocks.length > 0) {
+            if (blocks.length == 0) {
+                return true;
+            }
+            for (int id : blocks) {
+                if (id == block) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Whether the rule covers a block at height {@code y} in a biome. */
+        public boolean applies(int y, int biome) {
+            return inHeights(y) && BiomeNames189.contains(biomes, biome);
+        }
+
+        boolean inHeights(int y) {
+            if (heights.length == 0) {
+                return true;
+            }
+            for (int index = 0; index < heights.length; index += 2) {
+                if (y >= heights[index] && y <= heights[index + 1]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Overlays: whether a bordering block (state and its face's texture) is one that draws. */
+        public boolean connectsTo(int block, int meta, String texture) {
+            if (connectBlocks.length > 0) {
                 boolean found = false;
-                for (int id : blocks) {
-                    found |= id == block;
+                for (int entry : connectBlocks) {
+                    found |= entry >>> 16 == block && (entry >> meta & 1) != 0;
                 }
                 if (!found) {
                     return false;
                 }
             }
-            return textures.isEmpty() || textures.contains(texture);
+            return connectTiles.isEmpty() || connectTiles.contains(texture);
         }
     }
 
@@ -109,10 +181,36 @@ public final class ConnectedTextures {
             3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 3, 3, 3, 3,
             3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
     };
+    /**
+     * ConnectedTexturesCompact: per CTM index, the compact tile of each quarter of the face (up-left, up-right,
+     * down-left, down-right in texture space).
+     */
+    private static final int[] COMPACT = {
+            0, 0, 0, 0, 0, 3, 0, 3, 3, 3, 3, 3, 3, 0, 3, 0, 0, 3, 2, 4, 3, 0, 4, 2, 2, 4, 2, 4, 3, 3, 4, 4,
+            4, 1, 4, 4, 4, 4, 4, 1, 1, 4, 1, 4, 1, 1, 4, 4, 0, 0, 2, 2, 0, 3, 2, 1, 3, 3, 1, 1, 3, 0, 1, 2,
+            2, 4, 0, 3, 4, 2, 3, 0, 4, 4, 3, 3, 4, 2, 4, 2, 1, 4, 4, 4, 4, 4, 1, 4, 4, 4, 1, 1, 4, 1, 4, 1,
+            2, 2, 2, 2, 2, 1, 2, 1, 1, 1, 1, 1, 1, 2, 1, 2, 2, 4, 2, 1, 3, 3, 1, 4, 2, 1, 2, 4, 3, 3, 4, 1,
+            1, 1, 1, 4, 1, 1, 4, 1, 4, 1, 1, 4, 1, 4, 4, 1, 2, 2, 0, 0, 2, 1, 0, 3, 1, 1, 3, 3, 1, 2, 3, 0,
+            4, 1, 3, 3, 1, 2, 4, 2, 1, 4, 3, 3, 4, 2, 1, 2, 1, 4, 1, 1, 4, 1, 1, 1, 4, 4, 4, 4,
+    };
 
     /** Whether the block at an offset (dx, dy, dz) from the face's block joins it. */
     public interface Neighbors {
         boolean connects(int dx, int dy, int dz);
+
+        /** The same block (id) at an offset, for {@code linked} random rules; none by default. */
+        default boolean sameBlock(int dx, int dy, int dz) {
+            return false;
+        }
+    }
+
+    /** The bordering blocks an overlay rule looks at, with offsets from the face's block. */
+    public interface OverlayNeighbors {
+        /** ConnectedTextures.isNeighbourOverlay: a bordering block whose edge the overlay draws. */
+        boolean overlay(int dx, int dy, int dz);
+
+        /** isNeighbourMatching: a bordering block the rule itself matches. */
+        boolean matching(int dx, int dy, int dz);
     }
 
     /**
@@ -120,6 +218,8 @@ public final class ConnectedTextures {
      * south on bottom faces and up on the sides; left follows from it.
      */
     static final int[][][] DIRECTIONS = new int[6][4][];
+    /** OptiFine's side numbers (0 down, 1 up, 2 north, 3 south, 4 west, 5 east) by face code. */
+    private static final int[] SIDE = {4, 5, 0, 1, 2, 3};
 
     static {
         for (int face = 0; face < 6; face++) {
@@ -136,32 +236,18 @@ public final class ConnectedTextures {
     }
 
     /**
-     * The tile a face takes, or -1 to keep its texture.
+     * The tile a face takes, or -1 for none (the face passes on to the next rule). {@code ctm_compact} and
+     * {@code overlay_ctm} give the 47-tile CTM index; {@code overlay} gives none (see {@link #overlay}).
      *
      * @param face face code, with the block at world (x, y, z)
      */
     public static int tile(Rule rule, int face, int x, int y, int z, Neighbors neighbors) {
-        if (y < rule.minHeight() || y > rule.maxHeight()) {
+        if (!rule.inHeights(y)) {
             return -1;
         }
         int[][] d = DIRECTIONS[face];
         return switch (rule.method()) {
-            case CTM -> {
-                int bits = 0;
-                for (int side = 0; side < 4; side++) {
-                    if (ctmJoins(neighbors, rule, face, d[side], null)) {
-                        bits |= 1 << side * 2;
-                    }
-                }
-                for (int side = 0; side < 4; side++) {
-                    int next = (side + 1) & 3;
-                    if ((bits >> side * 2 & 1) != 0 && (bits >> next * 2 & 1) != 0
-                            && ctmJoins(neighbors, rule, face, d[side], d[next])) {
-                        bits |= 1 << side * 2 + 1;
-                    }
-                }
-                yield CTM[bits];
-            }
+            case CTM, CTM_COMPACT, OVERLAY_CTM -> ctmIndex(rule, face, d, neighbors);
             case HORIZONTAL -> STRIP[horizontal(neighbors, d)];
             case VERTICAL -> STRIP[vertical(neighbors, d)];
             case HORIZONTAL_VERTICAL -> {
@@ -203,10 +289,133 @@ public final class ConnectedTextures {
                 yield VERTICAL_HORIZONTAL[secondary];
             }
             case TOP -> face >> 1 != 1 && connects(neighbors, new int[]{0, 1, 0}, null) ? 0 : -1;
-            case FIXED -> 0;
-            case RANDOM -> random(rule, face, x, y, z);
-            case REPEAT -> repeat(rule, face, x, y, z);
+            case FIXED, OVERLAY_FIXED -> 0;
+            case RANDOM, OVERLAY_RANDOM -> random(rule, face, x, y, z, neighbors);
+            case REPEAT, OVERLAY_REPEAT -> repeat(rule, face, x, y, z);
+            case OVERLAY -> -1;
         };
+    }
+
+    private static int ctmIndex(Rule rule, int face, int[][] d, Neighbors neighbors) {
+        int bits = 0;
+        for (int side = 0; side < 4; side++) {
+            if (ctmJoins(neighbors, rule, face, d[side], null)) {
+                bits |= 1 << side * 2;
+            }
+        }
+        for (int side = 0; side < 4; side++) {
+            int next = (side + 1) & 3;
+            if ((bits >> side * 2 & 1) != 0 && (bits >> next * 2 & 1) != 0
+                    && ctmJoins(neighbors, rule, face, d[side], d[next])) {
+                bits |= 1 << side * 2 + 1;
+            }
+        }
+        return CTM[bits];
+    }
+
+    /**
+     * ctm_compact: the tile of one quarter of the face (0 up-left, 1 up-right, 2 down-left, 3 down-right in
+     * texture space) for a CTM index; a {@code ctm.<index>} override gives the whole face one tile.
+     */
+    public static int compactTile(Rule rule, int ctmIndex, int quarter) {
+        if (rule.compact() != null && ctmIndex >= 0 && ctmIndex < rule.compact().length && rule.compact()[ctmIndex] >= 0) {
+            return rule.compact()[ctmIndex];
+        }
+        return ctmIndex >= 0 && ctmIndex < 47 ? COMPACT[ctmIndex * 4 + quarter] : 0;
+    }
+
+    /**
+     * ConnectedTextures.getConnectedTextureOverlay: the border tiles of an {@code overlay} rule for a face, written
+     * to {@code out} (room for two); returns how many.
+     */
+    public static int overlay(Rule rule, int face, int y, OverlayNeighbors neighbors, int[] out) {
+        if (!rule.inHeights(y)) {
+            return 0;
+        }
+        int[][] d = DIRECTIONS[face];
+        // OptiFine's order: left, right, down, up; corners down-right, down-left, up-right, up-left.
+        boolean left = overlay(neighbors, d[0], null);
+        boolean right = overlay(neighbors, d[2], null);
+        boolean down = overlay(neighbors, d[1], null);
+        boolean up = overlay(neighbors, d[3], null);
+        if (left && right && down && up) {
+            return put(out, 0, 8);
+        }
+        if (left && right && down) {
+            return put(out, 0, 5);
+        }
+        if (left && down && up) {
+            return put(out, 0, 6);
+        }
+        if (right && down && up) {
+            return put(out, 0, 12);
+        }
+        if (left && right && up) {
+            return put(out, 0, 13);
+        }
+        boolean downRight = overlay(neighbors, d[1], d[2]);
+        boolean downLeft = overlay(neighbors, d[1], d[0]);
+        boolean upRight = overlay(neighbors, d[3], d[2]);
+        boolean upLeft = overlay(neighbors, d[3], d[0]);
+        if (right && down) {
+            int count = put(out, 0, 3);
+            return upLeft ? put(out, count, 16) : count;
+        }
+        if (left && down) {
+            int count = put(out, 0, 4);
+            return upRight ? put(out, count, 14) : count;
+        }
+        if (right && up) {
+            int count = put(out, 0, 10);
+            return downLeft ? put(out, count, 2) : count;
+        }
+        if (left && up) {
+            int count = put(out, 0, 11);
+            return downRight ? put(out, count, 0) : count;
+        }
+        // At most one side borders here, so at most one side tile and the corner tile away from it.
+        int count = 0;
+        if (left) {
+            count = put(out, count, 9);
+        }
+        if (right) {
+            count = put(out, count, 7);
+        }
+        if (down) {
+            count = put(out, count, 1);
+        }
+        if (up) {
+            count = put(out, count, 15);
+        }
+        boolean matchLeft = neighbors.matching(d[0][0], d[0][1], d[0][2]);
+        boolean matchRight = neighbors.matching(d[2][0], d[2][1], d[2][2]);
+        boolean matchDown = neighbors.matching(d[1][0], d[1][1], d[1][2]);
+        boolean matchUp = neighbors.matching(d[3][0], d[3][1], d[3][2]);
+        if (downRight && (matchRight || matchDown) && !right && !down) {
+            count = put(out, count, 0);
+        }
+        if (downLeft && (matchLeft || matchDown) && !left && !down) {
+            count = put(out, count, 2);
+        }
+        if (upRight && (matchRight || matchUp) && !right && !up) {
+            count = put(out, count, 14);
+        }
+        if (upLeft && (matchLeft || matchUp) && !left && !up) {
+            count = put(out, count, 16);
+        }
+        return count;
+    }
+
+    private static int put(int[] out, int count, int tile) {
+        if (count < out.length) {
+            out[count] = tile;
+            return count + 1;
+        }
+        return count;
+    }
+
+    private static boolean overlay(OverlayNeighbors neighbors, int[] a, int[] b) {
+        return neighbors.overlay(a[0] + (b == null ? 0 : b[0]), a[1] + (b == null ? 0 : b[1]), a[2] + (b == null ? 0 : b[2]));
     }
 
     private static int horizontal(Neighbors neighbors, int[][] d) {
@@ -238,50 +447,68 @@ public final class ConnectedTextures {
         return !neighbors.connects(x + (axis == 0 ? step : 0), y + (axis == 1 ? step : 0), z + (axis == 2 ? step : 0));
     }
 
-    private static int symmetric(Rule rule, int face) {
-        return switch (rule.symmetry()) {
-            case 1 -> face & ~1;
-            case 2 -> 2;
-            default -> face;
-        };
-    }
-
-    /** A stable per-position choice, weighted when the rule gives weights. */
-    private static int random(Rule rule, int face, int x, int y, int z) {
-        long hash = (x * 3129871L) ^ (z * 116129781L) ^ y;
-        hash = hash * hash * 42317861L + hash * 11L;
-        hash = mix(hash ^ (symmetric(rule, face) + 1) * 0x9E3779B97F4A7C15L);
-        int value = (int) (hash >>> 33);
+    /**
+     * getConnectedTextureRandom: OptiFine's position hash (Config.getRandom) of the block (the lowest of a linked
+     * column) and the face folded by the symmetry, rehashed {@code randomLoops} times, weighted when the rule gives
+     * weights.
+     */
+    private static int random(Rule rule, int face, int x, int y, int z, Neighbors neighbors) {
         int count = rule.tiles().size();
+        if (count == 1) {
+            return 0;
+        }
+        int side = SIDE[face] / rule.symmetry() * rule.symmetry();
+        int bottom = y;
+        if (rule.linked()) {
+            // The halo holds two blocks below the section; columns of linked blocks are short (double plants).
+            while (bottom - y > -2 && bottom > 0 && neighbors.sameBlock(0, bottom - 1 - y, 0)) {
+                bottom--;
+            }
+        }
+        int hash = intHash(side + 37);
+        hash = intHash(hash + x);
+        hash = intHash(hash + z);
+        hash = intHash(hash + bottom);
+        hash &= Integer.MAX_VALUE;
+        for (int loop = 0; loop < rule.randomLoops(); loop++) {
+            hash = intHash(hash);
+        }
         int[] weights = rule.weights();
         if (weights.length == 0) {
-            return value % count;
+            return hash % count;
         }
         int total = 0;
         for (int weight : weights) {
             total += weight;
         }
-        int pick = value % Math.max(1, total);
+        int pick = hash % Math.max(1, total);
+        int sum = 0;
         for (int index = 0; index < weights.length; index++) {
-            pick -= weights[index];
-            if (pick < 0) {
-                return Math.min(index, count - 1);
+            sum += weights[index];
+            if (pick < sum) {
+                return index;
             }
         }
-        return count - 1;
+        return 0;
     }
 
-    private static long mix(long z) {
-        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
-        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
-        return z ^ (z >>> 31);
+    /** Config.intHash. */
+    static int intHash(int value) {
+        value = value ^ 61 ^ value >> 16;
+        value = value + (value << 3);
+        value = value ^ value >> 4;
+        value = value * 668265261;
+        return value ^ value >> 15;
     }
 
-    /** The repeat pattern laid over world positions, as OptiFine aligns it per face. */
+    /** getConnectedTextureRepeat: the pattern laid over world positions, as OptiFine aligns it per face. */
     private static int repeat(Rule rule, int face, int x, int y, int z) {
+        if (rule.tiles().size() == 1) {
+            return 0;
+        }
         int u;
         int v;
-        switch (symmetric(rule, face)) {
+        switch (face) {
             case 2 -> { u = x; v = -z - 1; }
             case 3 -> { u = x; v = z; }
             case 4 -> { u = -x - 1; v = -y; }
@@ -296,7 +523,7 @@ public final class ConnectedTextures {
 
     // ---- loading --------------------------------------------------------------------------------------------
 
-    /** Reads every CTM rule in the assets, highest weight first, then by path. */
+    /** Reads every CTM rule in the assets: rules matching textures first, then rules matching blocks, each by path. */
     public static ConnectedTextures load(AssetSource assets) {
         List<Rule> rules = new ArrayList<>();
         for (String root : ROOTS) {
@@ -325,13 +552,37 @@ public final class ConnectedTextures {
                 }
             }
         }
-        rules.sort(Comparator.comparingInt(Rule::weight).reversed().thenComparing(Rule::path));
+        rules.sort(Comparator.comparing(Rule::path));
         return rules.isEmpty() ? NONE : new ConnectedTextures(rules);
+    }
+
+    /**
+     * The rules a face goes through, in OptiFine's order (ConnectedTextures.getConnectedTextureSingle): those
+     * matching its texture (and block id) first, then those matching its block (and texture). Indices into
+     * {@link #rules()}; a rule matching both comes up in both groups, as in OptiFine.
+     */
+    public int[] candidates(int block, int meta, String texture, int face) {
+        int[] found = new int[8];
+        int count = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int index = 0; index < rules.size(); index++) {
+                Rule rule = rules.get(index);
+                boolean group = pass == 0 ? !rule.textures().isEmpty() : rule.blocks().length > 0;
+                if (group && rule.matches(block, meta, texture, face)) {
+                    if (count == found.length) {
+                        found = java.util.Arrays.copyOf(found, count * 2);
+                    }
+                    found[count++] = index;
+                }
+            }
+        }
+        return java.util.Arrays.copyOf(found, count);
     }
 
     static Rule parse(String path, Properties properties) {
         Method method = switch (properties.getProperty("method", "ctm").trim().toLowerCase(Locale.ROOT)) {
             case "ctm", "glass" -> Method.CTM;
+            case "ctm_compact" -> Method.CTM_COMPACT;
             case "horizontal", "bookshelf" -> Method.HORIZONTAL;
             case "vertical" -> Method.VERTICAL;
             case "horizontal+vertical", "h+v" -> Method.HORIZONTAL_VERTICAL;
@@ -340,31 +591,20 @@ public final class ConnectedTextures {
             case "random" -> Method.RANDOM;
             case "repeat", "pattern" -> Method.REPEAT;
             case "fixed", "static" -> Method.FIXED;
+            case "overlay" -> Method.OVERLAY;
+            case "overlay_ctm" -> Method.OVERLAY_CTM;
+            case "overlay_fixed" -> Method.OVERLAY_FIXED;
+            case "overlay_random" -> Method.OVERLAY_RANDOM;
+            case "overlay_repeat" -> Method.OVERLAY_REPEAT;
             default -> null;
         };
-        if (method == null) {
+        if (method == null || parseInt(properties.getProperty("renderPass"), -1) > 0) {
             return null;
         }
         String directory = path.substring(0, path.lastIndexOf('/') + 1);
         String fileName = path.substring(directory.length(), path.length() - ".properties".length());
         List<Integer> blocks = new ArrayList<>();
-        int metadata = 0;
-        for (String word : tokens(properties.getProperty("matchBlocks", ""))) {
-            String[] parts = word.split(":");
-            // minecraft:glass, glass, 20, glass:0,1 (metadata after the name, comma-separated).
-            int nameIndex = parts.length > 1 && parts[0].equals("minecraft") ? 1 : 0;
-            int id = block(parts[nameIndex]);
-            if (id >= 0) {
-                blocks.add(id);
-            }
-            for (int index = nameIndex + 1; index < parts.length; index++) {
-                for (int[] range : ranges(parts[index])) {
-                    for (int meta = range[0]; meta <= Math.min(15, range[1]); meta++) {
-                        metadata |= 1 << meta;
-                    }
-                }
-            }
-        }
+        int metadata = blockList(properties.getProperty("matchBlocks", ""), blocks);
         List<String> textures = new ArrayList<>();
         for (String word : words(properties.getProperty("matchTiles", ""))) {
             textures.add(texture(word));
@@ -387,8 +627,8 @@ public final class ConnectedTextures {
         int faces = 0;
         for (String face : words(properties.getProperty("faces", "all").toLowerCase(Locale.ROOT))) {
             faces |= switch (face) {
-                case "bottom" -> 1 << 2;
-                case "top" -> 1 << 3;
+                case "bottom", "down" -> 1 << 2;
+                case "top", "up" -> 1 << 3;
                 case "north" -> 1 << 4;
                 case "south" -> 1 << 5;
                 case "west" -> 1;
@@ -397,15 +637,29 @@ public final class ConnectedTextures {
                 default -> 0x3F;
             };
         }
+        String tileText = properties.getProperty("tiles");
+        if (tileText == null) {
+            // ConnectedProperties.isValid*: the methods with a standard tile sheet default to it.
+            tileText = switch (method) {
+                case CTM, OVERLAY_CTM -> "0-11 16-27 32-43 48-58";
+                case CTM_COMPACT -> "0-4";
+                case OVERLAY -> "0-16";
+                case HORIZONTAL -> "12-15";
+                case TOP -> "66";
+                default -> "";
+            };
+        }
         List<String> tiles = new ArrayList<>();
-        for (String word : words(properties.getProperty("tiles", ""))) {
+        for (String word : words(tileText)) {
             if (word.matches("\\d+-\\d+")) {
                 int dash = word.indexOf('-');
                 for (int tile = Integer.parseInt(word.substring(0, dash)); tile <= Integer.parseInt(word.substring(dash + 1)); tile++) {
                     tiles.add(directory + tile + ".png");
                 }
-            } else if (word.equals("<default>") || word.equals("<skip>")) {
+            } else if (word.equals("<default>") || word.equals("<default>.png")) {
                 tiles.add(DEFAULT_TILE);
+            } else if (word.equals("<skip>") || word.equals("<skip>.png")) {
+                tiles.add(SKIP_TILE);
             } else {
                 tiles.add(tilePath(directory, word));
             }
@@ -413,35 +667,161 @@ public final class ConnectedTextures {
         int width = parseInt(properties.getProperty("width"), 0);
         int height = parseInt(properties.getProperty("height"), 0);
         int needed = switch (method) {
-            case CTM -> 47;
+            case CTM, OVERLAY_CTM -> 47;
+            case CTM_COMPACT -> 5;
+            case OVERLAY -> 17;
             case HORIZONTAL, VERTICAL -> 4;
             case HORIZONTAL_VERTICAL, VERTICAL_HORIZONTAL -> 7;
-            case TOP, FIXED, RANDOM -> 1;
-            case REPEAT -> Math.max(1, width * height);
+            case TOP, FIXED, RANDOM, OVERLAY_FIXED, OVERLAY_RANDOM -> 1;
+            case REPEAT, OVERLAY_REPEAT -> Math.max(1, width * height);
         };
-        if (tiles.size() < needed || (method == Method.REPEAT && (width <= 0 || height <= 0))) {
+        boolean repeat = method == Method.REPEAT || method == Method.OVERLAY_REPEAT;
+        if (tiles.size() < needed || (repeat && (width <= 0 || height <= 0))) {
             return null;
         }
-        int[] weights = words(properties.getProperty("weights", "")).stream().mapToInt(word -> parseInt(word, 1)).toArray();
-        int symmetry = switch (properties.getProperty("symmetry", "none").trim().toLowerCase(Locale.ROOT)) {
-            case "opposite" -> 1;
-            case "all" -> 2;
-            default -> 0;
+        String layerName = properties.getProperty("layer", "cutout_mipped").trim().toLowerCase(Locale.ROOT);
+        MaterialPass layer = switch (layerName) {
+            case "cutout", "cutout_mipped" -> MaterialPass.CUTOUT;
+            case "translucent" -> MaterialPass.TRANSLUCENT;
+            default -> MaterialPass.OPAQUE;
         };
-        int minHeight = parseInt(properties.getProperty("minHeight"), Integer.MIN_VALUE);
-        int maxHeight = parseInt(properties.getProperty("maxHeight"), Integer.MAX_VALUE);
-        String heights = properties.getProperty("heights");
-        if (heights != null && !ranges(heights).isEmpty()) {
-            int[] range = ranges(heights).getFirst();
-            minHeight = range[0];
-            maxHeight = range[1];
+        if (method.overlay() && layer == MaterialPass.OPAQUE) {
+            return null; // isValidOverlay*: overlays never draw in the solid layer.
         }
-        String connect = properties.getProperty("connect", textures.isEmpty() || !blocks.isEmpty() ? "block" : "tile")
-                .trim().toLowerCase(Locale.ROOT);
+        int[] weights = words(properties.getProperty("weights", "")).stream().mapToInt(word -> parseInt(word, 1)).toArray();
+        if (weights.length > 0 && weights.length != tiles.size()) {
+            // isValidRandom: trim extra weights, pad missing ones with the average.
+            int average = (int) Math.round(java.util.Arrays.stream(weights).average().orElse(1));
+            int[] fitted = java.util.Arrays.copyOf(weights, tiles.size());
+            for (int index = weights.length; index < fitted.length; index++) {
+                fitted[index] = average;
+            }
+            weights = fitted;
+        }
+        int symmetry = switch (properties.getProperty("symmetry", "none").trim().toLowerCase(Locale.ROOT)) {
+            case "opposite" -> 2;
+            case "all" -> 6;
+            default -> 1;
+        };
+        int randomLoops = parseInt(properties.getProperty("randomLoops"), 0);
+        if (randomLoops < 0 || randomLoops > 9) {
+            return null;
+        }
+        int[] heights = heights(properties);
+        long[] biomes = BiomeNames189.parse(properties.getProperty("biomes"));
+        String connectText = properties.getProperty("connect");
+        int connect = connectText == null ? (blocks.isEmpty() ? CONNECT_TILE : CONNECT_BLOCK)
+                : switch (connectText.trim().toLowerCase(Locale.ROOT)) {
+                    case "block" -> CONNECT_BLOCK;
+                    case "tile" -> CONNECT_TILE;
+                    case "material" -> CONNECT_MATERIAL;
+                    default -> -1;
+                };
+        if (connect < 0) {
+            return null;
+        }
+        List<Integer> connectBlockIds = new ArrayList<>();
+        List<Integer> connectBlockMeta = new ArrayList<>();
+        for (String word : tokens(properties.getProperty("connectBlocks", ""))) {
+            List<Integer> one = new ArrayList<>();
+            int meta = blockList(word, one);
+            for (int id : one) {
+                connectBlockIds.add(id);
+                connectBlockMeta.add(meta == 0 ? 0xFFFF : meta);
+            }
+        }
+        int[] connectBlocks = new int[connectBlockIds.size()];
+        for (int index = 0; index < connectBlocks.length; index++) {
+            connectBlocks[index] = connectBlockIds.get(index) << 16 | connectBlockMeta.get(index);
+        }
+        List<String> connectTiles = new ArrayList<>();
+        for (String word : words(properties.getProperty("connectTiles", ""))) {
+            connectTiles.add(texture(word));
+        }
         return new Rule(path, method, blocks.stream().mapToInt(Integer::intValue).toArray(), metadata,
-                List.copyOf(textures), faces, connect.equals("tile"),
+                List.copyOf(textures), faces, connect,
                 Boolean.parseBoolean(properties.getProperty("innerSeams", "false").trim()), List.copyOf(tiles), weights,
-                width, height, symmetry, minHeight, maxHeight, parseInt(properties.getProperty("weight"), 0));
+                width, height, symmetry, randomLoops,
+                Boolean.parseBoolean(properties.getProperty("linked", "false").trim()), heights, biomes,
+                compact(properties, tiles.size()), connectBlocks, List.copyOf(connectTiles),
+                parseInt(properties.getProperty("tintIndex"), -1), blockState(properties.getProperty("tintBlock")),
+                layer);
+    }
+
+    /** {@code heights} (ranges) or, without it, {@code minHeight}/{@code maxHeight} (OptiFine's -1..1024 defaults). */
+    private static int[] heights(Properties properties) {
+        String text = properties.getProperty("heights");
+        if (text != null) {
+            List<int[]> ranges = ranges(text);
+            int[] heights = new int[ranges.size() * 2];
+            for (int index = 0; index < ranges.size(); index++) {
+                heights[index * 2] = ranges.get(index)[0];
+                heights[index * 2 + 1] = ranges.get(index)[1];
+            }
+            return heights;
+        }
+        int min = parseInt(properties.getProperty("minHeight"), -1);
+        int max = parseInt(properties.getProperty("maxHeight"), 1024);
+        return min == -1 && max == 1024 ? new int[0] : new int[]{min, max};
+    }
+
+    /** ConnectedProperties.parseCtmTileIndexes: {@code ctm.<0-46>=<tile>} entries, or null without any. */
+    private static int[] compact(Properties properties, int tileCount) {
+        int[] indexes = null;
+        for (String key : properties.stringPropertyNames()) {
+            if (!key.startsWith("ctm.")) {
+                continue;
+            }
+            int index = parseInt(key.substring(4), -1);
+            int tile = parseInt(properties.getProperty(key), -1);
+            if (index >= 0 && index <= 46 && tile >= 0 && tile < tileCount) {
+                if (indexes == null) {
+                    indexes = new int[47];
+                    java.util.Arrays.fill(indexes, -1);
+                }
+                indexes[index] = tile;
+            }
+        }
+        return indexes;
+    }
+
+    /**
+     * Space-separated block entries ({@code minecraft:glass}, {@code glass}, {@code 20}, {@code glass:0,1} with
+     * metadata after the name) into {@code ids}; returns the metadata bits they name (0 for none).
+     */
+    private static int blockList(String text, List<Integer> ids) {
+        int metadata = 0;
+        for (String word : tokens(text)) {
+            String[] parts = word.split(":");
+            int nameIndex = parts.length > 1 && parts[0].equals("minecraft") ? 1 : 0;
+            int id = block(parts[nameIndex]);
+            if (id >= 0) {
+                ids.add(id);
+            }
+            for (int index = nameIndex + 1; index < parts.length; index++) {
+                for (int[] range : ranges(parts[index])) {
+                    for (int meta = range[0]; meta <= Math.min(15, range[1]); meta++) {
+                        metadata |= 1 << meta;
+                    }
+                }
+            }
+        }
+        return metadata;
+    }
+
+    /** A {@code tintBlock} state ({@code grass}, {@code minecraft:wool:3}) as {@code id << 4 | meta}, or -1. */
+    private static int blockState(String text) {
+        if (text == null || text.isBlank()) {
+            return -1;
+        }
+        String[] parts = text.trim().split(":");
+        int nameIndex = parts.length > 1 && parts[0].equals("minecraft") ? 1 : 0;
+        int id = block(parts[nameIndex]);
+        if (id < 0) {
+            return -1;
+        }
+        int meta = parts.length > nameIndex + 1 ? Math.max(0, Math.min(15, parseInt(parts[nameIndex + 1], 0))) : 0;
+        return id << 4 | meta;
     }
 
     /** A matched texture as the palette names it: {@code glass}, {@code blocks/glass} and {@code textures/blocks/glass} all give {@code blocks/glass}. */

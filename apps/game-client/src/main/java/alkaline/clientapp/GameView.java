@@ -834,5 +834,14 @@ final class GameView implements MenuBackground {
             world.copy(sectionX * 16 - HALO, sectionY * 16 - HALO, sectionZ * 16 - HALO, PADDED, PADDED, PADDED, ids,
                     light);
         }
+
+        @Override
+        public void fillBiomes(int sectionX, int sectionZ, byte[] biomes) {
+            for (int z = -HALO; z < 16 + HALO; z++) {
+                for (int x = -HALO; x < 16 + HALO; x++) {
+                    biomes[BlockSource.biomeIndex(x, z)] = (byte) world.biome(sectionX * 16 + x, sectionZ * 16 + z);
+                }
+            }
+        }
     }
 }

@@ -12,6 +12,8 @@ public interface BlockSource {
     int HALO = 2;
     int PADDED = 16 + 2 * HALO;
     int VOLUME = PADDED * PADDED * PADDED;
+    /** Columns of the padded volume, for biomes ({@link #biomeIndex}). */
+    int COLUMNS = PADDED * PADDED;
 
     /** Lowest and highest section Y (inclusive) that can contain blocks. */
     int minSectionY();
@@ -24,7 +26,19 @@ public interface BlockSource {
      */
     void fill(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light);
 
+    /**
+     * Writes the biome id of each column of the section and its halo ({@link #COLUMNS} bytes, {@link #biomeIndex}).
+     * Sources without biomes leave plains (1).
+     */
+    default void fillBiomes(int sectionX, int sectionZ, byte[] biomes) {
+        java.util.Arrays.fill(biomes, (byte) 1);
+    }
+
     static int index(int x, int y, int z) {
         return (x + HALO) + (y + HALO) * PADDED + (z + HALO) * PADDED * PADDED;
+    }
+
+    static int biomeIndex(int x, int z) {
+        return (x + HALO) + (z + HALO) * PADDED;
     }
 }

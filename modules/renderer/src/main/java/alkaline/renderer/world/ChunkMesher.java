@@ -142,9 +142,22 @@ public final class ChunkMesher {
     private final int[] vertexBrightness = new int[4];
     private final float[] liquidHeights = new float[4];
 
+    /** Connected-texture overlay tiles a face can carry (OptiFine draws one or two per overlay rule). */
+    private static final int MAX_OVERLAYS = 4;
+    /** The merge key's connected-texture field for a ctm_compact face, whose quarters' layers are in {@link #compactLayers}. */
+    private static final int COMPACT = 0xFFFF;
+    /** Per mask cell: connected-texture overlay layers and their rules, and a ctm_compact face's quarter layers. */
+    private final int[] overlayCount = new int[SIZE * SIZE];
+    private final int[] overlayLayers = new int[SIZE * SIZE * MAX_OVERLAYS];
+    private final int[] overlayRules = new int[SIZE * SIZE * MAX_OVERLAYS];
+    private final int[] compactLayers = new int[SIZE * SIZE * 4];
+    private final int[] overlayTiles = new int[2];
+
     private BlockPalette palette;
     private char[] ids;
     private byte[] light;
+    /** Biome ids per padded column ({@link BlockSource#biomeIndex}), or null for plains. */
+    private byte[] biomes;
     private boolean smooth;
     private int originX;
     private int originY;
@@ -163,12 +176,25 @@ public final class ChunkMesher {
      */
     public ChunkMesh mesh(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light, BlockPalette palette,
                           boolean smooth) {
+        return mesh(sectionX, sectionY, sectionZ, ids, light, null, palette, smooth);
+    }
+
+    /**
+     * @param biomes {@link BlockSource#COLUMNS} biome ids of the padded columns, or null for plains everywhere; read
+     *               only when connected textures have biome conditions
+     */
+    public ChunkMesh mesh(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light, byte[] biomes,
+                          BlockPalette palette, boolean smooth) {
         this.palette = Objects.requireNonNull(palette, "palette");
         if (ids.length != BlockSource.VOLUME || light.length != BlockSource.VOLUME) {
             throw new IllegalArgumentException("Section ids and light must be 20^3 including the halo.");
         }
+        if (biomes != null && biomes.length != BlockSource.COLUMNS) {
+            throw new IllegalArgumentException("Section biomes must be 20^2 including the halo.");
+        }
         this.ids = ids;
         this.light = light;
+        this.biomes = biomes;
         this.smooth = smooth;
         originX = sectionX * SIZE;
         originY = sectionY * SIZE;
@@ -204,6 +230,7 @@ public final class ChunkMesher {
             this.palette = null;
             this.ids = null;
             this.light = null;
+            this.biomes = null;
         }
     }
 
@@ -426,6 +453,7 @@ public final class ChunkMesher {
      * corners differ keep their corners in {@link #cornerPattern}/{@link #cornerLight} and never merge.
      */
     private long faceKey(int index, int face, int cell, int maskCell) {
+        overlayCount[maskCell] = 0;
         int choice = cellChoice[cell];
         if (choice < 0) {
             return 0;
@@ -447,15 +475,27 @@ public final class ChunkMesher {
         int appearance = palette.choiceAppearance[choice * 6 + face];
         boolean translucent = Blocks189.pass(id) == MaterialPass.TRANSLUCENT;
         long base = PRESENT | (translucent ? 0 : MERGEABLE) | (long) appearance << 36;
-        int rule = palette.choiceCtm[choice * 6 + face];
-        if (rule >= 0) {
-            base |= (long) connectedLayer(rule, index, face, cell, id, palette.appearanceLayer[appearance]) << 16;
+        int list = palette.choiceCtm[choice * 6 + face];
+        // Compact faces and faces with overlays are drawn one by one, from their corners.
+        boolean single = false;
+        if (list >= 0) {
+            int connected = connectedCube(list, index, face, cell, maskCell, palette.appearanceLayer[appearance]);
+            base |= (long) connected << 16;
+            single = connected == COMPACT || overlayCount[maskCell] > 0;
         }
         int axis = face >> 1;
         int normal = (face & 1) == 1 ? STRIDE[axis] : -STRIDE[axis];
         int front = index + normal;
         if (!smoothFor(id, model)) {
-            return base | lightWord(bright[front]);
+            int lit = lightWord(bright[front]);
+            if (single) {
+                for (int corner = 0; corner < 4; corner++) {
+                    cornerPattern[maskCell * 4 + corner] = 0;
+                    cornerLight[maskCell * 4 + corner] = lit;
+                }
+                base &= ~MERGEABLE;
+            }
+            return base | lit;
         }
         int uStep = STRIDE[U_AXIS[axis]];
         int vStep = STRIDE[V_AXIS[axis]];
@@ -486,52 +526,217 @@ public final class ChunkMesher {
                 uniform = false;
             }
         }
-        if (!uniform) {
+        if (!uniform || single) {
             base &= ~MERGEABLE;
         }
         return base | (long) firstPattern << 32 | firstLight;
     }
 
     /**
-     * A connected-texture tile for a face as its layer + 1 (0 keeps the face's texture), kept in the merge key's
-     * bits 16..31 so faces with different tiles never merge.
+     * Runs a cube face through its connected-texture rules: overlay rules leave their tiles in
+     * {@link #overlayLayers}; the first other rule that gives a tile decides the face's texture. Returns the merge
+     * key's connected field: the tile's layer + 1, 0 to keep the face's texture, or {@link #COMPACT} with the
+     * quarters' layers in {@link #compactLayers}.
      */
-    private int connectedLayer(int rule, int index, int face, int cell, int id, int baseLayer) {
-        ConnectedTextures.Rule connected = palette.ctm.rules().get(rule);
-        neighbors.index = index;
-        neighbors.id = id;
-        neighbors.face = face;
-        neighbors.layer = baseLayer;
-        neighbors.tile = connected.connectTile();
-        int tile = ConnectedTextures.tile(connected, face, originX + (cell & 15), originY + (cell >> 4 & 15),
-                originZ + (cell >> 8), neighbors);
-        if (tile < 0) {
-            return 0;
+    private int connectedCube(int list, int index, int face, int cell, int maskCell, int baseLayer) {
+        int x = originX + (cell & 15);
+        int y = originY + (cell >> 4 & 15);
+        int z = originZ + (cell >> 8);
+        int biome = palette.ctmBiomes ? biome(cell & 15, cell >> 8) : 1;
+        for (int at = list; palette.ctmLists[at] >= 0; at++) {
+            int ruleIndex = palette.ctmLists[at];
+            ConnectedTextures.Rule rule = palette.ctm.rules().get(ruleIndex);
+            if (!rule.applies(y, biome)) {
+                continue;
+            }
+            neighbors.set(index, face, baseLayer, rule);
+            int start = palette.ctmTileStart[ruleIndex];
+            if (rule.method().overlay()) {
+                if (rule.method() == ConnectedTextures.Method.OVERLAY) {
+                    int count = ConnectedTextures.overlay(rule, face, y, neighbors, overlayTiles);
+                    for (int tile = 0; tile < count; tile++) {
+                        addOverlay(maskCell, palette.ctmTiles[start + overlayTiles[tile]], ruleIndex);
+                    }
+                } else {
+                    int tile = ConnectedTextures.tile(rule, face, x, y, z, neighbors);
+                    if (tile >= 0) {
+                        addOverlay(maskCell, palette.ctmTiles[start + tile], ruleIndex);
+                    }
+                }
+                continue;
+            }
+            int tile = ConnectedTextures.tile(rule, face, x, y, z, neighbors);
+            if (tile < 0) {
+                continue;
+            }
+            if (rule.method() == ConnectedTextures.Method.CTM_COMPACT) {
+                for (int quarter = 0; quarter < 4; quarter++) {
+                    int layer = palette.ctmTiles[start + ConnectedTextures.compactTile(rule, tile, quarter)];
+                    compactLayers[maskCell * 4 + quarter] = layer < 0 ? baseLayer : layer;
+                }
+                return COMPACT;
+            }
+            int layer = palette.ctmTiles[start + tile];
+            if (layer == BlockPalette.SKIP_TILE) {
+                continue;
+            }
+            return layer == BlockPalette.KEEP_TILE || layer == baseLayer ? 0 : layer + 1;
         }
-        int layer = palette.ctmTiles[palette.ctmTileStart[rule] + tile];
-        return layer < 0 || layer == baseLayer ? 0 : layer + 1;
+        return 0;
     }
 
-    /** Whether a cell joins a connected face: the same block, or (connect=tile) the same texture on that face. */
-    private final class Neighbors implements ConnectedTextures.Neighbors {
+    private void addOverlay(int maskCell, int layer, int rule) {
+        int count = overlayCount[maskCell];
+        if (layer >= 0 && count < MAX_OVERLAYS) {
+            overlayLayers[maskCell * MAX_OVERLAYS + count] = layer;
+            overlayRules[maskCell * MAX_OVERLAYS + count] = rule;
+            overlayCount[maskCell] = count + 1;
+        }
+    }
+
+    /**
+     * A model quad's texture after its connected-texture rules (overlays and ctm_compact only apply to cube faces),
+     * or its own layer.
+     */
+    private int connectedQuad(int list, int index, int face, int cell, int baseLayer) {
+        int x = originX + (cell & 15);
+        int y = originY + (cell >> 4 & 15);
+        int z = originZ + (cell >> 8);
+        int biome = palette.ctmBiomes ? biome(cell & 15, cell >> 8) : 1;
+        for (int at = list; palette.ctmLists[at] >= 0; at++) {
+            int ruleIndex = palette.ctmLists[at];
+            ConnectedTextures.Rule rule = palette.ctm.rules().get(ruleIndex);
+            if (rule.method().overlay() || rule.method() == ConnectedTextures.Method.CTM_COMPACT
+                    || !rule.applies(y, biome)) {
+                continue;
+            }
+            neighbors.set(index, face, baseLayer, rule);
+            int tile = ConnectedTextures.tile(rule, face, x, y, z, neighbors);
+            if (tile < 0) {
+                continue;
+            }
+            int layer = palette.ctmTiles[palette.ctmTileStart[ruleIndex] + tile];
+            if (layer == BlockPalette.SKIP_TILE) {
+                continue;
+            }
+            return layer == BlockPalette.KEEP_TILE ? baseLayer : layer;
+        }
+        return baseLayer;
+    }
+
+    /** The biome of a section-local column (-2..17). */
+    private int biome(int x, int z) {
+        return biomes == null ? 1 : biomes[BlockSource.biomeIndex(x, z)] & 0xFF;
+    }
+
+    /**
+     * The texture a cell shows a neighbor on a face (ConnectedTextures.getNeighbourIcon), from its resolved entry:
+     * inside the section the one {@link #resolveCells} chose, in the halo the state's own (neighbor-derived
+     * properties are resolved where the halo still holds their neighbors).
+     */
+    private int faceLayerAt(int index, int face) {
+        int state = ids[index];
+        int base = state == 0 ? -1 : palette.stateBase[state];
+        if (base < 0) {
+            return -1;
+        }
+        int x = index % PADDED - HALO;
+        int y = index / SY % PADDED - HALO;
+        int z = index / SZ - HALO;
+        int entry = base;
+        if (x >= 0 && x < SIZE && y >= 0 && y < SIZE && z >= 0 && z < SIZE) {
+            entry = cellEntry[x | y << 4 | z << 8];
+        } else if (BlockStates189.extraCount(state >> 4) > 1 && x >= -1 && x <= SIZE && y >= -1 && y <= SIZE
+                && z >= -1 && z <= SIZE) {
+            entry = base + NeighborRules.extra(ids, index, originX + x, originY + y, originZ + z);
+        }
+        return entry < 0 ? -1 : palette.entryFaceLayer[entry * 6 + face];
+    }
+
+    /**
+     * ConnectedTextures.isNeighbour and the overlay tests for one rule and face: a neighbor joins when it is the
+     * same block state, or by the rule's connect (the same texture on that face, or the same material).
+     */
+    private final class Neighbors implements ConnectedTextures.Neighbors, ConnectedTextures.OverlayNeighbors {
         int index;
-        int id;
+        int state;
         int face;
         int layer;
-        boolean tile;
+        ConnectedTextures.Rule rule;
+
+        void set(int index, int face, int layer, ConnectedTextures.Rule rule) {
+            this.index = index;
+            this.state = ids[index];
+            this.face = face;
+            this.layer = layer;
+            this.rule = rule;
+        }
 
         @Override
         public boolean connects(int dx, int dy, int dz) {
-            int state = ids[index + dx * SX + dy * SY + dz * SZ];
-            if (!tile) {
-                return state >> 4 == id;
+            return joins(index + dx * SX + dy * SY + dz * SZ);
+        }
+
+        private boolean joins(int at) {
+            int other = ids[at];
+            if (other == state) {
+                return true;
             }
-            int entry = palette.stateBase[state];
-            if (entry < 0) {
+            if (other == 0) {
                 return false;
             }
-            int appearance = palette.choiceAppearance[palette.entryFirstChoice[entry] * 6 + face];
-            return appearance >= 0 && palette.appearanceLayer[appearance] == layer;
+            return switch (rule.connect()) {
+                case ConnectedTextures.CONNECT_TILE -> faceLayerAt(at, face) == layer;
+                case ConnectedTextures.CONNECT_MATERIAL -> Blocks189.material(other >> 4) == Blocks189.material(state >> 4);
+                default -> false;
+            };
+        }
+
+        @Override
+        public boolean sameBlock(int dx, int dy, int dz) {
+            return ids[index + dx * SX + dy * SY + dz * SZ] >> 4 == state >> 4;
+        }
+
+        /** isNeighbourOverlay: a full cube of another kind, with its face toward the viewer uncovered. */
+        @Override
+        public boolean overlay(int dx, int dy, int dz) {
+            int at = index + dx * SX + dy * SY + dz * SZ;
+            int other = ids[at];
+            int id = other >> 4;
+            if (!Blocks189.fullCube(id) && id != 20 && id != 95 || other == 0) {
+                return false;
+            }
+            if ((rule.connectBlocks().length > 0 || !rule.connectTiles().isEmpty()) && !rule.connectsTo(id, other & 15,
+                    texture(faceLayerAt(at, face)))) {
+                return false;
+            }
+            return uncovered(at) && !joins(at);
+        }
+
+        /** isNeighbourMatching: a block the rule itself matches, with its face toward the viewer uncovered. */
+        @Override
+        public boolean matching(int dx, int dy, int dz) {
+            int at = index + dx * SX + dy * SY + dz * SZ;
+            int other = ids[at];
+            if (other == 0) {
+                return false;
+            }
+            if (rule.blocks().length > 0 && !rule.matchesBlock(other >> 4, other & 15)) {
+                return false;
+            }
+            if (!rule.textures().isEmpty() && faceLayerAt(at, face) != layer) {
+                return false;
+            }
+            return uncovered(at);
+        }
+
+        private boolean uncovered(int at) {
+            int front = ids[at + offsetOf(face)] >> 4;
+            return !Blocks189.opaqueCube(front) && (face != BlockModels189.UP || front != 78);
+        }
+
+        private String texture(int layer) {
+            return layer < 0 ? "" : palette.textures().get(layer);
         }
     }
 
@@ -617,16 +822,107 @@ public final class ChunkMesher {
         int cellIndex = BlockSource.index(position[0], position[1], position[2]);
         int id = ids[cellIndex] >> 4;
         int connected = (int) (key >>> 16) & 0xFFFF;
-        int layer = connected != 0 ? connected - 1 : palette.appearanceLayer[appearance];
-        MaterialPass pass = passFor(id, layer);
-        emitCubeLayer(face, axis, uAxis, vAxis, plane, u, v, width, height, key, layer,
-                palette.appearanceOrient[appearance], palette.appearanceTint[appearance], pass);
+        int orient = palette.appearanceOrient[appearance];
+        int tint = palette.appearanceTint[appearance];
+        int maskCell = v * SIZE + u;
+        if (connected == COMPACT) {
+            for (int quarter = 0; quarter < 4; quarter++) {
+                emitCompactQuarter(face, axis, uAxis, vAxis, plane, u, v, quarter, id, orient, tint, maskCell);
+            }
+        } else {
+            int layer = connected != 0 ? connected - 1 : palette.appearanceLayer[appearance];
+            MaterialPass pass = passFor(id, layer);
+            emitCubeLayer(face, axis, uAxis, vAxis, plane, u, v, width, height, key, layer, orient, tint, pass, false);
+            int glow = palette.emissiveLayer[layer];
+            if (glow >= 0) {
+                emitCubeLayer(face, axis, uAxis, vAxis, plane, u, v, width, height, key, glow, orient, tint,
+                        emissivePass(pass), true);
+            }
+        }
         int overlay = palette.overlayLayer[appearance];
         if (overlay >= 0) {
             MaterialPass overlayPass = Blocks189.pass(id) == MaterialPass.TRANSLUCENT ? MaterialPass.TRANSLUCENT
                     : MaterialPass.CUTOUT;
             emitCubeLayer(face, axis, uAxis, vAxis, plane, u, v, width, height, key, overlay,
-                    palette.overlayOrient[appearance], palette.overlayTint[appearance], overlayPass);
+                    palette.overlayOrient[appearance], palette.overlayTint[appearance], overlayPass, false);
+        }
+        // Connected-texture overlays: full-face quads in the standard orientation (BlockModelUtils.makeBakedQuad).
+        for (int index = 0; index < overlayCount[maskCell] && (key & MERGEABLE) == 0; index++) {
+            int rule = overlayRules[maskCell * MAX_OVERLAYS + index];
+            emitCubeLayer(face, axis, uAxis, vAxis, plane, u, v, width, height, key,
+                    overlayLayers[maskCell * MAX_OVERLAYS + index], 0, palette.ctmTint[rule],
+                    palette.ctm.rules().get(rule).layer(), false);
+        }
+    }
+
+    /** OptiFine draws a quad's emissive texture in the quad's layer, or cutout for solid quads. */
+    private static MaterialPass emissivePass(MaterialPass pass) {
+        return pass == MaterialPass.OPAQUE ? MaterialPass.CUTOUT : pass;
+    }
+
+    /**
+     * One quarter of a ctm_compact face (ConnectedTexturesCompact): the face split at its middle in the plane, each
+     * quarter textured with the compact tile of the texture quarter it covers, lit by interpolating the face's
+     * corners as vanilla lights a partial face.
+     */
+    private void emitCompactQuarter(int face, int axis, int uAxis, int vAxis, int plane, int u, int v, int quarter,
+                                    int id, int orient, int tint, int maskCell) {
+        int pu = quarter & 1;
+        int pv = quarter >> 1;
+        boolean positive = (face & 1) == 1;
+        int facePlane = positive ? plane + 1 : plane;
+        // Texture quarter: from the natural texture coordinates (in half blocks) of the quarter's lower corner.
+        position[axis] = facePlane * 2;
+        position[uAxis] = u * 2 + pu;
+        position[vAxis] = v * 2 + pv;
+        int nu = Math.min(naturalU(face, position[0], position[1], position[2], 2 * SIZE),
+                naturalU(face, position[0] + (uAxis == 0 || vAxis == 0 ? 1 : 0),
+                        position[1] + (uAxis == 1 || vAxis == 1 ? 1 : 0),
+                        position[2] + (uAxis == 2 || vAxis == 2 ? 1 : 0), 2 * SIZE));
+        int nv = Math.min(naturalV(face, position[0], position[1], position[2], 2 * SIZE),
+                naturalV(face, position[0] + (uAxis == 0 || vAxis == 0 ? 1 : 0),
+                        position[1] + (uAxis == 1 || vAxis == 1 ? 1 : 0),
+                        position[2] + (uAxis == 2 || vAxis == 2 ? 1 : 0), 2 * SIZE));
+        int layer = compactLayers[maskCell * 4 + (Math.floorMod(nv, 2) << 1 | Math.floorMod(nu, 2))];
+        MaterialPass pass = passFor(id, layer);
+        boolean reversed = axis == 2 ? !positive : positive;
+        int[] order = reversed ? REVERSED : NATURAL;
+        int range = ChunkMesh.range(pass, face);
+        int[] bucket = ensureBucket(range);
+        int cursor = bucketWords[range];
+        for (int index = 0; index < 4; index++) {
+            int corner = order[(index + ROTATE[face]) & 3];
+            // The vertex's place on the face, in halves of the block: 0, 1 or 2.
+            int fu = pu + CORNER_U[corner];
+            int fv = pv + CORNER_V[corner];
+            position[axis] = facePlane * 2;
+            position[uAxis] = u * 2 + fu;
+            position[vAxis] = v * 2 + fv;
+            float occlusion = 0f;
+            float sky = 0f;
+            float block = 0f;
+            for (int sample = 0; sample < 4; sample++) {
+                float weight = (CORNER_U[sample] == 1 ? fu : 2 - fu) * (CORNER_V[sample] == 1 ? fv : 2 - fv) * 0.25F;
+                occlusion += OCCLUSION[cornerPattern[maskCell * 4 + sample]] * weight;
+                int lit = cornerLight[maskCell * 4 + sample];
+                sky += (lit >> 8 & 255) * weight;
+                block += (lit & 255) * weight;
+            }
+            int nu2 = naturalU(face, position[0], position[1], position[2], 2 * SIZE);
+            int nv2 = naturalV(face, position[0], position[1], position[2], 2 * SIZE);
+            int tu = orient(orient, nu2, nv2, 2 * SIZE, true);
+            int tv = orient(orient, nu2, nv2, 2 * SIZE, false);
+            cursor = vertex(bucket, cursor, position[0] * (ChunkMesh.POSITION_SCALE / 2),
+                    position[1] * (ChunkMesh.POSITION_SCALE / 2), position[2] * (ChunkMesh.POSITION_SCALE / 2), face,
+                    tu * (ChunkMesh.UV_SCALE / 2), tv * (ChunkMesh.UV_SCALE / 2), layer,
+                    color(SHADE[face], occlusion, tint), ((int) sky & 255) << 8 | (int) block & 255);
+        }
+        bucketWords[range] = cursor;
+        if (range == ChunkMesh.TRANSLUCENT_RANGE) {
+            position[axis] = plane;
+            position[uAxis] = u;
+            position[vAxis] = v;
+            addCell(position[0] | position[1] << 4 | position[2] << 8, face);
         }
     }
 
@@ -636,8 +932,10 @@ public final class ChunkMesher {
         return pass == MaterialPass.CUTOUT && palette.textureOpaque(layer) ? MaterialPass.OPAQUE : pass;
     }
 
+    /** @param emissive at full block light without occlusion, as OptiFine draws emissive textures */
     private void emitCubeLayer(int face, int axis, int uAxis, int vAxis, int plane, int u, int v, int width,
-                               int height, long key, int layer, int orient, int tint, MaterialPass pass) {
+                               int height, long key, int layer, int orient, int tint, MaterialPass pass,
+                               boolean emissive) {
         boolean positive = (face & 1) == 1;
         int facePlane = positive ? plane + 1 : plane;
         // (u, v) corner order winds toward -X, -Y and +Z; reverse it for the opposite faces so every quad is
@@ -654,8 +952,11 @@ public final class ChunkMesher {
             position[axis] = facePlane;
             position[uAxis] = u + CORNER_U[corner] * width;
             position[vAxis] = v + CORNER_V[corner] * height;
-            int pattern = merged ? (int) (key >>> 32) & 15 : cornerPattern[maskCell * 4 + corner];
+            int pattern = emissive ? 0 : merged ? (int) (key >>> 32) & 15 : cornerPattern[maskCell * 4 + corner];
             int lit = merged ? (int) key & 0xFFFF : cornerLight[maskCell * 4 + corner];
+            if (emissive) {
+                lit = lit & 0xFF00 | 240;
+            }
             int nu = naturalU(face, position[0], position[1], position[2], SIZE);
             int nv = naturalV(face, position[0], position[1], position[2], SIZE);
             int tu = orient(orient, nu, nv, SIZE, true);
@@ -751,7 +1052,7 @@ public final class ChunkMesher {
                     if (choice >= 0) {
                         int model = palette.choiceModel[choice];
                         if (!palette.modelCube[model]) {
-                            meshModel(index, cell, x, y, z, model, palette.entryTint[cellEntry[cell]]);
+                            meshModel(index, cell, x, y, z, choice, model, palette.entryTint[cellEntry[cell]]);
                         }
                     } else if (Blocks189.liquid(state >> 4)) {
                         meshLiquid(index, cell, x, y, z);
@@ -761,7 +1062,7 @@ public final class ChunkMesher {
         }
     }
 
-    private void meshModel(int index, int cell, int x, int y, int z, int model, int tint) {
+    private void meshModel(int index, int cell, int x, int y, int z, int choice, int model, int tint) {
         int id = ids[index] >> 4;
         boolean ao = smoothFor(id, model);
         float offsetX = 0;
@@ -780,6 +1081,7 @@ public final class ChunkMesher {
         }
         int start = palette.modelQuadStart[model];
         int end = start + palette.modelQuadCount[model];
+        int rules = palette.choiceQuadCtm[choice];
         // Vanilla tests each cull face once per block; cache the six answers lazily (-1 unknown).
         int sideMask = 0;
         int sideKnown = 0;
@@ -804,12 +1106,63 @@ public final class ChunkMesher {
                     continue;
                 }
             }
-            emitModelQuad(index, cell, x, y, z, quad, cullFace, id, tint, ao, fullCube, offsetX, offsetY, offsetZ);
+            int list = rules < 0 ? -1 : palette.quadCtm[rules + quad - start];
+            emitModelQuad(index, cell, x, y, z, quad, cullFace, id, tint, ao, fullCube, offsetX, offsetY, offsetZ, list);
         }
     }
 
+    /**
+     * ConnectedTextures.skipConnectedTexture: with connected textures, panes hide the seams of a pane wall. An edge
+     * quad ({@code glass_pane_top}) facing the same pane state is not drawn, and neither is a top or bottom face
+     * against a pane of the same block (and color) that continues the part of the pane the quad covers.
+     */
+    private boolean paneSeam(int index, int quad, int face, int id) {
+        int neighborIndex = index + offsetOf(face);
+        int neighbor = ids[neighborIndex];
+        if (palette.quadPaneEdge[quad] && neighbor == ids[index]) {
+            return true;
+        }
+        if (face != BlockModels189.UP && face != BlockModels189.DOWN || neighbor >> 4 != id
+                || id == 160 && neighbor != ids[index]) {
+            return false;
+        }
+        float[] positions = palette.quadPositions;
+        int p = quad * 12;
+        float plane = face == BlockModels189.UP ? 1f : 0f;
+        float minX = 1f;
+        float maxX = 0f;
+        float minZ = 1f;
+        float maxZ = 0f;
+        for (int vertex = 0; vertex < 4; vertex++) {
+            if (positions[p + vertex * 3 + 1] != plane) {
+                return false; // isFaceQuad: only quads on the block's face
+            }
+            minX = Math.min(minX, positions[p + vertex * 3]);
+            maxX = Math.max(maxX, positions[p + vertex * 3]);
+            minZ = Math.min(minZ, positions[p + vertex * 3 + 2]);
+            maxZ = Math.max(maxZ, positions[p + vertex * 3 + 2]);
+        }
+        int y = neighborIndex / SY % PADDED - HALO;
+        int x = neighborIndex % PADDED - HALO;
+        int z = neighborIndex / SZ - HALO;
+        // Connection bits: north 1, west 2, south 4, east 8.
+        int sides = NeighborRules.extra(ids, neighborIndex, originX + x, originY + y, originZ + z);
+        float midX = (minX + maxX) / 2f;
+        float midZ = (minZ + maxZ) / 2f;
+        if (midX < 0.4F) {
+            return (sides & 2) != 0;
+        }
+        if (midX > 0.6F) {
+            return (sides & 8) != 0;
+        }
+        if (midZ < 0.4F) {
+            return (sides & 1) != 0;
+        }
+        return midZ <= 0.6F || (sides & 4) != 0;
+    }
+
     private void emitModelQuad(int index, int cell, int x, int y, int z, int quad, int cullFace, int id, int tint,
-                               boolean ao, boolean fullCube, float offsetX, float offsetY, float offsetZ) {
+                               boolean ao, boolean fullCube, float offsetX, float offsetY, float offsetZ, int list) {
         float[] positions = palette.quadPositions;
         int p = quad * 12;
         int face = palette.quadFace[quad];
@@ -853,6 +1206,9 @@ public final class ChunkMesher {
             // A full face flush with an opaque cube faces into it: no camera outside that cube can see it.
             return;
         }
+        if (palette.ctm != ConnectedTextures.NONE && Blocks189.pane(id) && paneSeam(index, quad, face, id)) {
+            return;
+        }
         int shade = palette.quadShade[quad] & 0xFFFF;
         int quadTint = palette.quadTinted[quad] ? tint : BlockPalette.NO_TINT;
         if (ao) {
@@ -877,8 +1233,29 @@ public final class ChunkMesher {
             Arrays.fill(vertexMultiplier, 1.0F);
         }
         int layer = palette.quadLayer[quad];
+        if (list >= 0) {
+            layer = connectedQuad(list, index, face, cell, layer);
+        }
         MaterialPass pass = passFor(id, layer);
         boolean aligned = palette.quadFace[quad] == face && planar(positions, p, face >> 1);
+        emitModelLayer(cell, x, y, z, quad, face, aligned, layer, pass, shade, quadTint, ao, false, offsetX, offsetY,
+                offsetZ);
+        int glow = palette.emissiveLayer[layer];
+        if (glow >= 0) {
+            emitModelLayer(cell, x, y, z, quad, face, aligned, glow, emissivePass(pass), shade, quadTint, ao, true,
+                    offsetX, offsetY, offsetZ);
+        }
+    }
+
+    /**
+     * Writes a model quad with the lighting {@link #emitModelQuad} computed; {@code emissive} draws it at full block
+     * light without occlusion (BlockModelRenderer's setMaxBlockLight).
+     */
+    private void emitModelLayer(int cell, int x, int y, int z, int quad, int face, boolean aligned, int layer,
+                                MaterialPass pass, int shade, int quadTint, boolean ao, boolean emissive, float offsetX,
+                                float offsetY, float offsetZ) {
+        float[] positions = palette.quadPositions;
+        int p = quad * 12;
         int range = ChunkMesh.range(pass, aligned ? face : ChunkMesh.ANY_DIRECTION);
         int[] bucket = ensureBucket(range);
         int cursor = bucketWords[range];
@@ -888,13 +1265,17 @@ public final class ChunkMesher {
             float px = positions[p + vertex * 3] + x + offsetX;
             float py = positions[p + vertex * 3 + 1] + y + offsetY;
             float pz = positions[p + vertex * 3 + 2] + z + offsetZ;
-            int color = ao ? color(shade, vertexMultiplier[vertex], quadTint)
+            int color = ao && !emissive ? color(shade, vertexMultiplier[vertex], quadTint)
                     : flatColor(shade, quadTint);
+            int lit = lightWord(vertexBrightness[vertex]);
+            if (emissive) {
+                lit = lit & 0xFF00 | 240;
+            }
             cursor = vertex(bucket, cursor, Math.round(px * ChunkMesh.POSITION_SCALE),
                     Math.round(py * ChunkMesh.POSITION_SCALE), Math.round(pz * ChunkMesh.POSITION_SCALE), face,
                     Math.round((uvs[u + vertex * 2] + TEXTURE_OFFSET_TILES) * ChunkMesh.UV_SCALE),
                     Math.round((uvs[u + vertex * 2 + 1] + TEXTURE_OFFSET_TILES) * ChunkMesh.UV_SCALE), layer, color,
-                    lightWord(vertexBrightness[vertex]));
+                    lit);
         }
         bucketWords[range] = cursor;
         if (range == ChunkMesh.TRANSLUCENT_RANGE) {

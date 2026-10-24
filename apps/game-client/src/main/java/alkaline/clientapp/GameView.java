@@ -543,6 +543,8 @@ final class GameView implements MenuBackground {
         }
         world.renderSolid(frame, options.fog());
         world.fog(fog);
+        play.animation().self(selfModel);
+        entities.animation(play.animation());
         entities.render(frame, play.entities().all(), play.players(), entityLight, lightmap,
                 fog, hitColor, partialTick, eyeX, eyeY, eyeZ, world.viewProjection(), cameraYaw, cameraPitch,
                 perspective > 0 ? selfModel : null);

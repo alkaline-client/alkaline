@@ -109,6 +109,8 @@ final class EntityView implements AutoCloseable {
     private float viewYaw;
     private float viewPitch;
     private final EntityModels.Motion motion = new EntityModels.Motion();
+    private MobAnimator anim;
+    private final MobSelector.Choice choice = new MobSelector.Choice();
     private final float[] root = new float[16];
     private final float[] part = new float[16];
     private final float[] item = new float[16];
@@ -165,8 +167,9 @@ final class EntityView implements AutoCloseable {
         for (int upload = 0; upload < UPLOADS_PER_FRAME && !pendingTextures.isEmpty(); upload++) {
             String path = pendingTextures.poll();
             // Custom armor textures name full asset paths; the rest are short paths under textures/.
-            VulkanTexture texture = load(path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png",
-                    new TextureOptions(ImageSampling.NEAREST, false, false, 1));
+            TextureOptions nearest = new TextureOptions(ImageSampling.NEAREST, false, false, 1);
+            VulkanTexture texture = path.indexOf('+') >= 0 ? layered(path, nearest)
+                    : load(path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png", nearest);
             if (texture == null) {
                 failedTextures.add(path);
             } else {
@@ -197,6 +200,16 @@ final class EntityView implements AutoCloseable {
     private VulkanTexture load(String path, TextureOptions options) {
         RgbaImage image = image(path);
         return image == null ? null : renderer.createTexture(image, options);
+    }
+
+    /** A texture made of several {@code +}-joined paths drawn over one another (horse coat, marking, armor). */
+    private VulkanTexture layered(String key, TextureOptions options) {
+        String[] paths = key.split("\\+");
+        RgbaImage[] images = new RgbaImage[paths.length];
+        for (int index = 0; index < paths.length; index++) {
+            images[index] = image("assets/minecraft/textures/" + paths[index] + ".png");
+        }
+        return images[0] == null ? null : renderer.createTexture(ImageLayers.composite(images), options);
     }
 
     private RgbaImage image(String path) {
@@ -466,6 +479,7 @@ final class EntityView implements AutoCloseable {
         int extraTint = 0xFFFFFFFF;
         EntityModels.Kind extraKind = null;
         motion.reset();
+        float deathRotation = 90f;
         switch (entity.category == Entity.Category.PLAYER ? -1 : entity.type) {
             case -1 -> {
                 texture = skin(entity.uuid, players.get(entity.uuid));
@@ -477,8 +491,9 @@ final class EntityView implements AutoCloseable {
                 }
             }
             case EntityTypes.ZOMBIE, EntityTypes.GIANT -> {
-                kind = EntityModels.Kind.BIPED;
-                texture = texture("entity/zombie/zombie");
+                boolean villager = entity.metadata.getByte(13, 0) == 1;
+                kind = villager ? EntityModels.Kind.ZOMBIE_VILLAGER : EntityModels.Kind.BIPED;
+                texture = texture(villager ? "entity/zombie/zombie_villager" : "entity/zombie/zombie");
                 biped = zombieArms = true;
                 scale = entity.type == EntityTypes.GIANT ? 6f : 1f;
             }
@@ -517,6 +532,10 @@ final class EntityView implements AutoCloseable {
             case EntityTypes.COW, EntityTypes.MOOSHROOM -> {
                 kind = EntityModels.Kind.COW;
                 texture = texture(entity.type == EntityTypes.COW ? "entity/cow/cow" : "entity/cow/mooshroom");
+                if (entity.type == EntityTypes.MOOSHROOM) {
+                    extraKind = EntityModels.Kind.MOOSHROOM_MUSHROOMS;
+                    extraTexture = "blocks/mushroom_red";
+                }
             }
             case EntityTypes.SHEEP -> {
                 kind = EntityModels.Kind.SHEEP;
@@ -545,6 +564,7 @@ final class EntityView implements AutoCloseable {
                 kind = EntityModels.Kind.VILLAGER;
                 int profession = entity.metadata.getInt(16, 0);
                 texture = texture(VILLAGERS[profession >= 0 && profession < 5 ? profession : 5]);
+                scale = EntityTypes.child(entity) ? 0.46875f : 0.9375f; // RenderVillager.preRenderCallback
             }
             case EntityTypes.IRON_GOLEM -> {
                 kind = EntityModels.Kind.IRON_GOLEM;
@@ -572,7 +592,16 @@ final class EntityView implements AutoCloseable {
                 scale = 4.5f;
             }
             default -> {
-                return; // Mobs without a model yet (witch, bat, horse, rabbit...) are not drawn.
+                if (!MobSelector.select(entity, partialTick, x, y, z, motion, choice)) {
+                    return; // Mobs without a model yet are not drawn.
+                }
+                kind = choice.kind;
+                texture = texture(choice.texture);
+                scale = choice.scale;
+                y += choice.lift;
+                biped = choice.biped;
+                zombieArms = choice.zombieArms;
+                deathRotation = choice.deathRotation;
             }
         }
         if (texture == null) {
@@ -591,6 +620,12 @@ final class EntityView implements AutoCloseable {
         motion.onGround = entity.onGround;
         motion.heldItem = entity.equipment[0] != null ? 1 : 0;
         motion.riding = entity.vehicle >= 0;
+        MobAnimator.State animState = anim == null ? null : anim.state(entity);
+        if (animState != null) {
+            anim.apply(entity, animState, partialTick, motion);
+        }
+        motion.entityId = entity.id;
+        motion.ticksExisted = entity.ticksExisted;
         if (entity.category == Entity.Category.PLAYER && entity.usingItem() && entity.equipment[0] != null) {
             // RenderPlayer.setModelVisibilities: blocking raises the sword, drawing a bow aims both arms.
             int heldId = entity.equipment[0].id();
@@ -608,9 +643,20 @@ final class EntityView implements AutoCloseable {
         if (zombieArms) {
             EntityModels.zombieArms(motion, pose);
         }
-        livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, biped && motion.sneaking);
+        float scaleY = scale;
+        if (kind == EntityModels.Kind.SLIME || kind == EntityModels.Kind.MAGMA_CUBE) {
+            // RenderSlime.preRenderCallback: squashed by the squish factor, size-scaled.
+            float h = 1f / (motion.squish / (scale * 0.5f + 1f) + 1f);
+            scaleY = scale / h;
+            scale *= h;
+        }
+        livingRoot(x, y, z, bodyYaw, entity, partialTick, scale, scaleY, biped && motion.sneaking, deathRotation);
+        if (kind == EntityModels.Kind.ENDER_DRAGON) {
+            dragonRoot(x, y, z);
+        }
         int overlay = entity.hurtTime > 0 || entity.deathTime > 0 ? hit.argb() : 0;
-        boolean child = EntityTypes.child(entity);
+        // Villagers draw whole at half scale (set above), not as a separate head and body.
+        boolean child = EntityTypes.child(entity) && kind != EntityModels.Kind.VILLAGER;
         // RendererLivingEntity.renderModel: an invisible body is skipped; its armor and held item still draw.
         boolean invisible = entity.invisible();
         if (!invisible && child && !submitChild(kind, texture, pose, light, overlay)) {
@@ -623,9 +669,19 @@ final class EntityView implements AutoCloseable {
             VulkanTexture extra = texture(extraTexture);
             ModelPose extraPose = poses.get(extraKind);
             if (extra != null && !child && !invisible) {
-                extraPose.copyFrom(pose, Math.min(pose.model().partCount(), extraPose.model().partCount()));
+                extraPose.copyFrom(pose, extraKind == EntityModels.Kind.MOOSHROOM_MUSHROOMS ? 1
+                        : Math.min(pose.model().partCount(), extraPose.model().partCount()));
                 models.submit(gpu.get(extraKind), extra, extraPose, root, extraTint, overlay, light);
             }
+        }
+        if (kind == EntityModels.Kind.GUARDIAN && animState != null && !invisible) {
+            renderGuardianBeam(entity, animState, x, y, z, partialTick);
+        }
+        if (kind == EntityModels.Kind.WITCH && entity.equipment[0] != null) {
+            renderWitchHeld(entity.equipment[0], pose, light);
+        }
+        if (kind == EntityModels.Kind.SNOW_GOLEM && !invisible) {
+            renderPumpkinHead(pose, light);
         }
         if (biped && !child) {
             renderArmor(entity, pose, light, hit.tintArmor() ? overlay : 0);
@@ -635,31 +691,209 @@ final class EntityView implements AutoCloseable {
         }
     }
 
+    /** The per-mob animation state the renderer reads (set each frame by the game view). */
+    void animation(MobAnimator animator) {
+        anim = animator;
+    }
+
+    /** Items LayerHeldItemWitch holds like a tool: upright in the hand (ItemTool, ItemSword, rods, sticks). */
+    private static boolean fullThreeD(int id) {
+        return id >= 256 && id <= 258 || id >= 267 && id <= 279 || id >= 283 && id <= 286 || id >= 290 && id <= 294
+                || id == 280 || id == 346 || id == 369 || id == 398;
+    }
+
+    /**
+     * LayerHeldItemWitch: the held item at the tip of the nose, lifted with it, in the layer's per-kind pose (a bow,
+     * a tool, or the default potion pose) and then the item's own third-person display.
+     */
+    private void renderWitchHeld(ItemStack stack, ModelPose pose, int light) {
+        GpuItem held = gpuItem(catalog.model(stack, -1, false));
+        if (held == null) {
+            return;
+        }
+        PoseMath.resolve(pose, root, matrices);
+        int base = 1 * PoseMath.FLOATS_PER_PART; // the nose is part 1
+        Mat4.identity(part);
+        for (int row = 0; row < 3; row++) {
+            for (int column = 0; column < 4; column++) {
+                part[column * 4 + row] = matrices[base + row * 4 + column];
+            }
+        }
+        Mat4.translate(part, -0.0625f, 0.53125f, 0.21875f, part);
+        int id = stack.id();
+        if (id == 261) {
+            Mat4.translate(part, 0f, 0.125f, -0.125f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-45), 0f, 1f, 0f, part);
+            Mat4.scale(part, 0.625f, -0.625f, 0.625f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-100), 1f, 0f, 0f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-20), 0f, 1f, 0f, part);
+        } else if (fullThreeD(id)) {
+            if (id == 346 || id == 398) {
+                Mat4.rotate(part, (float) Math.PI, 0f, 0f, 1f, part);
+                Mat4.translate(part, 0f, -0.0625f, 0f, part);
+            }
+            Mat4.translate(part, 0f, 0.1875f, 0f, part); // RenderWitch.transformHeldFull3DItemLayer
+            Mat4.translate(part, 0.0625f, -0.125f, 0f, part);
+            Mat4.scale(part, 0.625f, -0.625f, 0.625f, part);
+        } else {
+            Mat4.translate(part, 0.1875f, 0.1875f, 0f, part);
+            Mat4.scale(part, 0.875f, 0.875f, 0.875f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-20), 0f, 0f, 1f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-60), 1f, 0f, 0f, part);
+            Mat4.rotate(part, (float) Math.toRadians(-30), 0f, 0f, 1f, part);
+        }
+        Mat4.rotate(part, (float) Math.toRadians(-15), 1f, 0f, 0f, part);
+        Mat4.rotate(part, (float) Math.toRadians(40), 0f, 0f, 1f, part);
+        if (held.definition().block()) {
+            Mat4.scale(part, 2f, 2f, 2f, part);
+        }
+        display(part, held.definition().thirdPerson());
+        Mat4.scale(part, 0.5f, 0.5f, 0.5f, part);
+        Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
+        submitItem(held, stack, part, light);
+    }
+
+    private final float[] beamBase = new float[16];
+    private final float[] beamSegment = new float[16];
+
+    /**
+     * RenderGuardian's beam from the guardian's eye to its target's middle: crossed planes turning about the beam,
+     * tinted redder as the charge builds. It is drawn as a chain of 0.4-block stretches (one texture height each)
+     * slid along the beam, which scrolls the texture as vanilla's v offset does.
+     */
+    private void renderGuardianBeam(Entity entity, MobAnimator.State state, float x, float y, float z,
+                                    float partialTick) {
+        Entity target = state.target == 0 ? null : anim.entity(state.target);
+        VulkanTexture beam = target == null ? null : texture("entity/guardian_beam");
+        if (beam == null) {
+            return;
+        }
+        boolean elder = (entity.metadata.getInt(16, 0) & 4) != 0;
+        double cameraX = entity.renderX(partialTick) - x;
+        double cameraY = entity.renderY(partialTick) - y;
+        double cameraZ = entity.renderZ(partialTick) - z;
+        float eye = EntityTypes.height(entity) * 0.5f;
+        float dx = (float) (target.renderX(partialTick) - cameraX) - x;
+        float dy = (float) (target.renderY(partialTick) + EntityTypes.height(target) * 0.5f - cameraY) - (y + eye);
+        float dz = (float) (target.renderZ(partialTick) - cameraZ) - z;
+        float length = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (length < 1e-3f) {
+            return;
+        }
+        float charge = MobAnimator.beamCharge(state, elder, partialTick);
+        float squared = charge * charge;
+        int tint = 0xFF000000 | 64 + (int) (squared * 240f) << 16 | 32 + (int) (squared * 192f) << 8
+                | 128 - (int) (squared * 64f);
+        float time = entity.ticksExisted + partialTick;
+        float scroll = time * 0.5f % 1f;
+        Mat4.identity(beamBase);
+        Mat4.translate(beamBase, x, y + eye, z, beamBase);
+        Mat4.rotate(beamBase, (float) (Math.PI / 2 - Math.atan2(dz / length, dx / length)), 0f, 1f, 0f, beamBase);
+        Mat4.rotate(beamBase, (float) Math.acos(dy / length), 1f, 0f, 0f, beamBase);
+        Mat4.rotate(beamBase, 0.075f * time, 0f, 1f, 0f, beamBase);
+        ModelPose pose = poses.get(EntityModels.Kind.GUARDIAN_BEAM);
+        for (int stretch = 0; stretch < 256; stretch++) {
+            float start = (stretch - scroll) * 0.4f;
+            if (start >= length) {
+                break;
+            }
+            System.arraycopy(beamBase, 0, beamSegment, 0, 16);
+            Mat4.translate(beamSegment, 0f, start, 0f, beamSegment);
+            Mat4.scale(beamSegment, 0.2f, 0.2f, 0.2f, beamSegment);
+            models.submit(gpu.get(EntityModels.Kind.GUARDIAN_BEAM), beam, pose, beamSegment, tint, 0, 0xFFFFFF);
+        }
+    }
+
+    /**
+     * RenderDragon.rotateCorpse replaces the yaw turn: heading from the history's yaw, a pitch from its height
+     * change, and a block forward; the usual flip follows.
+     */
+    private void dragonRoot(float x, float y, float z) {
+        float heading = motion.movement[7 * 2];
+        float climb = motion.movement[5 * 2 + 1] - motion.movement[10 * 2 + 1];
+        Mat4.identity(root);
+        Mat4.translate(root, x, y, z, root);
+        Mat4.rotate(root, (float) Math.toRadians(-heading), 0f, 1f, 0f, root);
+        Mat4.rotate(root, (float) Math.toRadians(climb * 10f), 1f, 0f, 0f, root);
+        Mat4.translate(root, 0f, 0f, 1f, root);
+        Mat4.scale(root, -1f, -1f, 1f, root);
+        Mat4.translate(root, 0f, -1.5078125f, 0f, root);
+    }
+
     /**
      * RendererLivingEntity.doRender's transforms: to the feet, turned to the body yaw, tilted by death, flipped
      * from model space (y down) with the renderer's scale, and lifted by vanilla's 1.5078125.
      */
     private void livingRoot(float x, float y, float z, float bodyYaw, Entity entity, float partialTick, float scale,
-                            boolean sneakingBiped) {
+                            float scaleY, boolean sneakingBiped, float deathRotation) {
         Mat4.identity(root);
         Mat4.translate(root, x, y, z, root);
         Mat4.rotate(root, (float) Math.toRadians(180.0 - bodyYaw), 0f, 1f, 0f, root);
         if (entity.deathTime > 0) {
             float tilt = (float) Math.sqrt(Math.max(0f, (entity.deathTime + partialTick - 1f) / 20f * 1.6f));
-            Mat4.rotate(root, (float) Math.toRadians(Math.min(1f, tilt) * 90f), 0f, 0f, 1f, root);
+            Mat4.rotate(root, (float) Math.toRadians(Math.min(1f, tilt) * deathRotation), 0f, 0f, 1f, root);
         }
-        Mat4.scale(root, -scale, -scale, scale, root);
+        Mat4.scale(root, -scale, -scaleY, scale, root);
         Mat4.translate(root, 0f, -1.5078125f, 0f, root);
         if (sneakingBiped) {
             Mat4.translate(root, 0f, 0.2f, 0f, root); // ModelBiped.render while sneaking
         }
     }
 
+    private final float[] foalRoot = new float[16];
+
+    /**
+     * ModelHorse.render for a foal (size 0.5): the legs, the trunk and the head each draw under their own scale and
+     * lift, the head lowering further while it grazes.
+     */
+    private void submitFoal(VulkanTexture texture, ModelPose pose, int light, int overlay) {
+        float size = 0.5f;
+        float grazing = motion.grazing;
+        System.arraycopy(root, 0, foalRoot, 0, 16);
+        int parts = pose.model().partCount();
+        for (int group = 0; group < 3; group++) {
+            int from = group == 0 ? 0 : group == 1 ? 12 : 18;
+            int to = group == 0 ? 12 : group == 1 ? 18 : 25;
+            System.arraycopy(foalRoot, 0, root, 0, 16);
+            if (group == 0) {
+                Mat4.scale(root, size, 0.5f + size * 0.5f, size, root);
+                Mat4.translate(root, 0f, 0.95f * (1f - size), 0f, root);
+            } else if (group == 1) {
+                Mat4.scale(root, size, size, size, root);
+                Mat4.translate(root, 0f, 1.35f * (1f - size), 0f, root);
+            } else {
+                float head = 0.5f + size * size * 0.5f;
+                Mat4.scale(root, head, head, head, root);
+                if (grazing <= 0f) {
+                    Mat4.translate(root, 0f, 1.35f * (1f - size), 0f, root);
+                } else {
+                    Mat4.translate(root, 0f, 0.9f * (1f - size) * grazing + 1.35f * (1f - size) * (1f - grazing),
+                            0.15f * (1f - size) * grazing, root);
+                }
+            }
+            for (int part = 0; part < parts; part++) {
+                foalVisible[part] = pose.visible(part);
+                pose.visible(part, foalVisible[part] && part >= from && part < to);
+            }
+            models.submit(gpu.get(EntityModels.Kind.HORSE), texture, pose, root, 0xFFFFFFFF, overlay, light);
+            for (int part = 0; part < parts; part++) {
+                pose.visible(part, foalVisible[part]);
+            }
+        }
+        System.arraycopy(foalRoot, 0, root, 0, 16);
+    }
+
+    private final boolean[] foalVisible = new boolean[CuboidModel.MAX_PARTS];
+
     /**
      * ModelBiped / ModelQuadruped child rendering: the head drawn larger relative to a half-size body. Returns
      * false for kinds without a child layout (then nothing is drawn rather than an adult-sized child).
      */
     private boolean submitChild(EntityModels.Kind kind, VulkanTexture texture, ModelPose pose, int light, int overlay) {
+        if (kind == EntityModels.Kind.HORSE) {
+            submitFoal(texture, pose, light, overlay);
+            return true;
+        }
         float headScale;
         float headLift;
         float headForward;
@@ -687,6 +921,18 @@ final class EntityView implements AutoCloseable {
                 headScale = 1f;
                 headLift = 5f / 16f;
                 headForward = 2f / 16f;
+                headParts = new int[]{0};
+            }
+            case RABBIT -> { // ModelRabbit.render: head, ears and nose lowered, the rest halved
+                headScale = 1f;
+                headLift = 5f / 16f;
+                headForward = 2f / 16f;
+                headParts = new int[]{7, 8, 9, 11};
+            }
+            case OCELOT -> { // ModelOcelot.render
+                headScale = 0.75f;
+                headLift = 10f / 16f;
+                headForward = 4f / 16f;
                 headParts = new int[]{0};
             }
             default -> {
@@ -816,6 +1062,28 @@ final class EntityView implements AutoCloseable {
         Mat4.scale(part, 0.5f, 0.5f, 0.5f, part);
         Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
         submitItem(held, stack, part, light);
+    }
+
+    /** LayerSnowmanHead: a pumpkin block on the head, 0.625 scale, turned to face forward. */
+    private void renderPumpkinHead(ModelPose pose, int light) {
+        ItemStack pumpkin = new ItemStack(86, 1, 0, null);
+        GpuItem block = gpuItem(catalog.model(pumpkin, -1, false));
+        if (block == null) {
+            return;
+        }
+        PoseMath.resolve(pose, root, matrices);
+        int base = 2 * PoseMath.FLOATS_PER_PART; // the golem's head is part 2
+        Mat4.identity(part);
+        for (int row = 0; row < 3; row++) {
+            for (int column = 0; column < 4; column++) {
+                part[column * 4 + row] = matrices[base + row * 4 + column];
+            }
+        }
+        Mat4.translate(part, 0f, -0.34375f, 0f, part);
+        Mat4.rotate(part, (float) Math.PI, 0f, 1f, 0f, part);
+        Mat4.scale(part, 0.625f, -0.625f, -0.625f, part);
+        Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
+        submitItem(block, pumpkin, part, light);
     }
 
     /** ItemCameraTransforms.applyTransform. */

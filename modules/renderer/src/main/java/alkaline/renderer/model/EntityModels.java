@@ -29,7 +29,10 @@ public final class EntityModels {
     /** Every model the entity renderer draws. */
     public enum Kind {
         PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, SKELETON, ENDERMAN, CREEPER, SPIDER, PIG,
-        COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST
+        COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
+        WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE,
+        MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS, HORSE,
+        GUARDIAN, WITHER, ENDER_DRAGON, GUARDIAN_BEAM
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -57,10 +60,49 @@ public final class EntityModels {
         /** Endermen: carrying a block, screaming. */
         public boolean carrying;
         public boolean screaming;
+        /** Entity id and tick count, for animations that run on whole ticks per entity (the witch's nose). */
+        public int entityId;
+        public int ticksExisted;
+        /** Bats hanging from a ceiling; tameable cats sitting; mobs sprinting. */
+        public boolean hanging;
+        public boolean sitting;
+        public boolean sprinting;
+        /** Rabbit hop progress, 0..1 through the jump. */
+        public float jump;
+        /** Horses: foal, saddled, chested, mule-eared (donkey and mule); rearing and grazing 0..1. */
+        public boolean foal;
+        public boolean saddled;
+        public boolean chested;
+        public boolean longEars;
+        public float rearing;
+        public float grazing;
+        /** Horses: mouth openness 0..1, tail swishing, and a rider on the back. */
+        public float mouth;
+        public boolean tailSwish;
+        public boolean ridden;
+        /** Magma cubes: the squish factor that spreads the slabs apart. */
+        public float squish;
+        /** Withers: the side heads' aim, yaw (absolute, degrees) and pitch. */
+        public final float[] sideHeadYaw = new float[2];
+        public final float[] sideHeadPitch = new float[2];
+        /** Guardians: spine extension (1 out, 0 pulled in), tail phase, and the eye's offset toward the viewer. */
+        public float spikes = 1f;
+        public float tailPhase;
+        public boolean eyeLow;
+        public float eyeX;
+        /** Ender dragons: wing-beat phase, and yaw (degrees) and height for history offsets 0..23, interleaved. */
+        public float animTime;
+        public final float[] movement = new float[48];
 
         public void reset() {
             limbSwing = limbSwingAmount = ageInTicks = headYaw = headPitch = swingProgress = 0f;
-            sneaking = angry = tame = carrying = screaming = false;
+            sneaking = angry = tame = carrying = screaming = hanging = sitting = sprinting = false;
+            entityId = ticksExisted = 0;
+            jump = rearing = grazing = 0f;
+            foal = saddled = chested = longEars = tailSwish = ridden = eyeLow = false;
+            eyeX = animTime = mouth = squish = tailPhase = 0f;
+            spikes = 1f;
+            sideHeadYaw[0] = sideHeadYaw[1] = sideHeadPitch[0] = sideHeadPitch[1] = 0f;
             heldItem = 0;
             aimedBow = false;
             riding = false;
@@ -185,10 +227,11 @@ public final class EntityModels {
             case BLAZE -> blaze();
             case SQUID -> squid();
             case GHAST -> ghast();
+            default -> MobModels.build(kind);
         };
     }
 
-    private static CuboidModel biped(String id, int width, int height, float inflate) {
+    static CuboidModel biped(String id, int width, int height, float inflate) {
         return CuboidModel.builder(id, width, height)
                 .part("head", null, 0, 0, 0, box(0, 0, -4, -8, -4, 8, 8, 8, inflate))
                 .part("body", null, 0, 0, 0, box(16, 16, -4, 0, -2, 8, 12, 4, inflate))
@@ -281,7 +324,7 @@ public final class EntityModels {
         float swing = motion.limbSwing * 0.6662f;
         float amount = motion.limbSwingAmount;
         switch (kind) {
-            case PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER -> biped(motion, pose);
+            case PLAYER, PLAYER_SLIM, BIPED, BIPED_TALL, ARMOR_OUTER, ARMOR_INNER, ZOMBIE_VILLAGER -> biped(motion, pose);
             case SKELETON -> {
                 biped(motion, pose);
                 zombieArms(motion, pose);
@@ -350,6 +393,7 @@ public final class EntityModels {
                     pose.rotation(tentacle, 0.2f * sin(motion.ageInTicks * 0.3f + (tentacle - 1)) + 0.4f, 0, 0);
                 }
             }
+            default -> MobModels.animate(kind, motion, pose);
         }
     }
 

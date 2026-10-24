@@ -56,6 +56,12 @@ public final class Metadata {
         present[index] = true;
     }
 
+    /** Sets an int value locally (flags such as a horse's, which the server otherwise sends). */
+    public void setInt(int index, int value) {
+        values[index] = value;
+        present[index] = true;
+    }
+
     public boolean has(int index) {
         return present[index];
     }

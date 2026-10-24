@@ -50,7 +50,7 @@ class VanillaFontTest {
         assertEquals(4 + 8 + 4, font.width("A§cW§rA"));
         // Bold adds a pixel to each glyph from the style on, until reset.
         assertEquals(4 + 5 + 5 + 4, font.width("A§lAA§rA"));
-        assertEquals(0, font.width("§"), "a lone section sign is a style start");
+        assertEquals(-1, font.width("\u00a7"), "a trailing section sign counts -1, as FontRenderer.getStringWidth");
     }
 
     @Test

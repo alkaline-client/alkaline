@@ -371,12 +371,12 @@ class ComposeLayerHost(
                 // Compose 1.12 reads its own key event fields (the AWT event rides along as the native one).
                 scene!!.sendKeyEvent(androidx.compose.ui.input.key.KeyEvent(
                     key = androidx.compose.ui.input.key.Key(command.code),
-                    type = if (command.id == java.awt.event.KeyEvent.KEY_PRESSED) {
-                        androidx.compose.ui.input.key.KeyEventType.KeyDown
-                    } else {
-                        androidx.compose.ui.input.key.KeyEventType.KeyUp
+                    type = when (command.id) {
+                        java.awt.event.KeyEvent.KEY_PRESSED -> androidx.compose.ui.input.key.KeyEventType.KeyDown
+                        java.awt.event.KeyEvent.KEY_TYPED -> androidx.compose.ui.input.key.KeyEventType.Unknown
+                        else -> androidx.compose.ui.input.key.KeyEventType.KeyUp
                     },
-                    codePoint = 0,
+                    codePoint = if (command.id == java.awt.event.KeyEvent.KEY_TYPED) command.character.code else 0,
                     isCtrlPressed = command.modifiers and java.awt.event.InputEvent.CTRL_DOWN_MASK != 0,
                     isMetaPressed = command.modifiers and java.awt.event.InputEvent.META_DOWN_MASK != 0,
                     isAltPressed = command.modifiers and java.awt.event.InputEvent.ALT_DOWN_MASK != 0,

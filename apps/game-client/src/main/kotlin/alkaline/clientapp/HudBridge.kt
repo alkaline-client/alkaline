@@ -10,6 +10,7 @@ import alkaline.ui.hud.ContainerKind
 import alkaline.ui.hud.ContainerView
 import alkaline.ui.hud.EnchantOffer
 import alkaline.ui.hud.HudChat
+import alkaline.ui.hud.HudChatAction
 import alkaline.ui.hud.HudEffect
 import alkaline.ui.hud.HudFrame
 import alkaline.ui.hud.HudItem
@@ -27,6 +28,24 @@ import kotlin.math.sqrt
 class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprites, private val chatText: ChatText) {
     private val rendered = HashMap<String, alkaline.renderer.image.RgbaImage>()
     private val names = ItemNames(chatText)
+
+    private var chatOwner: PlaySession? = null
+    private var chatVersion = -1
+    private var chatCache = emptyList<HudChat>()
+
+    /** Every kept chat line, rebuilt only when one arrives: the open chat scrolls through all of them. */
+    private fun chatLines(play: PlaySession): List<HudChat> {
+        if (play !== chatOwner || play.chatVersion() != chatVersion) {
+            chatOwner = play
+            chatVersion = play.chatVersion()
+            chatCache = play.chat().map { line ->
+                HudChat(line.text(), line.tick(), line.serial(), line.actions().map {
+                    HudChatAction(it.start(), it.end(), it.click(), it.value(), it.hover(), it.insertion())
+                })
+            }
+        }
+        return chatCache
+    }
 
     fun frame(
         play: PlaySession, settings: ConfigSnapshot, fps: Int, server: String, leftCps: Int, rightCps: Int,
@@ -77,7 +96,7 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
             },
             sidebarTitle = sidebar?.title(),
             sidebar = sidebar?.lines()?.map { HudScore(it.text(), it.score()) } ?: emptyList(),
-            chat = play.chat().take(20).map { HudChat(it.text(), it.tick()) },
+            chat = chatLines(play),
             title = play.title(),
             subtitle = play.subtitle(),
             titleAlpha = play.titleAlpha(0f),

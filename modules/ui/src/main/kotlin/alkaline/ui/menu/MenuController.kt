@@ -5,6 +5,7 @@ import alkaline.config.ConfigSnapshot
 import alkaline.config.ConfigStore
 import alkaline.config.ProfileStore
 import alkaline.config.Setting
+import alkaline.ui.hud.ChatInput
 import alkaline.ui.hud.HudEditor
 import alkaline.ui.hud.HudSprites
 import alkaline.ui.hud.HudState
@@ -23,9 +24,9 @@ enum class PlayPhase { MENU, CONNECTING, PLAYING, PAUSED }
 
 /**
  * What covers the game while playing: nothing, the ClickGUI, the HUD editor, a container screen (the inventory
- * or a window the server opened), or the sign editor.
+ * or a window the server opened), the sign editor, or the chat line being typed.
  */
-enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN }
+enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN, CHAT }
 
 /**
  * A container screen's input: pointer events by window slot ({@code -999} outside the window, -1 inside it but
@@ -47,6 +48,18 @@ interface InventoryInput {
     fun rename(name: String) {}
     /** The beacon's confirm, with the chosen effect ids. */
     fun beacon(primary: Int, secondary: Int) {}
+}
+
+/** Where the chat sends what the player types; the client answers tab completion through [MenuController.chat]. */
+interface ChatHost {
+    /** The player sent this chat line or command. */
+    fun send(message: String)
+
+    /** Asks the server to tab-complete [text]. */
+    fun complete(text: String)
+
+    /** Puts [text] on the clipboard. */
+    fun copy(text: String)
 }
 
 /** The ClickGUI's sidebar sections (the HUD editor sits at the bottom of the sidebar and opens over the game). */
@@ -160,7 +173,7 @@ class MenuController @JvmOverloads constructor(
     /** Opens or closes the ClickGUI in game (its key, or the pause card). Call on the UI thread. */
     fun toggleClickGui() {
         when {
-            overlay == Overlay.INVENTORY || overlay == Overlay.SIGN -> {}
+            overlay == Overlay.INVENTORY || overlay == Overlay.SIGN || overlay == Overlay.CHAT -> {}
             overlay != Overlay.NONE -> closeOverlay()
             profiles != null && (play == PlayPhase.PLAYING || play == PlayPhase.PAUSED) -> overlay = Overlay.CLICK_GUI
         }
@@ -191,6 +204,26 @@ class MenuController @JvmOverloads constructor(
             overlay = Overlay.NONE
             if (play == PlayPhase.PLAYING) actions.resumeGame()
         }
+    }
+
+    /** Where chat goes; set by the client. */
+    var chatHost: ChatHost? = null
+
+    /** The chat line being typed, while [Overlay.CHAT] is open. */
+    val chat = ChatInput(object : ChatInput.Host {
+        override fun send(message: String) { chatHost?.send(message) }
+        override fun complete(text: String) { chatHost?.complete(text) }
+        override fun openUrl(url: String) = actions.openUrl(url)
+        override fun copy(text: String) { chatHost?.copy(text) }
+        override fun close() = closeOverlay()
+    })
+
+    /** Opens the chat over the game with [initial] typed ("/" for commands). Call on the UI thread. */
+    fun openChat(initial: String = "") {
+        if (play != PlayPhase.PLAYING || overlay != Overlay.NONE) return
+        chat.open(initial)
+        typing = true
+        overlay = Overlay.CHAT
     }
 
     /** The sign editor's four lines while it is open. */
@@ -229,6 +262,7 @@ class MenuController @JvmOverloads constructor(
         if (overlay == Overlay.NONE) return
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
         if (overlay == Overlay.SIGN) actions.signDone(signLines)
+        if (overlay == Overlay.CHAT) chat.close()
         typing = false
         overlay = Overlay.NONE
         if (play == PlayPhase.PLAYING) actions.resumeGame()
@@ -319,6 +353,7 @@ class MenuController @JvmOverloads constructor(
     /** The session ended; back to the server list, with [reason] shown when it was not the player's choice. */
     fun left(reason: String?) {
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
+        chat.forget()
         typing = false
         overlay = Overlay.NONE
         play = PlayPhase.MENU
@@ -362,12 +397,16 @@ class MenuController @JvmOverloads constructor(
             finishCapture(null)
             return true
         }
+        if (overlay == Overlay.CHAT && chat.pendingUrl != null) {
+            chat.dismissPending()
+            return true
+        }
         when (overlay) {
             Overlay.HUD_EDITOR -> {
                 closeHudEditor()
                 return true
             }
-            Overlay.CLICK_GUI, Overlay.INVENTORY, Overlay.SIGN -> {
+            Overlay.CLICK_GUI, Overlay.INVENTORY, Overlay.SIGN, Overlay.CHAT -> {
                 closeOverlay()
                 return true
             }

@@ -476,7 +476,7 @@ private fun Villager(view: ContainerView, input: InventoryInput?) {
 
 /** GuiScreen.renderToolTip's content in a calm card: the name line, then gray detail lines. */
 @Composable
-private fun Tooltip(lines: List<String>, modifier: Modifier) {
+internal fun Tooltip(lines: List<String>, modifier: Modifier) {
     val base = MaterialTheme.colorScheme.onSurface
     Surface(
         shape = RoundedCornerShape(8.dp),

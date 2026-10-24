@@ -43,8 +43,11 @@ public final class PlaySession implements AutoCloseable {
     record Effect(int id, int amplifier, int ticksLeft) {
     }
 
-    /** A received chat line (§ formatted) and the tick it arrived. */
-    record ChatLine(String text, long tick) {
+    /**
+     * A received chat line (§ formatted), what its parts do when clicked or hovered, the tick it arrived, and its
+     * place in arrival order (which keeps the open chat's scroll position steady as lines arrive).
+     */
+    record ChatLine(String text, java.util.List<ChatText.Action> actions, long tick, long serial) {
     }
 
     private final ServerSession session;
@@ -373,6 +376,25 @@ public final class PlaySession implements AutoCloseable {
 
     void onSignEditorOpened(Consumer<String[]> action) {
         signEditorOpened = action;
+    }
+
+    private Consumer<java.util.List<String>> tabCompleted = matches -> { };
+
+    void onTabComplete(Consumer<java.util.List<String>> action) {
+        tabCompleted = action;
+    }
+
+    /** The player's chat line or command, as typed. */
+    void sendChat(String message) {
+        session.sendChat(message);
+    }
+
+    /** GuiChat.sendAutocompleteRequest: the text before the caret, with the block looked at (for coordinates). */
+    void requestCompletion(String text) {
+        BlockTarget block = BlockTarget.pick(session.world()::state, player.x, player.eyeY(1f), player.z, player.yaw,
+                player.pitch, gameMode == 1 ? 5.0 : 4.5);
+        session.sendTabComplete(text, block != null, block != null ? block.x() : 0, block != null ? block.y() : 0,
+                block != null ? block.z() : 0);
     }
 
     /** The inventory screen opened (vanilla reports it with Client Status 2, the open-inventory achievement). */
@@ -787,12 +809,13 @@ public final class PlaySession implements AutoCloseable {
                 }
             }
             case ServerSession.Chat message -> {
-                String text = chat.legacy(message.json());
                 if (message.position() == 2) {
-                    actionBar = text;
+                    actionBar = chat.legacy(message.json());
                     actionBarTicks = 60;
                 } else {
-                    chatLines.addFirst(new ChatLine(text, ticks));
+                    ChatText.Rich rich = chat.rich(message.json());
+                    String text = rich.text();
+                    chatLines.addFirst(new ChatLine(text, rich.actions(), ticks, chatVersion));
                     while (chatLines.size() > CHAT_HISTORY) {
                         chatLines.removeLast();
                     }
@@ -800,6 +823,7 @@ public final class PlaySession implements AutoCloseable {
                     System.out.println("[chat] " + text.replaceAll("§.", ""));
                 }
             }
+            case ServerSession.TabComplete completion -> tabCompleted.accept(completion.matches());
             case ServerSession.Title titleEvent -> title(titleEvent);
             case ServerSession.SetSlot slot -> {
                 if (slot.window() == -1 && slot.slot() == -1) {

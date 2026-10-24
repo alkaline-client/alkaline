@@ -54,14 +54,14 @@ import kotlin.math.roundToInt
 internal val Px: Dp = 2.dp
 
 private val ChipShape = RoundedCornerShape(10.dp)
-private val TextShadow = Shadow(Color.Black.copy(alpha = 0.6f), Offset(1f, 1f), 2f)
+internal val TextShadow = Shadow(Color.Black.copy(alpha = 0.6f), Offset(1f, 1f), 2f)
 
 /** Whether the element being drawn frosts the scene behind its surfaces (its module's Blur option). */
 private val LocalHudBlur = staticCompositionLocalOf { false }
 
 /** The frosted backdrop of a HUD surface, when its module's Blur option is on. */
 @Composable
-private fun Modifier.hudGlass(radius: Dp, opacity: Float = 1f): Modifier =
+internal fun Modifier.hudGlass(radius: Dp, opacity: Float = 1f): Modifier =
     glass(radius, enabled = LocalHudBlur.current, hud = true, opacity = opacity)
 
 /** Draws one HUD module's element; [preview] shows sample values where the game has none (the HUD editor). */
@@ -240,6 +240,11 @@ private fun Scoreboard(frame: HudFrame, options: ConfigSnapshot, preview: Boolea
 
 @Composable
 private fun Chat(frame: HudFrame, options: ConfigSnapshot, preview: Boolean) {
+    val typing = LocalChatInput.current
+    if (typing != null && typing.open) {
+        ChatBox(frame, typing)
+        return
+    }
     val lines = options.get(Modules.CHAT_LINES)
     val fadeTicks = options.get(Modules.CHAT_FADE_SECONDS) * 20L
     val visible = frame.chat.ifEmpty { if (preview) HudFrame.SAMPLE.chat else emptyList() }.take(lines)

@@ -82,12 +82,19 @@ fun AlkalineMenu(controller: MenuController) {
                         || (controller.play == PlayPhase.PAUSED && controller.page != MenuPage.SETTINGS)
                 val overlay = controller.overlay
                 val profiles = controller.profiles
+                // Under the HUD, so the open chat's own messages still take the pointer; the wheel scrolls from anywhere else.
+                if (controller.phase == MenuPhase.READY && overlay == Overlay.CHAT) {
+                    alkaline.ui.hud.ChatWheel(controller.chat)
+                }
                 // The HUD shows while playing and under the pause card, as vanilla's does; the editor makes it movable.
                 if (controller.phase == MenuPhase.READY && profiles != null
                     && (controller.play == PlayPhase.PLAYING || controller.play == PlayPhase.PAUSED)
                     && overlay != Overlay.CLICK_GUI && controller.page != MenuPage.SETTINGS
                 ) {
-                    CompositionLocalProvider(alkaline.ui.hud.LocalHudSprites provides controller.hudSprites) {
+                    CompositionLocalProvider(
+                        alkaline.ui.hud.LocalHudSprites provides controller.hudSprites,
+                        alkaline.ui.hud.LocalChatInput provides controller.chat,
+                    ) {
                         alkaline.ui.hud.GameHud(
                             controller.hud.frame, profiles.store(),
                             if (overlay == Overlay.HUD_EDITOR) controller.hudEditor else null,

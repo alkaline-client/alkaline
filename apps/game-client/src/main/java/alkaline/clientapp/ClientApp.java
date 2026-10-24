@@ -281,6 +281,7 @@ final class ClientApp implements AutoCloseable {
             }
         }, services, true, profiles);
         menu.setInventoryInput(new InventoryPointer());
+        menu.setChatHost(new ChatBridge(() -> play, mainThreadTasks::add));
         menu.setLoadingStatus("Loading vanilla assets");
         try {
             menu.open(alkaline.ui.menu.MenuPage.valueOf(options.page().toUpperCase(java.util.Locale.ROOT)));
@@ -742,6 +743,10 @@ final class ClientApp implements AutoCloseable {
                 menu.openSign(java.util.List.of(lines));
                 return kotlin.Unit.INSTANCE;
             }));
+            created.onTabComplete(matches -> ui.post(() -> {
+                menu.getChat().completed(matches);
+                return kotlin.Unit.INSTANCE;
+            }));
             session.sendClientSettings("en_US", config.snapshot().get(ClientSettings.WORLD_RENDER_DISTANCE));
             play = created;
             menuBackground = background;
@@ -1189,6 +1194,15 @@ final class ClientApp implements AutoCloseable {
                     return;
                 }
             }
+            String chatStart = binding.equals(settings.get(ClientSettings.KEY_CHAT)) ? ""
+                    : binding.equals(settings.get(ClientSettings.KEY_COMMAND)) ? "/" : null;
+            if (play != null && mouseCaptured && chatStart != null) {
+                ui.post(() -> {
+                    menu.openChat(chatStart);
+                    return kotlin.Unit.INSTANCE;
+                });
+                return;
+            }
             alkaline.config.Setting.KeySetting[] hotbar = {ClientSettings.KEY_HOTBAR_1, ClientSettings.KEY_HOTBAR_2,
                     ClientSettings.KEY_HOTBAR_3, ClientSettings.KEY_HOTBAR_4, ClientSettings.KEY_HOTBAR_5,
                     ClientSettings.KEY_HOTBAR_6, ClientSettings.KEY_HOTBAR_7, ClientSettings.KEY_HOTBAR_8,
@@ -1232,6 +1246,12 @@ final class ClientApp implements AutoCloseable {
                 case SDLKeycode.SDLK_RIGHT -> java.awt.event.KeyEvent.VK_RIGHT;
                 case SDLKeycode.SDLK_HOME -> java.awt.event.KeyEvent.VK_HOME;
                 case SDLKeycode.SDLK_END -> java.awt.event.KeyEvent.VK_END;
+                // Chat's history, completion and scrollback; elsewhere these keys would only move the focus.
+                case SDLKeycode.SDLK_UP -> chatOpen() ? java.awt.event.KeyEvent.VK_UP : -1;
+                case SDLKeycode.SDLK_DOWN -> chatOpen() ? java.awt.event.KeyEvent.VK_DOWN : -1;
+                case SDLKeycode.SDLK_TAB -> chatOpen() ? java.awt.event.KeyEvent.VK_TAB : -1;
+                case SDLKeycode.SDLK_PAGEUP -> chatOpen() ? java.awt.event.KeyEvent.VK_PAGE_UP : -1;
+                case SDLKeycode.SDLK_PAGEDOWN -> chatOpen() ? java.awt.event.KeyEvent.VK_PAGE_DOWN : -1;
                 default -> -1;
             };
             if (awt >= 0) {
@@ -1241,6 +1261,10 @@ final class ClientApp implements AutoCloseable {
                 ui.key(awt, down, modifiers);
             }
         }
+    }
+
+    private boolean chatOpen() {
+        return menu.getOverlay() == alkaline.ui.menu.Overlay.CHAT;
     }
 
     /**
@@ -1362,6 +1386,11 @@ final class ClientApp implements AutoCloseable {
                 continue;
             }
             String[] parts = entry.trim().split(":", 3);
+            if (parts.length == 3 && parts[1].equals("text")) {
+                // Typed text, as the window system's text input delivers it (1500:text:hello).
+                script.add(new ScriptedClick(Long.parseLong(parts[0]), "text", 0f, 0f, parts[2]));
+                continue;
+            }
             if (parts.length == 3 && List.of("key", "keydown", "keyup").contains(parts[1])) {
                 // A key press (or one half of it, to hold a key) by physical key name, as SDL names scancodes
                 // ("W", "Escape", "Left Shift").
@@ -1385,6 +1414,10 @@ final class ClientApp implements AutoCloseable {
         long elapsed = (System.nanoTime() - startNanos) / 1_000_000L;
         while (!script.isEmpty() && script.peek().atMillis() <= elapsed) {
             ScriptedClick click = script.poll();
+            if (click.action().equals("text")) {
+                ui.typed(click.key());
+                continue;
+            }
             if (click.action().startsWith("key")) {
                 int scancode = org.lwjgl.sdl.SDLKeyboard.SDL_GetScancodeFromName(click.key());
                 int keycode = org.lwjgl.sdl.SDLKeyboard.SDL_GetKeyFromScancode(scancode, (short) 0, false);

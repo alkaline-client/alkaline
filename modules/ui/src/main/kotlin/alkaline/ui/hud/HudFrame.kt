@@ -25,7 +25,26 @@ data class HudScore(val text: String, val score: Int)
 data class HudPlayer(val name: String, val ping: Int, val spectator: Boolean)
 
 /** A chat line (§ formatted) and how long ago it arrived, in ticks. */
-data class HudChat(val text: String, val ageTicks: Long)
+data class HudChat(
+    val text: String,
+    val ageTicks: Long,
+    /** Arrival order; unique within a session. */
+    val serial: Long = 0,
+    val actions: List<HudChatAction> = emptyList(),
+)
+
+/**
+ * What the visible characters [start] until [end] of a chat line do: [click] (`run_command`, `suggest_command` or
+ * `open_url`) with [value], a [hover] text (§ formatted), and the [insertion] Shift-click types.
+ */
+data class HudChatAction(
+    val start: Int,
+    val end: Int,
+    val click: String?,
+    val value: String?,
+    val hover: String?,
+    val insertion: String?,
+)
 
 /** The vanilla screen an open container uses: the player's inventory, or one of the windows servers open. */
 enum class ContainerKind {

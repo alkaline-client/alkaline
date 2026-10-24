@@ -2,6 +2,8 @@ package alkaline.clientapp;
 
 import alkaline.game.entity.Entity;
 import alkaline.game.entity.EntityTypes;
+import alkaline.game.entity.Hanging;
+import alkaline.game.entity.MinecartRails;
 import alkaline.game.inventory.ItemStack;
 import alkaline.game.inventory.Items;
 import alkaline.game.state.PlayerList;
@@ -17,6 +19,7 @@ import alkaline.renderer.model.FirstPersonArm;
 import alkaline.renderer.model.FirstPersonItem;
 import alkaline.renderer.model.ItemDefinition;
 import alkaline.renderer.model.ItemMeshes;
+import alkaline.renderer.model.ObjectModels;
 import alkaline.renderer.model.ProjectileModels;
 import alkaline.renderer.model.ModelPose;
 import alkaline.renderer.model.PoseMath;
@@ -120,6 +123,35 @@ final class EntityView implements AutoCloseable {
     private VulkanTexture glint;
     private boolean glintLoaded;
     private final GlintStyles glints;
+    /** The camera and light lookups of the frame being drawn, for objects that read the world around them. */
+    private double cameraX;
+    private double cameraY;
+    private double cameraZ;
+    private Lighting lighting;
+    private int[] lightmapColors;
+    /** The entity's light as {@code sky << 4 | block}, for objects that adjust it (experience orbs). */
+    private int packedLight;
+    private final ModelRenderer.GpuModel[] orbModels = new ModelRenderer.GpuModel[11];
+    /** A white texel for geometry drawn by vertex color alone (lightning). */
+    private VulkanTexture white;
+    /** Painting tiles by {@code art << 4 | u << 2 | v}; the ones asked for while drawing upload before the next frame. */
+    private final Map<Integer, ModelRenderer.GpuModel> paintingTiles = new HashMap<>();
+    private final Set<Integer> pendingTiles = new java.util.LinkedHashSet<>();
+    /** The lightning bolts on the GPU by entity id: the seed their geometry came from, and whether this frame drew them. */
+    private final Map<Integer, Bolt> bolts = new HashMap<>();
+    private final Map<Integer, Long> pendingBolts = new HashMap<>();
+    private final float[] stand = new float[16];
+    private final Map<Integer, ItemStack> stateStacks = new HashMap<>();
+    /** The cart tile {@link #displayTile} found: block id, metadata and the offset it sits down in the cart. */
+    private int tileId;
+    private int tileMeta;
+    private int tileOffset;
+
+    private static final class Bolt {
+        long seed;
+        ModelRenderer.GpuModel model;
+        boolean seen;
+    }
 
     /** An item model on the GPU: its mesh (for the display transforms) and one model and texture per layer. */
     private record GpuItem(ItemMeshes.Mesh mesh, ModelRenderer.GpuModel[] models, VulkanTexture[] textures) {
@@ -151,6 +183,11 @@ final class EntityView implements AutoCloseable {
             gpu.put(kind, models.upload(model));
             poses.put(kind, new ModelPose(model));
         }
+        for (int icon = 0; icon < orbModels.length; icon++) {
+            orbModels[icon] = models.upload(ObjectModels.experienceOrb(icon));
+        }
+        white = renderer.createTexture(new RgbaImage(1, 1, new byte[]{-1, -1, -1, -1}),
+                new TextureOptions(ImageSampling.NEAREST, false, false, 1));
         armorOuter = new ModelPose(EntityModels.model(EntityModels.Kind.ARMOR_OUTER));
         armorInner = new ModelPose(EntityModels.model(EntityModels.Kind.ARMOR_INNER));
         handPose = new ModelPose(EntityModels.model(EntityModels.Kind.PLAYER));
@@ -179,6 +216,7 @@ final class EntityView implements AutoCloseable {
                 textures.put(path, texture);
             }
         }
+        uploadObjects();
         if (catalog.generation() != gpuGeneration) {
             // The assets changed (resource packs): drop every item uploaded from the old ones.
             closeItems();
@@ -198,6 +236,35 @@ final class EntityView implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /** Uploads the painting tiles and lightning bolts drawing asked for, and drops the bolts that are gone. */
+    private void uploadObjects() {
+        for (Integer key : pendingTiles) {
+            Hanging.Art art = Hanging.art(key >> 4);
+            paintingTiles.put(key, models.upload(ObjectModels.paintingTile(art.u(), art.v(), art.width(), art.height(),
+                    key >> 2 & 3, key & 3)));
+        }
+        pendingTiles.clear();
+        for (java.util.Iterator<Map.Entry<Integer, Bolt>> each = bolts.entrySet().iterator(); each.hasNext(); ) {
+            Bolt bolt = each.next().getValue();
+            if (!bolt.seen) {
+                models.release(bolt.model);
+                each.remove();
+            } else {
+                bolt.seen = false;
+            }
+        }
+        for (Map.Entry<Integer, Long> entry : pendingBolts.entrySet()) {
+            Bolt bolt = bolts.computeIfAbsent(entry.getKey(), id -> new Bolt());
+            if (bolt.model != null) {
+                models.release(bolt.model);
+            }
+            bolt.seed = entry.getValue();
+            bolt.model = models.uploadAdditive(ObjectModels.lightning(bolt.seed));
+            bolt.seen = true;
+        }
+        pendingBolts.clear();
     }
 
     private VulkanTexture load(String path, TextureOptions options) {
@@ -266,11 +333,16 @@ final class EntityView implements AutoCloseable {
 
     /** Draws an item model's layers, each tinted as the stack asks, at {@code matrix} (item model space). */
     private void submitItem(GpuItem item, ItemStack stack, float[] matrix, int light) {
+        submitItem(item, stack, matrix, light, 0);
+    }
+
+    /** {@link #submitItem(GpuItem, ItemStack, float[], int)} with an overlay color blended over it (primed TNT's flash). */
+    private void submitItem(GpuItem item, ItemStack stack, float[] matrix, int light, int overlay) {
         int[] tints = catalog.tints(stack, item.mesh());
         for (int index = 0; index < item.models().length; index++) {
             int slot = item.mesh().layers().get(index).tintIndex();
             int tint = slot >= 0 && slot < tints.length ? tints[slot] : 0xFFFFFFFF;
-            models.submit(item.models()[index], item.textures()[index], matrix, tint, 0, light,
+            models.submit(item.models()[index], item.textures()[index], matrix, tint, overlay, light,
                     glints.item(catalog.glintStyle(stack)));
         }
     }
@@ -348,7 +420,20 @@ final class EntityView implements AutoCloseable {
                 double cameraZ, float[] viewProjection, float cameraYaw, float cameraPitch, Entity self) {
         viewYaw = cameraYaw;
         viewPitch = cameraPitch;
+        this.cameraX = cameraX;
+        this.cameraY = cameraY;
+        this.cameraZ = cameraZ;
+        this.lighting = lighting;
+        lightmapColors = lightmap;
         hookOwners.clear();
+        if (System.getProperty("alkaline.debug.objects") != null && System.nanoTime() / 1_000_000_000L % 2 == 0) {
+            StringBuilder list = new StringBuilder("entities:");
+            for (Entity entity : entities) {
+                list.append(' ').append(entity.category).append(entity.type).append('@')
+                        .append((int) entity.x).append(',').append((int) entity.y).append(',').append((int) entity.z);
+            }
+            System.err.println(list);
+        }
         for (Entity entity : entities) {
             if (entity.category == Entity.Category.OBJECT && entity.type == EntityTypes.OBJECT_FISHING_HOOK) {
                 hookOwners.add(entity.objectData);
@@ -450,7 +535,9 @@ final class EntityView implements AutoCloseable {
     private void renderEntity(Entity entity, PlayerList players, Lighting lighting, int[] lightmap, HitColor hit,
                               float partialTick, double cameraX, double cameraY, double cameraZ) {
         {
-            if (entity.invisible() && entity.category == Entity.Category.OBJECT) {
+            // An invisible armor stand still shows what it wears and holds.
+            if (entity.invisible() && entity.category == Entity.Category.OBJECT
+                    && entity.type != EntityTypes.OBJECT_ARMOR_STAND) {
                 return;
             }
             double x = entity.renderX(partialTick) - cameraX;
@@ -464,6 +551,7 @@ final class EntityView implements AutoCloseable {
                     (int) Math.floor(entity.renderY(partialTick) + height * 0.85),
                     (int) Math.floor(entity.renderZ(partialTick)));
             int light = lightmap[(packed >> 4 & 15) * 16 + (packed & 15)];
+            packedLight = packed;
             if (entity.category == Entity.Category.OBJECT) {
                 renderObject(entity, (float) x, (float) y, (float) z, light, partialTick);
             } else {
@@ -688,7 +776,7 @@ final class EntityView implements AutoCloseable {
             renderPumpkinHead(pose, light);
         }
         if (biped && !child) {
-            renderArmor(entity, pose, light, hit.tintArmor() ? overlay : 0);
+            renderArmor(entity, pose, light, hit.tintArmor() ? overlay : 0, false);
             renderHeld(entity.equipment[0], pose, motion.sneaking, light,
                     entity.equipment[0] != null && entity.equipment[0].id() == 261 && entity.usingItem()
                             ? entity.usingTicks : -1, hookOwners.contains(entity.id));
@@ -748,9 +836,7 @@ final class EntityView implements AutoCloseable {
         }
         Mat4.rotate(part, (float) Math.toRadians(-15), 1f, 0f, 0f, part);
         Mat4.rotate(part, (float) Math.toRadians(40), 0f, 0f, 1f, part);
-        if (held.definition().block()) {
-            Mat4.scale(part, 2f, 2f, 2f, part);
-        }
+        Mat4.scale(part, 2f, 2f, 2f, part); // as for any held model
         display(part, held.definition().thirdPerson());
         Mat4.scale(part, 0.5f, 0.5f, 0.5f, part);
         Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
@@ -894,6 +980,12 @@ final class EntityView implements AutoCloseable {
      * false for kinds without a child layout (then nothing is drawn rather than an adult-sized child).
      */
     private boolean submitChild(EntityModels.Kind kind, VulkanTexture texture, ModelPose pose, int light, int overlay) {
+        return submitChild(kind, texture, pose, light, overlay, 0xFFFFFFFF, null, 0f);
+    }
+
+    /** {@link #submitChild(EntityModels.Kind, VulkanTexture, ModelPose, int, int)} with a tint and a glint (child armor). */
+    private boolean submitChild(EntityModels.Kind kind, VulkanTexture texture, ModelPose pose, int light, int overlay,
+                                int tint, alkaline.renderer.vulkan.model.GlintEffect glint, float glintTime) {
         if (kind == EntityModels.Kind.HORSE) {
             submitFoal(texture, pose, light, overlay);
             return true;
@@ -903,7 +995,7 @@ final class EntityView implements AutoCloseable {
         float headForward;
         int[] headParts;
         switch (kind) {
-            case BIPED, BIPED_TALL -> {
+            case BIPED, BIPED_TALL, ARMOR_STAND, ARMOR_OUTER, ARMOR_INNER -> {
                 headScale = 0.75f;
                 headLift = 1f;
                 headForward = 0f;
@@ -945,28 +1037,28 @@ final class EntityView implements AutoCloseable {
         }
         float[] saved = root.clone();
         boolean[] visible = new boolean[pose.model().partCount()];
+        boolean[] head = new boolean[visible.length];
         for (int index = 0; index < visible.length; index++) {
             visible[index] = pose.visible(index);
         }
-        // Head first.
-        pose.visibleAll(false);
-        for (int head : headParts) {
-            pose.visible(head, true);
+        for (int part : headParts) {
+            head[part] = true;
+        }
+        // Head first (whatever of it is visible).
+        for (int index = 0; index < visible.length; index++) {
+            pose.visible(index, visible[index] && head[index]);
         }
         Mat4.scale(root, headScale, headScale, headScale, root);
         Mat4.translate(root, 0f, headLift, headForward, root);
-        models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light);
+        models.submit(gpu.get(kind), texture, pose, root, tint, overlay, light, glint, glintTime);
         // Then the half-size body.
         System.arraycopy(saved, 0, root, 0, 16);
         for (int index = 0; index < visible.length; index++) {
-            pose.visible(index, visible[index]);
-        }
-        for (int head : headParts) {
-            pose.visible(head, false);
+            pose.visible(index, visible[index] && !head[index]);
         }
         Mat4.scale(root, 0.5f, 0.5f, 0.5f, root);
         Mat4.translate(root, 0f, 1.5f, 0f, root);
-        models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light);
+        models.submit(gpu.get(kind), texture, pose, root, tint, overlay, light, glint, glintTime);
         System.arraycopy(saved, 0, root, 0, 16);
         for (int index = 0; index < visible.length; index++) {
             pose.visible(index, visible[index]);
@@ -974,8 +1066,12 @@ final class EntityView implements AutoCloseable {
         return true;
     }
 
-    /** LayerBipedArmor: boots, leggings, chestplate and helmet on the inflated biped, posed as the wearer. */
-    private void renderArmor(Entity entity, ModelPose wearer, int light, int overlay) {
+    /**
+     * LayerBipedArmor: boots, leggings, chestplate and helmet on the inflated biped, posed as the wearer. An armor
+     * stand has no biped to copy: with a null {@code wearer} the armor models take the stand's own rotations, and a
+     * small stand ({@code child}) draws them in the child layout.
+     */
+    private void renderArmor(Entity entity, ModelPose wearer, int light, int overlay, boolean child) {
         for (int slot = 1; slot <= 4; slot++) {
             ItemStack stack = entity.equipment[slot];
             if (stack == null || !Items.armor(stack.id())) {
@@ -986,7 +1082,16 @@ final class EntityView implements AutoCloseable {
             ModelPose pose = leggings ? armorInner : armorOuter;
             EntityModels.Kind kind = leggings ? EntityModels.Kind.ARMOR_INNER : EntityModels.Kind.ARMOR_OUTER;
             pose.reset();
-            pose.copyFrom(wearer, EntityModels.BIPED_PARTS);
+            if (wearer == null) {
+                ObjectModels.poseArmorStand(pose, false, rotations(entity, 11, ObjectModels.DEFAULT_HEAD),
+                        rotations(entity, 12, ObjectModels.DEFAULT_BODY),
+                        rotations(entity, 13, ObjectModels.DEFAULT_LEFT_ARM),
+                        rotations(entity, 14, ObjectModels.DEFAULT_RIGHT_ARM),
+                        rotations(entity, 15, ObjectModels.DEFAULT_LEFT_LEG),
+                        rotations(entity, 16, ObjectModels.DEFAULT_RIGHT_LEG), true, true, entity.yaw);
+            } else {
+                pose.copyFrom(wearer, EntityModels.BIPED_PARTS);
+            }
             pose.visibleAll(false);
             switch (type) {
                 case 0 -> {
@@ -1015,17 +1120,27 @@ final class EntityView implements AutoCloseable {
             }
             // LayerArmorBase: enchanted armor shimmers with the glint.
             alkaline.renderer.vulkan.model.GlintEffect shimmer = glints.armor(catalog.glintStyle(stack));
+            float age = wearer == null ? entity.ticksExisted : motion.ageInTicks;
             if (material == 0) {
                 int color = stack.leatherColor();
-                models.submit(gpu.get(kind), texture, pose, root, 0xFF000000 | (color < 0 ? LEATHER : color), overlay,
-                        light, shimmer, motion.ageInTicks);
+                int dye = 0xFF000000 | (color < 0 ? LEATHER : color);
+                if (child) {
+                    submitChild(kind, texture, pose, light, overlay, dye, shimmer, age);
+                } else {
+                    models.submit(gpu.get(kind), texture, pose, root, dye, overlay, light, shimmer, age);
+                }
                 VulkanTexture leatherOverlay = armorTexture(stack, LEATHER_OVERLAY[leggings ? 1 : 0]);
                 if (leatherOverlay != null) {
-                    models.submit(gpu.get(kind), leatherOverlay, pose, root, 0xFFFFFFFF, overlay, light);
+                    if (child) {
+                        submitChild(kind, leatherOverlay, pose, light, overlay);
+                    } else {
+                        models.submit(gpu.get(kind), leatherOverlay, pose, root, 0xFFFFFFFF, overlay, light);
+                    }
                 }
+            } else if (child) {
+                submitChild(kind, texture, pose, light, overlay, 0xFFFFFFFF, shimmer, age);
             } else {
-                models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light, shimmer,
-                        motion.ageInTicks);
+                models.submit(gpu.get(kind), texture, pose, root, 0xFFFFFFFF, overlay, light, shimmer, age);
             }
         }
     }
@@ -1043,11 +1158,27 @@ final class EntityView implements AutoCloseable {
      * fishing rod with its line out.
      */
     private void renderHeld(ItemStack stack, ModelPose pose, boolean sneaking, int light, int bowPull, boolean cast) {
+        renderHeld(stack, pose, sneaking, light, bowPull, cast, false);
+    }
+
+    /** {@link #renderHeld(ItemStack, ModelPose, boolean, int, int, boolean)}; a small armor stand holds it in the child pose. */
+    private void renderHeld(ItemStack stack, ModelPose pose, boolean sneaking, int light, int bowPull, boolean cast,
+                            boolean child) {
         GpuItem held = gpuItem(catalog.model(stack, bowPull, cast));
         if (held == null) {
             return;
         }
+        if (child) {
+            // LayerHeldItem: the child's hand sits lower and tilted, at half size.
+            System.arraycopy(root, 0, foalRoot, 0, 16);
+            Mat4.translate(root, 0f, 0.625f, 0f, root);
+            Mat4.rotate(root, (float) Math.toRadians(20f), 1f, 0f, 0f, root);
+            Mat4.scale(root, 0.5f, 0.5f, 0.5f, root);
+        }
         PoseMath.resolve(pose, root, matrices);
+        if (child) {
+            System.arraycopy(foalRoot, 0, root, 0, 16);
+        }
         int base = EntityModels.RIGHT_ARM * PoseMath.FLOATS_PER_PART;
         // The arm's 3x4 row-major matrix as a column-major 4x4.
         Mat4.identity(part);
@@ -1060,9 +1191,8 @@ final class EntityView implements AutoCloseable {
         if (sneaking) {
             Mat4.translate(part, 0f, 0.203125f, 0f, part);
         }
-        if (held.definition().block()) {
-            Mat4.scale(part, 2f, 2f, 2f, part);
-        }
+        // Every held model is doubled: ItemRenderer doubles 3D ones, RenderItem.preTransform the flat ones.
+        Mat4.scale(part, 2f, 2f, 2f, part);
         display(part, held.definition().thirdPerson());
         Mat4.scale(part, 0.5f, 0.5f, 0.5f, part);
         Mat4.translate(part, -0.5f, -0.5f, -0.5f, part);
@@ -1103,9 +1233,13 @@ final class EntityView implements AutoCloseable {
     /**
      * Objects: dropped items (RenderEntityItem: bobbing and spinning, half size), thrown items as billboards facing
      * the camera (RenderSnowball: snowballs, eggs, ender pearls and eyes, potions, experience bottles, fire charges)
-     * and arrows (RenderArrow). Other objects are not drawn yet.
+     * and arrows (RenderArrow), minecarts, boats, primed TNT, falling blocks, paintings, item frames, experience
+     * orbs, armor stands, fireworks and lightning.
      */
     private void renderObject(Entity entity, float x, float y, float z, int light, float partialTick) {
+        if (System.getProperty("alkaline.debug.objects") != null && entity.ticksExisted % 60 == 1) {
+            System.err.println("object " + entity.type + " id " + entity.id + " rel " + x + "," + y + "," + z);
+        }
         switch (entity.type) {
             case EntityTypes.OBJECT_ITEM -> {
                 ItemStack stack = entity.metadata.getItem(10);
@@ -1117,9 +1251,12 @@ final class EntityView implements AutoCloseable {
                 float age = entity.ticksExisted + partialTick;
                 float bob = (float) Math.sin(age / 10f + hover) * 0.1f + 0.1f;
                 Mat4.identity(item);
-                Mat4.translate(item, x, y + bob + 0.125f, z, item);
+                // RenderEntityItem: centered 0.25 above the bob; RenderItem halves every model, and 3D ones are
+                // halved again before it, so a dropped block is a quarter size and a sprite half.
+                Mat4.translate(item, x, y + bob + 0.25f, z, item);
                 Mat4.rotate(item, age / 20f + hover, 0f, 1f, 0f, item);
-                Mat4.scale(item, 0.5f, 0.5f, 0.5f, item);
+                float size = dropped.definition().block() ? 0.25f : 0.5f;
+                Mat4.scale(item, size, size, size, item);
                 Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
                 submitItem(dropped, stack, item, light);
             }
@@ -1135,12 +1272,23 @@ final class EntityView implements AutoCloseable {
             case EntityTypes.OBJECT_FIREBALL -> billboard(new ItemStack(385, 1, 0, null), x, y, z, 2.0f, 0xFFFFFF);
             case EntityTypes.OBJECT_SMALL_FIREBALL -> billboard(new ItemStack(385, 1, 0, null), x, y, z, 0.5f,
                     0xFFFFFF);
+            // RenderFireworkRocket is a RenderSnowball of the rocket item.
+            case EntityTypes.OBJECT_FIREWORK -> billboard(new ItemStack(401, 1, 0, null), x, y, z, 0.5f, light);
+            case EntityTypes.OBJECT_MINECART -> minecart(entity, x, y, z, light, partialTick);
+            case EntityTypes.OBJECT_BOAT -> boat(entity, x, y, z, light, partialTick);
+            case EntityTypes.OBJECT_TNT -> primedTnt(entity, x, y, z, light, partialTick);
+            case EntityTypes.OBJECT_FALLING_BLOCK -> fallingBlock(entity, x, y, z, light);
+            case EntityTypes.OBJECT_PAINTING -> painting(entity, x, y, z);
+            case EntityTypes.OBJECT_ITEM_FRAME -> itemFrame(entity, light);
+            case EntityTypes.OBJECT_XP_ORB -> experienceOrb(entity, x, y, z, partialTick);
+            case EntityTypes.OBJECT_ARMOR_STAND -> armorStand(entity, x, y, z, light, partialTick);
+            case EntityTypes.OBJECT_LIGHTNING -> lightning(entity, x, y, z);
             default -> {
             }
         }
     }
 
-    /** RenderSnowball: the item model scaled by {@code scale} and half again, turned to face the camera. */
+    /** RenderSnowball: the item sprite {@code scale} blocks wide, turned to face the camera. */
     private void billboard(ItemStack stack, float x, float y, float z, float scale, int light) {
         GpuItem model = gpuItem(catalog.model(stack, -1, false));
         if (model == null) {
@@ -1151,9 +1299,394 @@ final class EntityView implements AutoCloseable {
         Mat4.scale(item, scale, scale, scale, item);
         Mat4.rotate(item, (float) Math.toRadians(-viewYaw), 0f, 1f, 0f, item);
         Mat4.rotate(item, (float) Math.toRadians(viewPitch), 1f, 0f, 0f, item);
-        Mat4.scale(item, 0.5f, 0.5f, 0.5f, item);
+        // RenderItem.preTransform doubles a flat model and renderItem halves it, so the sprite keeps `scale`.
         Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
         submitItem(model, stack, item, light);
+    }
+
+    // ---- minecarts, boats, TNT, falling blocks ------------------------------------------------------------
+
+    /**
+     * RenderMinecart: a hair of per-cart jitter against z-fighting; on a rail the cart takes the track's point and
+     * turns along it (0.3 blocks ahead and behind); it rolls when hit; the load sits scaled to 0.75 and turned a
+     * quarter, down by the cart's offset.
+     */
+    private void minecart(Entity entity, float x, float y, float z, int light, float partialTick) {
+        VulkanTexture texture = texture("entity/minecart");
+        if (texture == null) {
+            return;
+        }
+        long seed = entity.id * 493286711L;
+        seed = seed * seed * 4392167121L + seed * 98761L;
+        float jitterX = (((float) (seed >> 16 & 7L) + 0.5F) / 8.0F - 0.5F) * 0.004F;
+        float jitterY = (((float) (seed >> 20 & 7L) + 0.5F) / 8.0F - 0.5F) * 0.004F;
+        float jitterZ = (((float) (seed >> 24 & 7L) + 0.5F) / 8.0F - 0.5F) * 0.004F;
+        double worldX = entity.renderX(partialTick);
+        double worldY = entity.renderY(partialTick);
+        double worldZ = entity.renderZ(partialTick);
+        float yaw = entity.previousYaw + (entity.yaw - entity.previousYaw) * partialTick;
+        float pitch = entity.previousPitch + (entity.pitch - entity.previousPitch) * partialTick;
+        double[] track = chestWorld == null ? null : MinecartRails.position(chestWorld, worldX, worldY, worldZ);
+        if (track != null) {
+            double[] ahead = MinecartRails.offset(chestWorld, worldX, worldY, worldZ, 0.3F);
+            double[] behind = MinecartRails.offset(chestWorld, worldX, worldY, worldZ, -0.3F);
+            ahead = ahead == null ? track : ahead;
+            behind = behind == null ? track : behind;
+            x += (float) (track[0] - worldX);
+            y += (float) ((ahead[1] + behind[1]) / 2.0 - worldY);
+            z += (float) (track[2] - worldZ);
+            double dx = behind[0] - ahead[0];
+            double dy = behind[1] - ahead[1];
+            double dz = behind[2] - ahead[2];
+            double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (length != 0.0) {
+                dx /= length;
+                dy /= length;
+                dz /= length;
+                yaw = (float) (Math.atan2(dz, dx) * 180.0 / Math.PI);
+                pitch = (float) (Math.atan(dy) * 73.0);
+            }
+        }
+        Mat4.identity(stand);
+        Mat4.translate(stand, jitterX + x, jitterY + y + 0.375f, jitterZ + z, stand);
+        Mat4.rotate(stand, (float) Math.toRadians(180.0F - yaw), 0f, 1f, 0f, stand);
+        Mat4.rotate(stand, (float) Math.toRadians(-pitch), 0f, 0f, 1f, stand);
+        float roll = entity.metadata.getInt(17, 0) - partialTick;
+        float damage = Math.max(0f, entity.metadata.getFloat(19, 0f) - partialTick);
+        if (roll > 0f) {
+            Mat4.rotate(stand, (float) Math.toRadians((float) Math.sin(roll) * roll * damage / 10.0F
+                    * entity.metadata.getInt(18, 1)), 1f, 0f, 0f, stand);
+        }
+        if (displayTile(entity)) {
+            GpuItem load = gpuItem(ItemCatalog.stateModel(tileId, tileMeta));
+            if (load != null) {
+                System.arraycopy(stand, 0, item, 0, 16);
+                Mat4.scale(item, 0.75f, 0.75f, 0.75f, item);
+                Mat4.translate(item, -0.5f, (tileOffset - 8) / 16.0f, 0.5f, item);
+                Mat4.rotate(item, (float) (Math.PI / 2), 0f, 1f, 0f, item);
+                submitItem(load, stateStack(tileId, tileMeta), item, light);
+            }
+        }
+        Mat4.scale(stand, -1f, -1f, 1f, stand);
+        ModelPose pose = poses.get(EntityModels.Kind.MINECART);
+        pose.reset();
+        models.submit(gpu.get(EntityModels.Kind.MINECART), texture, pose, stand, 0xFFFFFFFF, 0, light);
+    }
+
+    /**
+     * EntityMinecart.getDisplayTile: the block the server put in the cart, or its type's own (a chest, a furnace,
+     * TNT, a spawner, a hopper, a command block), sets {@link #tileId}, {@link #tileMeta} and {@link #tileOffset}.
+     * False for an empty cart.
+     */
+    private boolean displayTile(Entity entity) {
+        if (entity.metadata.getByte(22, 0) == 1) {
+            int state = entity.metadata.getInt(20, 0);
+            tileId = state & 4095;
+            tileMeta = state >> 12 & 15;
+            tileOffset = entity.metadata.getInt(21, 6);
+            return tileId != 0;
+        }
+        tileMeta = 0;
+        tileOffset = 6;
+        switch (entity.objectData) {
+            case 1 -> {
+                tileId = 54;
+                tileMeta = 2; // facing north
+                tileOffset = 8;
+            }
+            case 2 -> {
+                tileId = (entity.metadata.getByte(16, 0) & 1) != 0 ? 62 : 61;
+                tileMeta = 2;
+            }
+            case 3 -> tileId = 46;
+            case 4 -> tileId = 52;
+            case 5 -> {
+                tileId = 154;
+                tileOffset = 1;
+            }
+            case 6 -> tileId = 137;
+            default -> tileId = 0;
+        }
+        return tileId != 0;
+    }
+
+    /** The stack a block state tints by (grass, leaves), one per state. */
+    private ItemStack stateStack(int id, int meta) {
+        return stateStacks.computeIfAbsent(id << 4 | meta, key -> new ItemStack(id, 1, meta, null));
+    }
+
+    /** RenderBoat: lifted a quarter block, turned to the yaw, and rocking after a hit. */
+    private void boat(Entity entity, float x, float y, float z, int light, float partialTick) {
+        VulkanTexture texture = texture("entity/boat");
+        if (texture == null) {
+            return;
+        }
+        float yaw = entity.previousYaw + (entity.yaw - entity.previousYaw) * partialTick;
+        Mat4.identity(stand);
+        Mat4.translate(stand, x, y + 0.25f, z, stand);
+        Mat4.rotate(stand, (float) Math.toRadians(180.0F - yaw), 0f, 1f, 0f, stand);
+        float sinceHit = entity.metadata.getInt(17, 0) - partialTick;
+        float damage = Math.max(0f, entity.metadata.getFloat(19, 0f) - partialTick);
+        if (sinceHit > 0f) {
+            Mat4.rotate(stand, (float) Math.toRadians((float) Math.sin(sinceHit) * sinceHit * damage / 10.0F
+                    * entity.metadata.getInt(18, 1)), 1f, 0f, 0f, stand);
+        }
+        Mat4.scale(stand, -1f, -1f, 1f, stand);
+        ModelPose pose = poses.get(EntityModels.Kind.BOAT);
+        pose.reset();
+        models.submit(gpu.get(EntityModels.Kind.BOAT), texture, pose, stand, 0xFFFFFFFF, 0, light);
+    }
+
+    /**
+     * RenderTNTPrimed: the block, swelling over its last half second, and flashing white every 5 ticks (vanilla
+     * blends a white copy over it; here the flash is the overlay color, which lightens the same texels).
+     */
+    private void primedTnt(Entity entity, float x, float y, float z, int light, float partialTick) {
+        GpuItem block = gpuItem(ItemCatalog.stateModel(46, 0));
+        if (block == null) {
+            return;
+        }
+        int fuse = 80 - entity.ticksExisted; // the client counts down from the 80 EntityTNTPrimed starts at
+        float remaining = fuse - partialTick + 1.0F;
+        Mat4.identity(item);
+        Mat4.translate(item, x, y + 0.5f, z, item);
+        if (remaining < 10.0F) {
+            float swell = Math.max(0f, Math.min(1f, 1.0F - remaining / 10.0F));
+            swell *= swell;
+            swell *= swell;
+            float scale = 1.0F + swell * 0.3F;
+            Mat4.scale(item, scale, scale, scale, item);
+        }
+        Mat4.translate(item, -0.5f, -0.5f, 0.5f, item);
+        Mat4.rotate(item, (float) (Math.PI / 2), 0f, 1f, 0f, item);
+        int overlay = 0;
+        if (fuse / 5 % 2 == 0) {
+            float flash = Math.max(0f, Math.min(1f, (1.0F - remaining / 100.0F) * 0.8F));
+            overlay = Math.round(flash * 255f) << 24 | 0xFFFFFF;
+        }
+        submitItem(block, stateStack(46, 0), item, light, overlay);
+    }
+
+    /**
+     * RenderFallingBlock: the block's own model centered on the entity, unless the world already has that block
+     * where the entity is (it has landed).
+     */
+    private void fallingBlock(Entity entity, float x, float y, float z, int light) {
+        int id = entity.objectData & 4095;
+        int meta = entity.objectData >> 12 & 15;
+        if (id == 0) {
+            return;
+        }
+        if (chestWorld != null && chestWorld.state((int) Math.floor(entity.x), (int) Math.floor(entity.y),
+                (int) Math.floor(entity.z)) == (id << 4 | meta)) {
+            return;
+        }
+        GpuItem block = gpuItem(ItemCatalog.stateModel(id, meta));
+        if (block == null) {
+            return;
+        }
+        Mat4.identity(item);
+        Mat4.translate(item, x - 0.5f, y, z - 0.5f, item);
+        submitItem(block, stateStack(id, meta), item, light);
+    }
+
+    // ---- paintings, frames, orbs, armor stands, lightning -------------------------------------------------
+
+    /**
+     * RenderPainting: one tile per 16x16 pixels, each lit from the block in front of it (the wall's row and column it
+     * covers), on the entity's wall turned to its facing.
+     */
+    private void painting(Entity entity, float x, float y, float z) {
+        Hanging.Art art = Hanging.art(entity.objectData);
+        if (System.getProperty("alkaline.debug.paintings") != null) {
+            System.err.println("painting " + entity.id + " at " + entity.x + "," + entity.y + "," + entity.z + " yaw "
+                    + entity.yaw + " art " + art + " rel " + x + "," + y + "," + z + " tex "
+                    + textures.get("painting/paintings_kristoffer_zetterstrand") + " tiles " + paintingTiles.size());
+        }
+        VulkanTexture texture = texture("painting/paintings_kristoffer_zetterstrand");
+        if (texture == null) {
+            return;
+        }
+        int facing = Math.round(entity.yaw / 90f) & 3;
+        Mat4.identity(stand);
+        Mat4.translate(stand, x, y, z, stand);
+        Mat4.rotate(stand, (float) Math.toRadians(180.0F - entity.yaw), 0f, 1f, 0f, stand);
+        float left = -art.width() / 2.0F;
+        float bottom = -art.height() / 2.0F;
+        for (int u = 0; u < art.width() / 16; u++) {
+            for (int v = 0; v < art.height() / 16; v++) {
+                int key = Hanging.artIndex(art.title()) << 4 | u << 2 | v;
+                ModelRenderer.GpuModel tile = paintingTiles.get(key);
+                if (tile == null) {
+                    pendingTiles.add(key);
+                    continue;
+                }
+                float centerX = left + u * 16 + 8;
+                float centerY = bottom + v * 16 + 8;
+                // RenderPainting.setLightmap: the block this tile hangs in front of.
+                int lightX = (int) Math.floor(entity.x);
+                int lightY = (int) Math.floor(entity.y + centerY / 16.0F);
+                int lightZ = (int) Math.floor(entity.z);
+                switch (facing) {
+                    case 2 -> lightX = (int) Math.floor(entity.x + centerX / 16.0F);
+                    case 1 -> lightZ = (int) Math.floor(entity.z - centerX / 16.0F);
+                    case 0 -> lightX = (int) Math.floor(entity.x - centerX / 16.0F);
+                    default -> lightZ = (int) Math.floor(entity.z + centerX / 16.0F);
+                }
+                int packed = lighting.light(lightX, lightY, lightZ);
+                System.arraycopy(stand, 0, item, 0, 16);
+                Mat4.translate(item, centerX / 16.0F, centerY / 16.0F, 0f, item);
+                models.submit(tile, texture, item, 0xFFFFFFFF, 0,
+                        lightmapColors[(packed >> 4 & 15) * 16 + (packed & 15)]);
+            }
+        }
+    }
+
+    /**
+     * RenderItemFrame: the frame model (the map variant when it holds a map), then the item 7 pixels out, turned by
+     * the frame's rotation in eighths; sprites are turned to face out. Maps are not drawn into the frame.
+     */
+    private void itemFrame(Entity entity, int light) {
+        int facing = entity.objectData & 3;
+        int[][] front = {{0, 1}, {-1, 0}, {0, -1}, {1, 0}};
+        int hangX = (int) Math.floor(entity.x + front[facing][0] * 0.46875);
+        int hangY = (int) Math.floor(entity.y);
+        int hangZ = (int) Math.floor(entity.z + front[facing][1] * 0.46875);
+        ItemStack stack = entity.metadata.getItem(8);
+        boolean map = stack != null && stack.id() == 358;
+        GpuItem frame = gpuItem(ItemCatalog.locationModel("item_frame", map ? "map" : "normal"));
+        if (frame == null) {
+            return;
+        }
+        Mat4.identity(stand);
+        Mat4.translate(stand, (float) (hangX + 0.5 - cameraX), (float) (hangY + 0.5 - cameraY),
+                (float) (hangZ + 0.5 - cameraZ), stand);
+        Mat4.rotate(stand, (float) Math.toRadians(180.0F - entity.yaw), 0f, 1f, 0f, stand);
+        System.arraycopy(stand, 0, item, 0, 16);
+        Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
+        submitItem(frame, null, item, light);
+        if (stack == null || map) {
+            return;
+        }
+        GpuItem shown = gpuItem(catalog.model(stack, -1, false));
+        if (shown == null) {
+            return;
+        }
+        System.arraycopy(stand, 0, item, 0, 16);
+        Mat4.translate(item, 0f, 0f, 0.4375f, item);
+        Mat4.rotate(item, (float) Math.toRadians((entity.metadata.getByte(9, 0) & 7) * 360.0F / 8.0F), 0f, 0f, 1f,
+                item);
+        Mat4.scale(item, 0.5f, 0.5f, 0.5f, item);
+        if (!shown.definition().block()) {
+            Mat4.rotate(item, (float) Math.PI, 0f, 1f, 0f, item);
+        } else {
+            // RenderItem halves a model; a flat one is doubled first (preTransform), a block is not.
+            Mat4.scale(item, 0.5f, 0.5f, 0.5f, item);
+        }
+        Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
+        submitItem(shown, stack, item, light);
+    }
+
+    /** EntityXPOrb.getTextureByXP: the icon grows with the orb's value. */
+    private static int orbIcon(int value) {
+        int[] steps = {3, 7, 17, 37, 73, 149, 307, 617, 1237, 2477};
+        int icon = 0;
+        while (icon < steps.length && value >= steps[icon]) {
+            icon++;
+        }
+        return icon;
+    }
+
+    /**
+     * RenderXPOrb: a quad facing the camera, 0.3 blocks, tinted through green and yellow as it ages and half
+     * transparent; its light is raised by half the block-light range.
+     */
+    private void experienceOrb(Entity entity, float x, float y, float z, float partialTick) {
+        VulkanTexture texture = texture("entity/experience_orb");
+        if (texture == null) {
+            return;
+        }
+        int sky = packedLight >> 4 & 15;
+        int block = packedLight & 15;
+        // EntityXPOrb.getBrightnessForRender adds 120 of the block light's 240.
+        int light = average(lightmapColors[sky * 16 + Math.min(15, block + 7)],
+                lightmapColors[sky * 16 + Math.min(15, block + 8)]);
+        float age = (entity.ticksExisted + partialTick) / 2.0F;
+        int red = (int) (((float) Math.sin(age) + 1.0F) * 0.5F * 255.0F);
+        int blue = (int) (((float) Math.sin(age + (float) (Math.PI * 4.0 / 3.0)) + 1.0F) * 0.1F * 255.0F);
+        Mat4.identity(item);
+        Mat4.translate(item, x, y, z, item);
+        Mat4.rotate(item, (float) Math.toRadians(180.0F - viewYaw), 0f, 1f, 0f, item);
+        Mat4.rotate(item, (float) Math.toRadians(-viewPitch), 1f, 0f, 0f, item);
+        Mat4.scale(item, 0.3f, 0.3f, 0.3f, item);
+        models.submit(orbModels[orbIcon(entity.objectData)], texture, item, 128 << 24 | red << 16 | 255 << 8 | blue, 0,
+                light);
+    }
+
+    /** The average of two 0xRRGGBB colors. */
+    private static int average(int a, int b) {
+        return ((a ^ b) & 0xFEFEFE) >> 1 | a & b;
+    }
+
+    /** The rotation triple at metadata {@code index}, or the stand's default. */
+    private static float[] rotations(Entity entity, int index, float[] fallback) {
+        float[] found = entity.metadata.getRotations(index);
+        return found == null ? fallback : found;
+    }
+
+    /**
+     * ArmorStandRenderer: the stand's model posed from its rotation metadata (small stands use the child layout),
+     * its armor posed the same way, and what it holds. An invisible stand draws only the armor and the item.
+     */
+    private void armorStand(Entity entity, float x, float y, float z, int light, float partialTick) {
+        VulkanTexture texture = texture("entity/armorstand/wood");
+        if (texture == null) {
+            return;
+        }
+        int flags = entity.metadata.getByte(10, 0);
+        boolean small = (flags & 1) != 0;
+        boolean arms = (flags & 4) != 0;
+        ModelPose pose = poses.get(EntityModels.Kind.ARMOR_STAND);
+        ObjectModels.poseArmorStand(pose, true, rotations(entity, 11, ObjectModels.DEFAULT_HEAD),
+                rotations(entity, 12, ObjectModels.DEFAULT_BODY), rotations(entity, 13, ObjectModels.DEFAULT_LEFT_ARM),
+                rotations(entity, 14, ObjectModels.DEFAULT_RIGHT_ARM),
+                rotations(entity, 15, ObjectModels.DEFAULT_LEFT_LEG),
+                rotations(entity, 16, ObjectModels.DEFAULT_RIGHT_LEG), arms, (flags & 8) == 0, entity.yaw);
+        livingRoot(x, y, z, lerpAngle(entity.previousYaw, entity.yaw, partialTick), entity, partialTick, 1f, 1f,
+                false, 90f);
+        if (!entity.invisible()) {
+            if (small) {
+                submitChild(EntityModels.Kind.ARMOR_STAND, texture, pose, light, 0, 0xFFFFFFFF, null, 0f);
+            } else {
+                models.submit(gpu.get(EntityModels.Kind.ARMOR_STAND), texture, pose, root, 0xFFFFFFFF, 0, light);
+            }
+        }
+        renderArmor(entity, null, light, 0, small);
+        if (entity.equipment[0] != null) {
+            // LayerHeldItem draws at the right arm whether or not the stand shows arms.
+            pose.visible(EntityModels.RIGHT_ARM, true);
+            renderHeld(entity.equipment[0], pose, false, light, -1, false, small);
+        }
+    }
+
+    /**
+     * RenderLightningBolt: the jagged bolt from its foot up, blended into the scene (additive at 0.3 alpha),
+     * unlit. Its geometry comes from the bolt's seed and is rebuilt when a new strike changes it.
+     */
+    private void lightning(Entity entity, float x, float y, float z) {
+        Bolt bolt = bolts.get(entity.id);
+        if (bolt == null || bolt.seed != entity.boltVertex) {
+            pendingBolts.put(entity.id, entity.boltVertex);
+        }
+        if (bolt == null) {
+            return;
+        }
+        bolt.seen = true;
+        Mat4.identity(item);
+        Mat4.translate(item, x, y, z, item);
+        models.setUnlit(true);
+        models.submit(bolt.model, white, item, 77 << 24 | 115 << 16 | 115 << 8 | 128, 0, 0xFFFFFF);
+        models.setUnlit(false);
     }
 
     /** RenderArrow: turned to the arrow's yaw and pitch, with the shake after it hits. */
@@ -1254,6 +1787,9 @@ final class EntityView implements AutoCloseable {
     @Override
     public void close() {
         closeItems();
+        if (white != null) {
+            white.close();
+        }
         models.close();
         for (VulkanTexture texture : textures.values()) {
             texture.close();

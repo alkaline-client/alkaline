@@ -32,7 +32,7 @@ public final class EntityModels {
         COW, SHEEP, SHEEP_WOOL, CHICKEN, WOLF, VILLAGER, IRON_GOLEM, SLIME, SLIME_OUTER, BLAZE, SQUID, GHAST,
         WITCH, BAT, RABBIT, OCELOT, SILVERFISH, ENDERMITE,
         MAGMA_CUBE, SNOW_GOLEM, ZOMBIE_VILLAGER, MOOSHROOM_MUSHROOMS, HORSE,
-        GUARDIAN, WITHER, ENDER_DRAGON, GUARDIAN_BEAM
+        GUARDIAN, WITHER, ENDER_DRAGON, GUARDIAN_BEAM, MINECART, BOAT, ARMOR_STAND
     }
 
     /** Per-frame animation inputs, mutable and reused by the caller. Angles in degrees unless noted. */
@@ -227,6 +227,9 @@ public final class EntityModels {
             case BLAZE -> blaze();
             case SQUID -> squid();
             case GHAST -> ghast();
+            case MINECART -> ObjectModels.minecart();
+            case BOAT -> ObjectModels.boat();
+            case ARMOR_STAND -> ObjectModels.armorStand();
             default -> MobModels.build(kind);
         };
     }
@@ -392,6 +395,9 @@ public final class EntityModels {
                 for (int tentacle = 1; tentacle <= 9; tentacle++) {
                     pose.rotation(tentacle, 0.2f * sin(motion.ageInTicks * 0.3f + (tentacle - 1)) + 0.4f, 0, 0);
                 }
+            }
+            // Objects: minecarts and boats do not animate, and the caller poses armor stands from their metadata.
+            case MINECART, BOAT, ARMOR_STAND -> {
             }
             default -> MobModels.animate(kind, motion, pose);
         }

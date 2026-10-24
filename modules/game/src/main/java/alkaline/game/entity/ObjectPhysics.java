@@ -25,7 +25,7 @@ public final class ObjectPhysics {
             case EntityTypes.OBJECT_ARROW, EntityTypes.OBJECT_SNOWBALL, EntityTypes.OBJECT_EGG,
                  EntityTypes.OBJECT_ENDER_PEARL, EntityTypes.OBJECT_POTION, EntityTypes.OBJECT_EXP_BOTTLE,
                  EntityTypes.OBJECT_FISHING_HOOK, EntityTypes.OBJECT_ITEM, EntityTypes.OBJECT_XP_ORB,
-                 EntityTypes.OBJECT_TNT, EntityTypes.OBJECT_FALLING_BLOCK -> true;
+                 EntityTypes.OBJECT_TNT, EntityTypes.OBJECT_FALLING_BLOCK, EntityTypes.OBJECT_FIREWORK -> true;
             default -> false;
         };
     }
@@ -38,6 +38,7 @@ public final class ObjectPhysics {
             case EntityTypes.OBJECT_POTION -> throwable(entity, world, 0.05F);
             case EntityTypes.OBJECT_EXP_BOTTLE -> throwable(entity, world, 0.07F);
             case EntityTypes.OBJECT_FISHING_HOOK -> hook(entity, world);
+            case EntityTypes.OBJECT_FIREWORK -> firework(entity);
             case EntityTypes.OBJECT_ITEM -> fall(entity, world, 0.25, 0.03999999910593033, 0.98F, -0.5, 1.0);
             case EntityTypes.OBJECT_XP_ORB -> fall(entity, world, 0.5, 0.029999999329447746D, 0.98F, -0.8999999761581421D, 1.0);
             case EntityTypes.OBJECT_TNT, EntityTypes.OBJECT_FALLING_BLOCK ->
@@ -113,6 +114,17 @@ public final class ObjectPhysics {
         if (entity.stuck) {
             entity.motionX = entity.motionY = entity.motionZ = 0;
         }
+    }
+
+    /** EntityFireworkRocket.onUpdate: it speeds up 15% a tick horizontally and climbs, turning to its motion. */
+    private static void firework(Entity entity) {
+        entity.motionX *= 1.15;
+        entity.motionZ *= 1.15;
+        entity.motionY += 0.04;
+        entity.x += entity.motionX;
+        entity.y += entity.motionY;
+        entity.z += entity.motionZ;
+        face(entity);
     }
 
     /** EntityFishHook in the air: drag 0.92 and gravity 0.04; it floats once in water. */

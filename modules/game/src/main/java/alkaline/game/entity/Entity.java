@@ -65,6 +65,14 @@ public final class Entity {
     public int deathTime;
     public boolean dead;
     public int ticksExisted;
+    /**
+     * Lightning bolts (EntityLightningBolt): the flash state (2 on spawn, below 0 between strikes), the strikes still
+     * to come, and the seed the bolt's zigzag is drawn from.
+     */
+    public int lightningState = 2;
+    public int boltLivingTime;
+    public long boltVertex;
+    private static final java.util.Random LIGHTNING = new java.util.Random();
 
     /** Active potion effects by id, as amplifiers (the server sends every tracked living entity's). */
     public final java.util.Map<Integer, Integer> effects = new java.util.HashMap<>();
@@ -99,6 +107,10 @@ public final class Entity {
         this.pitch = previousPitch = targetPitch = pitch;
         headYaw = previousHeadYaw = yaw;
         bodyYaw = previousBodyYaw = yaw;
+        if (category == Category.OBJECT && type == EntityTypes.OBJECT_LIGHTNING) {
+            boltVertex = LIGHTNING.nextLong();
+            boltLivingTime = LIGHTNING.nextInt(3) + 1;
+        }
     }
 
     /** EntityLivingBase.getArmSwingAnimationEnd: Haste shortens the swing, Mining Fatigue lengthens it. */
@@ -182,7 +194,8 @@ public final class Entity {
         targetZ = tz;
         targetYaw = newYaw;
         targetPitch = newPitch;
-        increments = living() ? 3 : 1;
+        // Minecarts take two more ticks than living entities to arrive (turnProgress), boats four.
+        increments = living() ? 3 : type == EntityTypes.OBJECT_MINECART ? 5 : type == EntityTypes.OBJECT_BOAT ? 7 : 1;
     }
 
     /** Moves exactly to a position on the next {@link #tick} (the client's model of the local player). */
@@ -240,6 +253,9 @@ public final class Entity {
             increments--;
         }
         if (!living()) {
+            if (type == EntityTypes.OBJECT_LIGHTNING) {
+                lightning();
+            }
             if (world != null && ObjectPhysics.simulated(this)) {
                 ObjectPhysics.tick(this, world);
             }
@@ -289,6 +305,23 @@ public final class Entity {
         previousYaw = unwrapNear(previousYaw, yaw);
         previousBodyYaw = unwrapNear(previousBodyYaw, bodyYaw);
         previousHeadYaw = unwrapNear(previousHeadYaw, headYaw);
+    }
+
+    /**
+     * EntityLightningBolt.onUpdate: the bolt flashes for two ticks, then strikes again after a random pause until its
+     * strikes run out. The server never destroys it, so the client ends it ({@link #dead}).
+     */
+    private void lightning() {
+        lightningState--;
+        if (lightningState < 0) {
+            if (boltLivingTime == 0) {
+                dead = true;
+            } else if (lightningState < -LIGHTNING.nextInt(10)) {
+                boltLivingTime--;
+                lightningState = 1;
+                boltVertex = LIGHTNING.nextLong();
+            }
+        }
     }
 
     /** Swing progress (0..1) interpolated for rendering, as getSwingProgress does. */

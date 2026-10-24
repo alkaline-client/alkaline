@@ -66,10 +66,13 @@ final class ClientApp implements AutoCloseable {
     private final java.util.concurrent.CompletableFuture<AssetSource> assetLoad;
     /** Block models compiled from the assets on the loader thread; null without vanilla assets. */
     private final java.util.concurrent.CompletableFuture<BlockPalette> paletteLoad;
-    private AssetSource assets;
+    /** The Overworld background's textures, prepared after the palette when that background is chosen. */
+    private final java.util.concurrent.CompletableFuture<PreparedWorld> worldLoad;
+    /** Written on the render thread; volatile so the join thread prepares world textures for the current pair. */
+    private volatile AssetSource assets;
     /** The vanilla jar; {@link #assets} layers the selected resource packs over it. */
     private volatile AssetSource vanillaAssets;
-    private BlockPalette palette;
+    private volatile BlockPalette palette;
     private final java.util.List<alkaline.renderer.asset.ResourcePacks.Folder> packFolders;
     /** The pack selection the startup assets were layered from. */
     private final String startupPacks;
@@ -117,6 +120,8 @@ final class ClientApp implements AutoCloseable {
     private ClientSettings.Theme fluidLookTheme;
     /** The multiplayer game in progress (render thread), or null in the menus. */
     private PlaySession play;
+    /** Whether {@link #play} is set, for the pack reload thread: a game view needs world textures. */
+    private volatile boolean inGame;
     /** The menu background, kept while a game view replaces it. */
     private MenuBackground menuBackground;
     /** Bumped to abandon a connection attempt the player cancelled. */
@@ -183,6 +188,13 @@ final class ClientApp implements AutoCloseable {
         paletteLoad = assetLoad.thenApplyAsync(opened -> opened == null ? null : BlockPalette.load(opened),
                 runnable -> {
                     Thread thread = new Thread(runnable, "alkaline-block-models");
+                    thread.setDaemon(true);
+                    thread.start();
+                });
+        worldLoad = paletteLoad.thenApplyAsync(loadedPalette ->
+                config.snapshot().get(ClientSettings.MENU_BACKGROUND) == ClientSettings.Background.OVERWORLD
+                        ? PreparedWorld.prepare(assetLoad.join(), loadedPalette) : null, runnable -> {
+                    Thread thread = new Thread(runnable, "alkaline-world-textures");
                     thread.setDaemon(true);
                     thread.start();
                 });
@@ -446,7 +458,7 @@ final class ClientApp implements AutoCloseable {
             return;
         }
         if (background == null) {
-            if (!assetLoad.isDone() || !paletteLoad.isDone()) {
+            if (!assetLoad.isDone() || !paletteLoad.isDone() || !worldLoad.isDone()) {
                 return;
             }
             assets = assetLoad.join();
@@ -465,7 +477,7 @@ final class ClientApp implements AutoCloseable {
                 menu.setAppliedResourcePacks(loadedPacks);
                 return kotlin.Unit.INSTANCE;
             });
-            background = createBackground(config.snapshot().get(ClientSettings.MENU_BACKGROUND));
+            background = createBackground(config.snapshot().get(ClientSettings.MENU_BACKGROUND), worldLoad.join());
             ui.post(() -> {
                 menu.setLoadingStatus("Preparing " + backgroundName(background));
                 return kotlin.Unit.INSTANCE;
@@ -701,6 +713,12 @@ final class ClientApp implements AutoCloseable {
 
     /** Resolves, connects and logs in off the render thread; hands the session to the render thread. */
     private void connect(String typed, int attempt) {
+        // The world's textures are decoded and mipped while the connection is made, not on the render thread.
+        AssetSource joinAssets = assets;
+        BlockPalette joinPalette = palette;
+        java.util.concurrent.CompletableFuture<PreparedWorld> textures = java.util.concurrent.CompletableFuture
+                .supplyAsync(() -> PreparedWorld.prepare(joinAssets, joinPalette),
+                        runnable -> Thread.ofVirtual().name("alkaline-world-textures").start(runnable));
         try {
             alkaline.client.servers.ServerAddress address = alkaline.client.servers.ServerAddress.parse(typed);
             alkaline.client.servers.ServerAddress target = address.resolve();
@@ -710,11 +728,12 @@ final class ClientApp implements AutoCloseable {
                     : hash -> new alkaline.client.account.SessionService().join(account, hash);
             alkaline.game.net.ServerSession session = alkaline.game.net.ServerSession.connect(target.host(),
                     target.port(), address.host(), username, join);
+            PreparedWorld prepared = textures.join();
             if (attempt != joinAttempt.get()) {
                 session.close();
                 return;
             }
-            mainThreadTasks.add(() -> startGame(session, attempt));
+            mainThreadTasks.add(() -> startGame(session, attempt, prepared));
         } catch (java.io.IOException | RuntimeException failure) {
             if (attempt == joinAttempt.get()) {
                 String reason = failure instanceof alkaline.game.net.Login.RefusedException refused
@@ -727,7 +746,7 @@ final class ClientApp implements AutoCloseable {
         }
     }
 
-    private void startGame(alkaline.game.net.ServerSession session, int attempt) {
+    private void startGame(alkaline.game.net.ServerSession session, int attempt, PreparedWorld prepared) {
         BlockPalette palette = this.palette;
         if (attempt != joinAttempt.get() || palette == null) {
             session.close();
@@ -743,7 +762,8 @@ final class ClientApp implements AutoCloseable {
                 reason -> mainThreadTasks.add(() -> endGame(reason)));
         created.sounds(new GameSounds(audio));
         try {
-            GameView view = new GameView(renderer, assets, palette, created, skins, itemCatalog, config::snapshot);
+            GameView view = new GameView(renderer, assets, palette, worldTextures(prepared), created, skins,
+                    itemCatalog, config::snapshot);
             created.view(view);
             created.onWindowClosedByServer(() -> ui.post(() -> {
                 menu.inventoryClosedByServer();
@@ -767,6 +787,7 @@ final class ClientApp implements AutoCloseable {
             created.onResourcePackOffered((url, hash) -> serverPackOffered(created, url, hash));
             session.sendClientSettings("en_US", config.snapshot().get(ClientSettings.WORLD_RENDER_DISTANCE));
             play = created;
+            inGame = true;
             menuBackground = background;
             background = view;
             ui.post(() -> {
@@ -794,6 +815,7 @@ final class ClientApp implements AutoCloseable {
         if (play != null) {
             play.close();
             play = null;
+            inGame = false;
             if (background instanceof GameView view) {
                 view.close();
             }
@@ -910,7 +932,7 @@ final class ClientApp implements AutoCloseable {
         if (loaded && appliedSettings != null
                 && appliedSettings.get(ClientSettings.MENU_BACKGROUND) != snapshot.get(ClientSettings.MENU_BACKGROUND)) {
             background.close();
-            background = createBackground(snapshot.get(ClientSettings.MENU_BACKGROUND));
+            background = createBackground(snapshot.get(ClientSettings.MENU_BACKGROUND), null);
         }
         if (snapshot.get(ClientSettings.VIDEO_FULLSCREEN) != fullscreen) {
             fullscreen = snapshot.get(ClientSettings.VIDEO_FULLSCREEN);
@@ -936,17 +958,20 @@ final class ClientApp implements AutoCloseable {
                 snapshot.get(ClientSettings.PANORAMA_TOP_B), snapshot.get(ClientSettings.PANORAMA_BOTTOM_B));
     }
 
-    /** Backgrounds are swapped outside frames; the panorama falls back to Blue Planet without vanilla assets. */
-    private MenuBackground createBackground(ClientSettings.Background choice) {
+    /**
+     * Backgrounds are swapped outside frames; the panorama falls back to Blue Planet without vanilla assets.
+     * {@code prepared}: world textures made off the render thread, or null to prepare them here if needed.
+     */
+    private MenuBackground createBackground(ClientSettings.Background choice, PreparedWorld prepared) {
         if (choice == ClientSettings.Background.FLUID) {
             return new FluidBackground(renderer, this::fluidLook);
         }
         if (choice == ClientSettings.Background.OVERWORLD && assets != null) {
             try {
                 MenuTerrain terrain = new MenuTerrain(1_8_9L);
-                return new OverworldBackground(renderer, assets, palette, terrain, terrain.eyeHeight(36.0),
-                        () -> worldSettings(config.snapshot()));
-            } catch (IOException failure) {
+                return new OverworldBackground(renderer, worldTextures(prepared), palette, terrain,
+                        terrain.eyeHeight(36.0), () -> worldSettings(config.snapshot()));
+            } catch (RuntimeException failure) {
                 System.err.println("Overworld unavailable: " + failure.getMessage());
             }
         }
@@ -1141,13 +1166,17 @@ final class ClientApp implements AutoCloseable {
             try {
                 BlockPalette loadedPalette = BlockPalette.load(layered);
                 ChatText loadedText = ChatText.load(layered);
+                // A game view or the Overworld background is rebuilt from the new packs: prepare their textures
+                // here, so the render thread only uploads them.
+                PreparedWorld world = inGame || config.snapshot().get(ClientSettings.MENU_BACKGROUND)
+                        == ClientSettings.Background.OVERWORLD ? PreparedWorld.prepare(layered, loadedPalette) : null;
                 if (reload != packReload.get()) {
                     layered.close();
                     mainThreadTasks.add(() -> done.accept(false));
                     return;
                 }
                 mainThreadTasks.add(() -> {
-                    swapAssets(layered, loadedPalette, loadedText, selection);
+                    swapAssets(layered, loadedPalette, loadedText, selection, world);
                     done.accept(true);
                 });
             } catch (IOException | RuntimeException failure) {
@@ -1167,7 +1196,8 @@ final class ClientApp implements AutoCloseable {
     }
 
     /** Render thread, outside frames: everything drawn from the assets is rebuilt from the new ones. */
-    private void swapAssets(AssetSource layered, BlockPalette loadedPalette, ChatText loadedText, String selection) {
+    private void swapAssets(AssetSource layered, BlockPalette loadedPalette, ChatText loadedText, String selection,
+                            PreparedWorld world) {
         AssetSource previous = assets;
         audio.assets(GameSounds.assets(layered));
         assets = layered;
@@ -1180,8 +1210,8 @@ final class ClientApp implements AutoCloseable {
         ClientSettings.Background choice = config.snapshot().get(ClientSettings.MENU_BACKGROUND);
         if (play != null && background instanceof GameView old) {
             try {
-                GameView view = new GameView(renderer, layered, loadedPalette, play, skins, itemCatalog,
-                        config::snapshot);
+                GameView view = new GameView(renderer, layered, loadedPalette, worldTextures(world), play, skins,
+                        itemCatalog, config::snapshot);
                 view.inherit(old);
                 old.close();
                 play.view(view);
@@ -1191,11 +1221,11 @@ final class ClientApp implements AutoCloseable {
             }
             if (menuBackground != null) {
                 menuBackground.close();
-                menuBackground = createBackground(choice);
+                menuBackground = createBackground(choice, world);
             }
         } else if (background != null && loaded) {
             background.close();
-            background = createBackground(choice);
+            background = createBackground(choice, world);
         }
         try {
             if (previous != null) {
@@ -1210,6 +1240,38 @@ final class ClientApp implements AutoCloseable {
             menu.setResourcePackStatus("");
             return kotlin.Unit.INSTANCE;
         });
+    }
+
+    /**
+     * Block and sky textures prepared off the render thread for one asset source and palette. The render thread
+     * uses them only while that pair is still current ({@link #worldTextures}).
+     */
+    private record PreparedWorld(AssetSource assets, BlockPalette palette,
+                                 alkaline.renderer.vulkan.world.WorldRenderer.Textures textures) {
+        /** Prepares on the calling thread; null without assets, or when they failed to read. */
+        static PreparedWorld prepare(AssetSource assets, BlockPalette palette) {
+            if (assets == null || palette == null) {
+                return null;
+            }
+            try {
+                return new PreparedWorld(assets, palette,
+                        alkaline.renderer.vulkan.world.WorldRenderer.loadTextures(assets, palette.textures()));
+            } catch (RuntimeException failure) {
+                System.err.println("Preparing world textures failed: " + failure.getMessage());
+                return null;
+            }
+        }
+    }
+
+    /**
+     * {@code prepared}'s textures when they were made from the current assets and palette; otherwise (the packs
+     * changed meanwhile, or nothing was prepared) they are prepared here, on the render thread.
+     */
+    private alkaline.renderer.vulkan.world.WorldRenderer.Textures worldTextures(PreparedWorld prepared) {
+        if (prepared != null && prepared.assets() == assets && prepared.palette() == palette) {
+            return prepared.textures();
+        }
+        return alkaline.renderer.vulkan.world.WorldRenderer.loadTextures(assets, palette.textures());
     }
 
     private static AssetSource openVanillaAssets() {

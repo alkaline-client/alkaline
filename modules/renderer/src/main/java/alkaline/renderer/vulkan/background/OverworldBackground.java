@@ -1,6 +1,5 @@
 package alkaline.renderer.vulkan.background;
 
-import alkaline.renderer.asset.AssetSource;
 import alkaline.renderer.vulkan.resource.PipelineSpec;
 import alkaline.renderer.vulkan.resource.VulkanFrame;
 import alkaline.renderer.vulkan.resource.VulkanPipeline;
@@ -11,7 +10,6 @@ import alkaline.renderer.vulkan.world.WorldRenderer;
 import alkaline.renderer.world.BlockSource;
 import alkaline.renderer.world.BlockPalette;
 import alkaline.renderer.world.Sky;
-import java.io.IOException;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -56,15 +54,17 @@ public final class OverworldBackground implements MenuBackground {
     private boolean ready;
 
     /**
+     * @param textures the palette's block textures and the sky, prepared off the render thread
+     *                 ({@link WorldRenderer#loadTextures})
      * @param palette compiled block models (see {@link BlockPalette#load}), shared with any game world
      * @param eyeY    camera height in blocks; the generator knows its terrain, the background does not
      */
-    public OverworldBackground(VulkanRenderer renderer, AssetSource assets, BlockPalette palette, BlockSource source,
-                               double eyeY, Supplier<Settings> settings) throws IOException {
+    public OverworldBackground(VulkanRenderer renderer, WorldRenderer.Textures textures, BlockPalette palette,
+                               BlockSource source, double eyeY, Supplier<Settings> settings) {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.settings = Objects.requireNonNull(settings, "settings");
         this.eyeY = eyeY;
-        world = new WorldRenderer(renderer, assets, palette.textures(), SCENE_FORMAT);
+        world = new WorldRenderer(renderer, textures, SCENE_FORMAT);
         VulkanPipeline createdBlit = null;
         try {
             createdBlit = renderer.createPipeline(PipelineSpec.builder("fullscreen.vert", "blit.frag")

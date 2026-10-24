@@ -6,6 +6,7 @@ import alkaline.renderer.image.ImageSampling;
 import alkaline.renderer.image.RgbaImage;
 import alkaline.renderer.vulkan.resource.PipelineSpec;
 import alkaline.renderer.vulkan.resource.RenderTargetFormat;
+import alkaline.renderer.vulkan.resource.TextureData;
 import alkaline.renderer.vulkan.resource.TextureOptions;
 import alkaline.renderer.vulkan.resource.VertexFormat;
 import alkaline.renderer.vulkan.resource.VulkanFrame;
@@ -89,9 +90,36 @@ public final class SkyRenderer implements AutoCloseable {
     private final int[] layerMinAlpha;
     private final long[] layerPositionNanos;
 
+    /**
+     * The sky's pixels, decoded off the render thread by {@link #loadImages}: vanilla's sun, moon, rain and snow, the
+     * resource packs' custom sky and its layer textures (null where missing) with each one's lowest alpha.
+     */
+    public record Images(TextureData white, TextureData sun, TextureData moon, TextureData rain, TextureData snow,
+                         CustomSky custom, TextureData[] layers, int[] layerMinAlpha) {
+    }
+
+    /** Reads and decodes every texture the sky draws from {@code assets} (null: none); any thread. */
+    public static Images loadImages(AssetSource assets) {
+        CustomSky custom = assets == null ? CustomSky.NONE : CustomSky.load(assets);
+        TextureData[] layers = new TextureData[custom.layers().size()];
+        int[] minAlpha = new int[layers.length];
+        // Pack skies are large PNGs (OptiFine's are often 4096 px wide); each decodes on its own core.
+        java.util.stream.IntStream.range(0, layers.length).parallel().forEach(index -> {
+            RgbaImage image = skyImage(assets, custom.layers().get(index).source());
+            if (image != null) {
+                layers[index] = TextureData.of(image, new TextureOptions(ImageSampling.LINEAR, false, true, 1));
+                minAlpha[index] = minAlpha(image);
+            }
+        });
+        return new Images(image(null, null), image(assets, "environment/sun"),
+                image(assets, "environment/moon_phases"), image(assets, "environment/rain"),
+                image(assets, "environment/snow"), custom, layers, minAlpha);
+    }
+
     /** @param target offscreen color format the world renders into, or null for the main pass */
-    public SkyRenderer(VulkanRenderer renderer, AssetSource assets, RenderTargetFormat target) {
+    public SkyRenderer(VulkanRenderer renderer, Images images, RenderTargetFormat target) {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
+        Objects.requireNonNull(images, "images");
         List<AutoCloseable> created = new ArrayList<>();
         try {
             far = renderer.depthClamp();
@@ -100,23 +128,21 @@ public final class SkyRenderer implements AutoCloseable {
             blended = track(created, renderer.createPipeline(geometry("sky.frag", target, PipelineSpec.Blend.ALPHA, false, far)));
             additive = track(created, renderer.createPipeline(geometry("sky.frag", target, PipelineSpec.Blend.ADDITIVE, false, far)));
             weather = track(created, renderer.createPipeline(geometry("weather.frag", target, PipelineSpec.Blend.ALPHA, true, false)));
-            white = track(created, texture(renderer, null, null));
-            sun = track(created, texture(renderer, assets, "environment/sun"));
-            moon = track(created, texture(renderer, assets, "environment/moon_phases"));
-            rain = track(created, texture(renderer, assets, "environment/rain"));
-            snow = track(created, texture(renderer, assets, "environment/snow"));
-            custom = assets == null ? CustomSky.NONE : CustomSky.load(assets);
+            white = track(created, renderer.createTexture(images.white()));
+            sun = track(created, renderer.createTexture(images.sun()));
+            moon = track(created, renderer.createTexture(images.moon()));
+            rain = track(created, renderer.createTexture(images.rain()));
+            snow = track(created, renderer.createTexture(images.snow()));
+            custom = images.custom();
             layerTextures = new VulkanTexture[custom.layers().size()];
             layerPosition = new float[layerTextures.length];
             layerBrightness = new float[layerTextures.length];
-            layerMinAlpha = new int[layerTextures.length];
+            layerMinAlpha = images.layerMinAlpha().clone();
             layerPositionNanos = new long[layerTextures.length];
             for (int index = 0; index < layerTextures.length; index++) {
                 CustomSky.Layer layer = custom.layers().get(index);
-                RgbaImage image = skyImage(assets, layer.source());
-                layerTextures[index] = image == null ? null : track(created, renderer.createTexture(image,
-                        new TextureOptions(ImageSampling.LINEAR, false, true, 1)));
-                layerMinAlpha[index] = image == null ? 0 : minAlpha(image);
+                TextureData image = images.layers()[index];
+                layerTextures[index] = image == null ? null : track(created, renderer.createTexture(image));
                 if (layerTextures[index] != null && !layerPipelines.containsKey(layer.blend())) {
                     // "replace" draws unblended, alpha-tested at 0.1 as OptiFine's does.
                     layerPipelines.put(layer.blend(), track(created, renderer.createPipeline(geometry(
@@ -226,7 +252,7 @@ public final class SkyRenderer implements AutoCloseable {
     }
 
     /** A texture sampled as raw (gamma) values, repeating; white when absent. */
-    private static VulkanTexture texture(VulkanRenderer renderer, AssetSource assets, String path) {
+    private static TextureData image(AssetSource assets, String path) {
         RgbaImage image = null;
         if (assets != null && path != null) {
             try (InputStream input = assets.open("assets/minecraft/textures/" + path + ".png")) {
@@ -242,7 +268,7 @@ public final class SkyRenderer implements AutoCloseable {
             java.util.Arrays.fill(pixels, (byte) 0xFF);
             image = new RgbaImage(1, 1, pixels);
         }
-        return renderer.createTexture(image, new TextureOptions(ImageSampling.NEAREST, false, true, 1));
+        return TextureData.of(image, new TextureOptions(ImageSampling.NEAREST, false, true, 1));
     }
 
     /** RenderGlobal.renderStars: 1500 tries, quads on a radius-100 sphere, each turned randomly. */

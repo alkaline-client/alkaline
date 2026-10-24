@@ -166,8 +166,9 @@ final class GameView implements MenuBackground {
     /** The local player as other players see it, drawn in third person. */
     private Entity selfModel;
 
-    GameView(VulkanRenderer renderer, AssetSource assets, BlockPalette palette, PlaySession play, Skins skins,
-             ItemCatalog catalog, Supplier<ConfigSnapshot> config) throws IOException {
+    /** @param textures {@code palette}'s block textures and the sky, prepared off the render thread */
+    GameView(VulkanRenderer renderer, AssetSource assets, BlockPalette palette, WorldRenderer.Textures textures,
+             PlaySession play, Skins skins, ItemCatalog catalog, Supplier<ConfigSnapshot> config) throws IOException {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         gpuSetup = renderer.gpuSection("setup");
         gpuSky = renderer.gpuSection("sky");
@@ -188,8 +189,8 @@ final class GameView implements MenuBackground {
         blit = renderer.createPipeline(PipelineSpec.builder("fullscreen.vert", "blit.frag")
                 .offscreen(SCENE_FORMAT).sampledImage(true).build());
         try {
-            world = new WorldRenderer(renderer, assets, palette.textures(), SCENE_FORMAT);
-        } catch (IOException | RuntimeException failure) {
+            world = new WorldRenderer(renderer, textures, SCENE_FORMAT);
+        } catch (RuntimeException | Error failure) {
             blit.close();
             throw failure;
         }
@@ -518,11 +519,7 @@ final class GameView implements MenuBackground {
             if (streamer != null) {
                 streamer.close();
                 world.close();
-                try {
-                    world = new WorldRenderer(renderer, assets, palette.textures(), SCENE_FORMAT);
-                } catch (IOException failure) {
-                    throw new IllegalStateException("Block textures unavailable: " + failure.getMessage(), failure);
-                }
+                world = new WorldRenderer(renderer, assets, palette.textures(), SCENE_FORMAT);
             }
             streamer = new SectionStreamer(new Source(current), palette, world);
             weather = new Weather(current);

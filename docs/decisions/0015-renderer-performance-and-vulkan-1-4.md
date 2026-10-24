@@ -58,6 +58,43 @@ GPU:
   below them), because the clouds' depth would then change what shows. `WorldRenderer.renderSolid` now sets its own
   y-up viewport, because it no longer always follows the sky.
 
+## Load-time textures off the render thread
+
+Joining a server and reloading packs in game used to stop the render thread for about 3 s. JFR put almost all of
+it in CPU work: block texture mip chains, PNG decoding of the custom sky, and scaling block art up to its array
+size. The upload itself was a small part.
+
+- **Prepare, then upload.** `TextureData` holds a texture's pixels with every mip level, packed as the upload reads
+  them. Building it makes no Vulkan calls, so any thread can do it. `VulkanRenderer.createTexture(TextureData)` only
+  creates the image, copies the bytes and writes the descriptor. The `RgbaImage` overloads still prepare inline for
+  small textures made during play.
+- **World textures.** `WorldRenderer.loadTextures` decodes, lays out and mips the block arrays.
+  `SkyRenderer.loadImages` decodes the sky and the custom sky layers. Both are immutable, so the game view and the
+  Overworld background can share them.
+- **Parallel decoding.** Block textures and sky layers decode in parallel, and arrays of 8 or more layers build
+  their mip chains a layer per task, all on the common pool. `upscale` now copies whole rows.
+- **Where it runs:**
+  - joining: on a virtual thread that starts with the connection, so the work overlaps the login;
+  - pack reloads: on the reload thread, when a game is shown or the Overworld background is chosen;
+  - startup: after the palette, when the Overworld background is chosen.
+- **Stale results.** The render thread uses prepared textures only if they came from the current assets and
+  palette. Otherwise, for example after a pack swap during a join, it prepares them itself as before.
+
+Measured on the setup in Results, with Xe Lite, the server pack test and a new flat world per run, two runs per
+build. Times are the render thread's time in `startGame` and `swapAssets`:
+
+| | main at c2a6590 | now |
+|---|---|---|
+| Join | 3040 ms, 3040 ms | 333 ms, 326 ms |
+| Server pack applied in game | 3025 ms, 2995 ms | 301 ms, 328 ms |
+
+- Screenshots after the join and after the pack applied match the old build pixel for pixel, apart from the
+  FPS counter and chat fade. The scene had stone, planks, glass, stained glass, wool, glass panes and iron bars.
+- `TextureDataTest` pins the packed layout to a sequential reference, with and without parallel mip building.
+- **Dimension change, tried and dropped:** handing the old renderer's textures, pipelines and sky to a new one took
+  under 1 ms instead of a full rebuild. It could not be verified, because the End and respawning from it are broken
+  on main as well (see Not done). A dimension change still rebuilds everything on the render thread.
+
 ## Vulkan 1.4: host image copy
 
 The instance asks for API 1.4. Features beyond 1.3 stay optional and are checked per device.
@@ -111,9 +148,15 @@ They would save little in the measured frames.
 
 ## Not done
 
-- **Load-time textures:** the block texture array takes about 1.2 s on the render thread (CPU mip chain and
-  staging), and the large sky images about 200 ms each. Moving that work off the render thread would shorten pack
-  reloads.
+- **Rest of the join stall:** about 330 ms remain on the render thread when joining or reloading, mostly the
+  staging copies of the large textures (block arrays, sky images above 1 MiB) and pipeline creation. How long the
+  join takes overall was not measured.
+- **Dimension changes** still decode and upload every world texture on the render thread (see above).
+- **Choosing the Overworld background in Settings** still prepares its textures on the render thread.
+- **End and respawn, found while testing:** on main since the wave 2 merge, sections in the End fail to mesh
+  (`ArrayIndexOutOfBoundsException` in `Blocks189.neighborBrightness`, block ids above 255). After respawning from
+  the End, the Overworld draws wrongly. The pre-merge `wave2/world` build has no such failures. There is no death
+  screen yet; the client respawns at once.
 - **Sky with clouds below the eye:** it still draws first. Drawing it after the terrain would change where fancy
   clouds hide terrain.
 - **Remaining GPU costs:** the scene-to-swapchain backdrop (0.21 ms at 4K) and full-screen custom sky layers

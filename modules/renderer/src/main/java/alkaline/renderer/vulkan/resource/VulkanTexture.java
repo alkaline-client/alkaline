@@ -1,15 +1,10 @@
 package alkaline.renderer.vulkan.resource;
 
 import alkaline.renderer.image.ImageSampling;
-import alkaline.renderer.image.RgbaImage;
-import java.nio.ByteBuffer;
-import java.util.List;
 import java.util.Objects;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkPhysicalDevice;
 
-import static org.lwjgl.system.MemoryUtil.memAlloc;
-import static org.lwjgl.system.MemoryUtil.memFree;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
@@ -42,73 +37,46 @@ public final class VulkanTexture extends VulkanSampledImage implements AutoClose
     private final TextureOptions options;
 
     VulkanTexture(VulkanRenderer owner, VkPhysicalDevice physicalDevice, VkDevice device,
-                  VulkanTextureDescriptors descriptors, long descriptorSetLayout,
-                  List<RgbaImage> sources, boolean arrayView, TextureOptions options, VulkanUploader uploader) {
+                  VulkanTextureDescriptors descriptors, long descriptorSetLayout, TextureData data,
+                  VulkanUploader uploader) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.device = Objects.requireNonNull(device, "device");
         this.descriptors = Objects.requireNonNull(descriptors, "descriptors");
-        this.options = Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(data, "data");
         Objects.requireNonNull(uploader, "uploader");
-        if (sources.isEmpty() || (!arrayView && sources.size() != 1)) {
-            throw new IllegalArgumentException("A texture needs one image, or one or more same-size array layers.");
-        }
-        RgbaImage first = sources.getFirst();
-        for (RgbaImage layer : sources) {
-            if (layer.width() != first.width() || layer.height() != first.height()) {
-                throw new IllegalArgumentException("Texture array layers must share one size.");
-            }
-        }
+        options = data.options();
         int format = options.srgb() ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+        int mipLevels = data.mipLevels();
 
         VulkanImage createdImage = null;
         long createdSampler = 0;
         VulkanTextureDescriptors.Allocation createdDescriptor = null;
-        ByteBuffer pixels = null;
         try {
-            int mipLevels = Math.min(options.mipLevels(),
-                    32 - Integer.numberOfLeadingZeros(Math.max(first.width(), first.height())));
-            boolean host = uploader.hostImageCopy()
-                    && (long) first.width() * first.height() * 4 * sources.size() <= HOST_COPY_MAX_BYTES;
+            boolean host = uploader.hostImageCopy() && data.levelZeroBytes() <= HOST_COPY_MAX_BYTES;
             if (host) {
                 try {
-                    createdImage = VulkanImage.create(physicalDevice, device, first.width(), first.height(),
-                            sources.size(), mipLevels, format,
+                    createdImage = VulkanImage.create(physicalDevice, device, data.width(), data.height(),
+                            data.layers(), mipLevels, format,
                             STATIC_USAGE | org.lwjgl.vulkan.VK14.VK_IMAGE_USAGE_HOST_TRANSFER_BIT,
-                            VK_IMAGE_ASPECT_COLOR_BIT, arrayView);
+                            VK_IMAGE_ASPECT_COLOR_BIT, data.array());
                 } catch (IllegalStateException full) {
                     host = false; // its memory heap is full: the staging copy needs none of it
                 }
             }
             if (!host) {
-                createdImage = VulkanImage.create(physicalDevice, device, first.width(), first.height(),
-                        sources.size(), mipLevels, format, STATIC_USAGE, VK_IMAGE_ASPECT_COLOR_BIT, arrayView);
+                createdImage = VulkanImage.create(physicalDevice, device, data.width(), data.height(),
+                        data.layers(), mipLevels, format, STATIC_USAGE, VK_IMAGE_ASPECT_COLOR_BIT, data.array());
             }
             createdSampler = VulkanImage.createSampler(device, options.sampling() == ImageSampling.LINEAR,
                     options.repeat(), mipLevels);
             createdDescriptor = descriptors.allocate(descriptorSetLayout);
             writeDescriptor(device, createdDescriptor.descriptorSet(), createdSampler, createdImage.view());
-            byte[][] levels = new byte[sources.size()][];
-            long total = 0;
-            for (int level = 0; level < mipLevels; level++) {
-                total += (long) Math.max(1, first.width() >> level) * Math.max(1, first.height() >> level) * 4
-                        * sources.size();
-            }
-            pixels = memAlloc(Math.toIntExact(total));
-            for (int level = 0; level < mipLevels; level++) {
-                for (int layer = 0; layer < sources.size(); layer++) {
-                    levels[layer] = level == 0 ? sources.get(layer).copyPixels()
-                            : MipChain.downsample(levels[layer], Math.max(1, first.width() >> (level - 1)),
-                                    Math.max(1, first.height() >> (level - 1)), options.srgb());
-                    pixels.put(levels[layer]);
-                }
-            }
-            pixels.flip();
             if (host) {
-                uploader.uploadImageFromHost(createdImage.image(), first.width(), first.height(), sources.size(),
-                        mipLevels, pixels);
+                uploader.uploadImageFromHost(createdImage.image(), data.width(), data.height(), data.layers(),
+                        mipLevels, data.pixels());
             } else {
-                uploader.uploadImage(createdImage.image(), first.width(), first.height(), sources.size(), mipLevels,
-                        pixels);
+                uploader.uploadImage(createdImage.image(), data.width(), data.height(), data.layers(), mipLevels,
+                        data.pixels());
             }
         } catch (RuntimeException | Error failure) {
             if (createdDescriptor != null) {
@@ -125,18 +93,14 @@ public final class VulkanTexture extends VulkanSampledImage implements AutoClose
                 createdImage.destroy(device);
             }
             throw failure;
-        } finally {
-            if (pixels != null) {
-                memFree(pixels);
-            }
         }
 
         image = createdImage;
         sampler = createdSampler;
         descriptor = createdDescriptor;
-        width = first.width();
-        height = first.height();
-        layers = sources.size();
+        width = data.width();
+        height = data.height();
+        layers = data.layers();
     }
 
     @Override

@@ -8,6 +8,7 @@ import alkaline.renderer.image.RgbaImage;
 import alkaline.renderer.math.Mat4;
 import alkaline.renderer.vulkan.resource.PipelineSpec;
 import alkaline.renderer.vulkan.resource.RenderTargetFormat;
+import alkaline.renderer.vulkan.resource.TextureData;
 import alkaline.renderer.vulkan.resource.TextureOptions;
 import alkaline.renderer.vulkan.resource.VertexFormat;
 import alkaline.renderer.vulkan.resource.VulkanFrame;
@@ -224,6 +225,11 @@ public final class WorldRenderer implements AutoCloseable {
             }
             period = Math.max(1, total);
         }
+
+        /** The same animation, not yet shown. */
+        Animation copy() {
+            return new Animation(layer, firstFrameLayer, frames, ticks);
+        }
     }
 
     /** A decoded block texture: its square frames (one unless animated) and the .mcmeta sequence. */
@@ -252,21 +258,35 @@ public final class WorldRenderer implements AutoCloseable {
     }
 
     /**
-     * @param target offscreen color format to render into (targets must be created with depth), or null for
-     *               the main swapchain pass
+     * Block textures and the sky, decoded, laid out in their arrays and mipped by {@link #loadTextures}, which needs no
+     * Vulkan and runs on any thread. Immutable: several renderers may be built from one.
      */
-    public WorldRenderer(VulkanRenderer renderer, AssetSource assets, List<String> textureNames,
-                         RenderTargetFormat target) throws IOException {
-        this.renderer = Objects.requireNonNull(renderer, "renderer");
+    public static final class Textures {
+        private final TextureData blocks;
+        private final TextureData tiles;
+        private final Animation[] animations;
+        private final int[] frameTable;
+        private final SkyRenderer.Images sky;
+
+        private Textures(TextureData blocks, TextureData tiles, Animation[] animations, int[] frameTable,
+                         SkyRenderer.Images sky) {
+            this.blocks = blocks;
+            this.tiles = tiles;
+            this.animations = animations;
+            this.frameTable = frameTable;
+            this.sky = sky;
+        }
+    }
+
+    /** Reads, lays out and mips the block textures named by the palette, and the sky's; any thread. */
+    public static Textures loadTextures(AssetSource assets, List<String> textureNames) {
         // Texture i is a layer of the first array (its first frame), spare animation frames following, until the
         // array is full; later textures (connected-texture tiles, registered after every model texture) go to the
         // second array, unanimated. The frame table maps each texture to array << 16 | layer. Layers of an array
         // share one size, its largest frame (water and lava flow are 32 px); smaller art is scaled up by whole
         // texels, which samples identically.
-        List<BlockTexture> loaded = new ArrayList<>(textureNames.size());
-        for (String name : textureNames) {
-            loaded.add(loadBlockTexture(assets, name));
-        }
+        // Decoding is most of the work and each texture is independent; the list keeps the palette's order.
+        List<BlockTexture> loaded = textureNames.parallelStream().map(name -> loadBlockTexture(assets, name)).toList();
         int split = 0;
         int firstLayers = 0;
         while (split < loaded.size()) {
@@ -313,20 +333,45 @@ public final class WorldRenderer implements AutoCloseable {
         if (tileLayers.isEmpty()) {
             tileLayers.add(upscale(loadBlockTexture(null, "missingno").frames().getFirst(), tileSize));
         }
-        animations = animated.toArray(new Animation[0]);
-        frameTable = new int[256 + textureNames.size()];
+        int[] frameTable = new int[256 + textureNames.size()];
         for (int texture = 0; texture < textureNames.size(); texture++) {
             frameTable[256 + texture] = texture < split ? texture : 1 << 16 | (texture - split);
         }
+        return new Textures(
+                TextureData.array(layers, new TextureOptions(ImageSampling.NEAREST, true, true,
+                        Integer.numberOfTrailingZeros(layerSize) + 1)),
+                TextureData.array(tileLayers, new TextureOptions(ImageSampling.NEAREST, true, true,
+                        Integer.numberOfTrailingZeros(tileSize) + 1)),
+                animated.toArray(new Animation[0]), frameTable, SkyRenderer.loadImages(assets));
+    }
+
+    /** As {@link #WorldRenderer(VulkanRenderer, Textures, RenderTargetFormat)}, preparing the textures here. */
+    public WorldRenderer(VulkanRenderer renderer, AssetSource assets, List<String> textureNames,
+                         RenderTargetFormat target) {
+        this(renderer, loadTextures(assets, textureNames), target);
+    }
+
+    /**
+     * Uploads prepared textures and creates the pipelines; the render thread's share of building a world view.
+     *
+     * @param target offscreen color format to render into (targets must be created with depth), or null for
+     *               the main swapchain pass
+     */
+    public WorldRenderer(VulkanRenderer renderer, Textures textures, RenderTargetFormat target) {
+        this.renderer = Objects.requireNonNull(renderer, "renderer");
+        Objects.requireNonNull(textures, "textures");
+        animations = new Animation[textures.animations.length];
+        for (int index = 0; index < animations.length; index++) {
+            animations[index] = textures.animations[index].copy();
+        }
+        frameTable = textures.frameTable.clone();
         tableBytes = (frameTable.length * Integer.BYTES + 255) & ~255;
         // -Dalkaline.world.directDraws=true exercises the fallback for devices without multi-draw-indirect.
         indirect = renderer.supportsMultiDrawIndirect() && !Boolean.getBoolean("alkaline.world.directDraws");
         List<AutoCloseable> created = new ArrayList<>();
         try {
-            blocks = track(created, renderer.createTextureArray(layers,
-                    new TextureOptions(ImageSampling.NEAREST, true, true, Integer.numberOfTrailingZeros(layerSize) + 1)));
-            tiles = track(created, renderer.createTextureArray(tileLayers,
-                    new TextureOptions(ImageSampling.NEAREST, true, true, Integer.numberOfTrailingZeros(tileSize) + 1)));
+            blocks = track(created, renderer.createTexture(textures.blocks));
+            tiles = track(created, renderer.createTexture(textures.tiles));
             quadIndices = track(created, renderer.createStaticBuffer(quadIndexData()));
             opaque = track(created, renderer.createPipeline(terrainSpec("world_opaque.frag", target)
                     .depth(true, true).build()));
@@ -334,8 +379,10 @@ public final class WorldRenderer implements AutoCloseable {
                     .depth(true, true).build()));
             translucent = track(created, renderer.createPipeline(terrainSpec("world_translucent.frag", target)
                     .depth(true, false).blend(PipelineSpec.Blend.ALPHA).build()));
-            sky = track(created, new SkyRenderer(renderer, assets, target));
+            sky = track(created, new SkyRenderer(renderer, textures.sky, target));
             tableBuffer = track(created, renderer.createAddressableDeviceBuffer((long) tableBytes * TABLE_SLOTS));
+            pool = track(created, new GeometryPool(renderer, ChunkMesh.BYTES_PER_QUAD, GEOMETRY_PAGE_BYTES));
+            indexPool = track(created, new GeometryPool(renderer, INDEX_BYTES_PER_QUAD, INDEX_PAGE_BYTES));
         } catch (RuntimeException | Error failure) {
             for (int index = created.size() - 1; index >= 0; index--) {
                 try {
@@ -348,8 +395,6 @@ public final class WorldRenderer implements AutoCloseable {
             throw failure;
         }
         skyState.update(6000L, 0f, 0f, 0f, 0.8f, 0f, 0f, 1f, 80.0, 8, Sky.Medium.AIR);
-        pool = new GeometryPool(renderer, ChunkMesh.BYTES_PER_QUAD, GEOMETRY_PAGE_BYTES);
-        indexPool = new GeometryPool(renderer, INDEX_BYTES_PER_QUAD, INDEX_PAGE_BYTES);
     }
 
     private static <T extends AutoCloseable> T track(List<AutoCloseable> created, T resource) {
@@ -423,9 +468,15 @@ public final class WorldRenderer implements AutoCloseable {
         int factor = size / image.width();
         byte[] source = image.copyPixels();
         byte[] target = new byte[size * size * 4];
-        for (int y = 0; y < size; y++) {
+        int row = size * 4;
+        for (int y = 0; y < image.height(); y++) {
+            // Widen one source row, then repeat it factor times.
+            int first = y * factor * row;
             for (int x = 0; x < size; x++) {
-                System.arraycopy(source, ((y / factor) * image.width() + x / factor) * 4, target, (y * size + x) * 4, 4);
+                System.arraycopy(source, (y * image.width() + x / factor) * 4, target, first + x * 4, 4);
+            }
+            for (int copy = 1; copy < factor; copy++) {
+                System.arraycopy(target, first, target, first + copy * row, row);
             }
         }
         return new RgbaImage(size, size, target);

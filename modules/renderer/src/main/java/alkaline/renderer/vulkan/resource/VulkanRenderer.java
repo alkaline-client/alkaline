@@ -594,25 +594,33 @@ public final class VulkanRenderer implements Renderer {
 
     /** Creates an immutable sampled texture outside frame recording. */
     public VulkanTexture createTexture(RgbaImage source, TextureOptions options) {
-        Objects.requireNonNull(source, "source");
-        return createTextureInternal(List.of(source), false, options);
+        long start = System.nanoTime();
+        return createTexture(TextureData.of(source, options), start);
     }
 
     /** Creates a same-size 2D array texture (sampler2DArray) whose layers follow list order. */
     public VulkanTexture createTextureArray(List<RgbaImage> layers, TextureOptions options) {
-        Objects.requireNonNull(layers, "layers");
-        return createTextureInternal(List.copyOf(layers), true, options);
+        long start = System.nanoTime();
+        return createTexture(TextureData.array(layers, options), start);
     }
 
-    private VulkanTexture createTextureInternal(List<RgbaImage> layers, boolean array, TextureOptions options) {
+    /**
+     * Creates an immutable sampled texture from pixels prepared on any thread, outside frame recording. Only the
+     * image, its upload and its descriptor are made here; decoding and mip generation belong to the caller.
+     */
+    public VulkanTexture createTexture(TextureData data) {
+        return createTexture(data, System.nanoTime());
+    }
+
+    /** {@code start}: when this thread began on the texture, so {@link #textureReport} counts any CPU preparation. */
+    private VulkanTexture createTexture(TextureData data, long start) {
         requireOwnerAndOpen();
-        Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(data, "data");
         requireOutsideFrame("Texture uploads");
-        long start = System.nanoTime();
         VulkanTexture texture = new VulkanTexture(this, context.physicalDevice(), context.device(), textureDescriptors,
-                graphicsPipeline.textureDescriptorSetLayout(), layers, array, options, uploader);
+                graphicsPipeline.textureDescriptorSetLayout(), data, uploader);
         long took = System.nanoTime() - start;
-        int small = (long) texture.width() * texture.height() * 4 * layers.size() <= 1L << 20 ? 1 : 0;
+        int small = data.levelZeroBytes() <= 1L << 20 ? 1 : 0;
         textureCount[small]++;
         textureNanos[small] += took;
         textureMaxNanos[small] = Math.max(textureMaxNanos[small], took);

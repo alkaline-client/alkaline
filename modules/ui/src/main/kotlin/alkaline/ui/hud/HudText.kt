@@ -15,6 +15,30 @@ private val ChatColors = longArrayOf(
     0xFF555555, 0xFF5555FF, 0xFF55FF55, 0xFF55FFFF, 0xFFFF5555, 0xFFFF55FF, 0xFFFFFF55, 0xFFFFFFFF,
 )
 
+/**
+ * The resource packs' text colors (OptiFine's text.code.0-15 and text.xpbar from color.properties), used in place
+ * of the vanilla ones when set. The game sets them when its packs load.
+ */
+object HudTextColors {
+    @Volatile private var colors: alkaline.renderer.world.CustomColors = alkaline.renderer.world.CustomColors.NONE
+
+    fun use(value: alkaline.renderer.world.CustomColors) {
+        colors = value
+    }
+
+    /** The ARGB color of § code [index] (0-15). */
+    fun code(index: Int): Long {
+        val custom = colors.textCode(index)
+        return if (custom >= 0) 0xFF000000 or custom.toLong() else ChatColors[index]
+    }
+
+    /** The experience level number's ARGB color. */
+    fun xpBar(): Long {
+        val custom = colors.xpBarText()
+        return if (custom >= 0) 0xFF000000 or custom.toLong() else 0xFF80FF20
+    }
+}
+
 /** Removes § formatting codes. */
 fun String.stripFormatting(): String = replace(Regex("§."), "")
 
@@ -56,7 +80,7 @@ fun formatted(text: String, base: Color): AnnotatedString = buildAnnotatedString
             val colorIndex = "0123456789abcdef".indexOf(code)
             when {
                 colorIndex >= 0 -> {
-                    color = Color(ChatColors[colorIndex])
+                    color = Color(HudTextColors.code(colorIndex))
                     bold = false; italic = false; underline = false; strike = false
                 }
                 code == 'l' -> bold = true

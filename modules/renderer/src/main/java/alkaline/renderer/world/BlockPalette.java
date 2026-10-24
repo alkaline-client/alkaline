@@ -468,7 +468,7 @@ public final class BlockPalette {
                     yield variant == 2 || variant == 3 ? grass : NO_TINT;
                 }
                 case LILY_PAD -> lilyPad;
-                case REDSTONE -> redstone(meta);
+                case REDSTONE -> colors.redstone(meta) >= 0 ? colors.redstone(meta) : redstone(meta);
                 case STEM -> (meta & 7) * 32 << 16 | (255 - (meta & 7) * 8) << 8 | (meta & 7) * 4;
             };
         }

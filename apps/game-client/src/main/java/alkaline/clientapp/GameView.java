@@ -33,6 +33,7 @@ import alkaline.renderer.vulkan.world.SkyRenderer;
 import alkaline.renderer.vulkan.world.WorldRenderer;
 import alkaline.renderer.world.BlockPalette;
 import alkaline.renderer.world.BlockSource;
+import alkaline.renderer.world.CustomColors;
 import alkaline.renderer.world.Lightmap;
 import alkaline.renderer.world.Sky;
 import alkaline.renderer.world.vanilla.Blocks189;
@@ -105,6 +106,23 @@ final class GameView implements MenuBackground {
     private float previousEquipped;
     private ItemStack shown;
     private int shownSlot = -1;
+    /** The world's biomes for the custom sky, fog and underwater colors' smoothing. */
+    private final CustomColors.Biomes skyBiomes = new CustomColors.Biomes() {
+        @Override
+        public int biome(int x, int z) {
+            return session.world().biome(x, z);
+        }
+
+        @Override
+        public float temperature(int biome, int x, int y, int z) {
+            return Biomes189.temperature(biome, x, y, z);
+        }
+
+        @Override
+        public float rainfall(int biome) {
+            return Biomes189.rainfall(biome);
+        }
+    };
     private float zoomFactor = 1f;
     private boolean smoothZoom = true;
     private FirstPersonItem.Style handStyle = FirstPersonItem.Style.VANILLA;
@@ -118,6 +136,7 @@ final class GameView implements MenuBackground {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.assets = assets;
         this.palette = Objects.requireNonNull(palette, "palette");
+        alkaline.ui.hud.HudTextColors.INSTANCE.use(palette.customColors());
         this.play = Objects.requireNonNull(play, "play");
         this.session = play.session();
         this.player = play.player();
@@ -131,6 +150,7 @@ final class GameView implements MenuBackground {
             throw failure;
         }
         entities = new EntityView(renderer, assets, SCENE_FORMAT, skins, catalog);
+        entities.customColors(palette.customColors());
         CloudRenderer createdClouds = null;
         try {
             createdClouds = new CloudRenderer(renderer, assets, SCENE_FORMAT);
@@ -154,6 +174,13 @@ final class GameView implements MenuBackground {
             }
         });
         effects.water(this::waterParticleTint);
+        effects.redstone(this::redstoneParticleTint);
+    }
+
+    /** CustomColors.updateReddustFX: the pack's wire color for the power of the wire there (15 off a wire), or -1. */
+    private int redstoneParticleTint(double x, double y, double z) {
+        int state = session.world().state((int) Math.floor(x), (int) Math.floor(y), (int) Math.floor(z));
+        return palette.customColors().redstone(state >> 4 == 55 ? state & 15 : 15);
     }
 
     /** CustomColors.updateWaterFX for a water particle spawned at a point: the pack's water color there, or -1. */
@@ -500,6 +527,10 @@ final class GameView implements MenuBackground {
         sky.customColors = palette.customColors();
         sky.biome = biome;
         sky.feetY = feetY;
+        sky.biomes = skyBiomes;
+        sky.feetX = feetX;
+        sky.feetZ = feetZ;
+        sky.millis = System.currentTimeMillis();
         sky.rainfall = Biomes189.rainfall(biome);
         sky.flat = play.flat();
         Sky.Medium medium = medium(current, eyeX, eyeY, eyeZ);

@@ -41,6 +41,12 @@ public final class ParticleEffects {
         int tint(double x, double y, double z);
     }
 
+    /** The pack's color for redstone dust at a spawn point. */
+    public interface Redstone {
+        /** CustomColors.updateReddustFX's color (0xRRGGBB) for dust spawned there, or -1 for the packet's own. */
+        int tint(double x, double y, double z);
+    }
+
     private static final int EMITTER_TICKS = 3;
     private static final int MAX_EMITTERS = 64;
 
@@ -50,6 +56,7 @@ public final class ParticleEffects {
     private final Random rainRandom = new Random();
     private Level level = Level.ALL;
     private Water water = (x, y, z) -> -1;
+    private Redstone redstone = (x, y, z) -> -1;
     private double cameraX;
     private double cameraY;
     private double cameraZ;
@@ -79,6 +86,11 @@ public final class ParticleEffects {
      */
     public void water(Water value) {
         water = Objects.requireNonNull(value, "value");
+    }
+
+    /** Where redstone dust takes its color from (RenderGlobal.spawnEntityFX calls updateReddustFX for it). */
+    public void redstone(Redstone value) {
+        redstone = Objects.requireNonNull(value, "value");
     }
 
     /** The viewer's position, for spawnEntityFX's range check. */
@@ -136,6 +148,11 @@ public final class ParticleEffects {
             float shade = id == 30 ? (float) (random.nextDouble() * 0.4 + 0.6) : 1f;
             color = VanillaParticles.argb(red * shade, (float) vy * shade, (float) vz * shade, alpha);
             vx = vy = vz = 0;
+            int custom = id == 30 ? redstone.tint(x, y, z) : -1;
+            if (custom >= 0) {
+                // OptiFine replaces the whole color, shade included.
+                color = 0xFF000000 | custom;
+            }
         } else if (id == 23) {
             color = VanillaParticles.noteColor(vx);
             vx = vy = vz = 0;

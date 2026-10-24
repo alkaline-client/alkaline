@@ -212,9 +212,43 @@ class CustomSkyTest {
     @Test
     void heightsGiveFullBrightnessInsideTheRange() {
         CustomSky.Layer layer = daytime("heights", "10-20");
-        assertEquals(1f, layer.position(15), DELTA);
-        assertEquals(0f, layer.position(5), DELTA);
-        assertEquals(1f, daytime().position(5), DELTA);
+        assertEquals(1f, layer.position(15, 1), DELTA);
+        assertEquals(0f, layer.position(5, 1), DELTA);
+        assertEquals(1f, daytime().position(5, 1), DELTA);
+        assertTrue(layer.positional());
+        assertFalse(daytime().positional());
+    }
+
+    @Test
+    void biomesNameTheBiomesTheViewerMustStandIn() {
+        CustomSky.Layer layer = daytime("biomes", "desert DesertHills", "heights", "60-80");
+        assertEquals(1f, layer.position(64, 2), DELTA);
+        assertEquals(1f, layer.position(64, 17), DELTA);
+        assertEquals(0f, layer.position(64, 1), DELTA);
+        assertEquals(0f, layer.position(90, 2), DELTA);
+        CustomSky.Layer others = daytime("biomes", "!desert");
+        assertEquals(0f, others.position(64, 2), DELTA);
+        assertEquals(1f, others.position(64, 1), DELTA);
+    }
+
+    @Test
+    void transitionDefaultsToOneSecond() {
+        assertEquals(1f, daytime("biomes", "plains").transition(), DELTA);
+        assertEquals(5f, daytime("biomes", "plains", "transition", "5").transition(), DELTA);
+    }
+
+    @Test
+    void smoothingFollowsOptiFinesCurve() {
+        // A 50 ms step of a 1 s fade: 0.05 * (4.61 - 1 / (0.13 + 20 / 10)).
+        assertEquals(0.05f * (4.61f - 1f / 2.13f), CustomSky.smooth(0f, 1f, 0.05f, 1f), 1e-6f);
+        assertEquals(1f, CustomSky.smooth(0f, 1f, 2f, 1f), DELTA);
+        assertEquals(0.3f, CustomSky.smooth(0.3f, 1f, 0f, 1f), DELTA);
+        assertEquals(1f, CustomSky.smooth(0f, 1f, 0.05f, 0f), DELTA);
+        float value = 0f;
+        for (int frame = 0; frame < 60; frame++) {
+            value = CustomSky.smooth(value, 1f, 1f / 60f, 1f);
+        }
+        assertTrue(value > 0.95f && value < 1f, "about one second to fade in: " + value);
     }
 
     @Test

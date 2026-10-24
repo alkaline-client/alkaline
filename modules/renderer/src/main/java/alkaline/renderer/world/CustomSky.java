@@ -1,6 +1,7 @@
 package alkaline.renderer.world;
 
 import alkaline.renderer.asset.AssetSource;
+import alkaline.renderer.world.vanilla.BiomeNames189;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -14,7 +15,8 @@ import java.util.Properties;
  * OptiFine / MCPatcher custom sky for the overworld, as OptiFine for 1.8.9 reads it: {@code sky/world0/sky<N>.properties}
  * layers in number order, each a skybox texture faded in and out over the day (all three of startFadeIn, endFadeIn
  * and endFadeOut are required, and the four phases must add up to 24 hours), shown on chosen days and heights and in
- * chosen weather, blended over the sky below it and turned with the sun.
+ * chosen weather, in chosen biomes and at chosen heights (faded over {@code transition} seconds), blended over the sky
+ * below it and turned with the sun.
  */
 public final class CustomSky {
     public static final CustomSky NONE = new CustomSky(List.of());
@@ -28,12 +30,14 @@ public final class CustomSky {
      *
      * @param source  the texture as a full asset path
      * @param axis    the rotation axis in the frame the layers draw in (after the sky's -90 degree turn)
-     * @param heights inclusive ranges of the eye's block y, or empty for any
-     * @param days    inclusive ranges of days within {@code daysLoop}, or empty for every day
+     * @param heights    inclusive ranges of the viewer's block y, or empty for any
+     * @param biomes     the biome set (BiomeNames189 bits) the viewer must stand in, or null for any
+     * @param transition seconds the biomes and heights conditions take to fade the layer in or out
+     * @param days       inclusive ranges of days within {@code daysLoop}, or empty for every day
      */
     public record Layer(String source, int startFadeIn, int endFadeIn, int startFadeOut, int endFadeOut, Blend blend,
                         boolean rotate, float speed, float[] axis, boolean clear, boolean rain, boolean thunder,
-                        List<int[]> heights, List<int[]> days, int daysLoop) {
+                        List<int[]> heights, long[] biomes, float transition, List<int[]> days, int daysLoop) {
         /** CustomSkyLayer.isActive: not between fading out and fading in, and on one of its days. */
         public boolean active(long worldTime) {
             int time = (int) Math.floorMod(worldTime, 24000L);
@@ -83,8 +87,19 @@ public final class CustomSky {
             return Math.max(0f, Math.min(1f, strength));
         }
 
-        /** The heights condition for the eye's block y. */
-        public float position(int blockY) {
+        /** Whether the layer has biomes or heights, whose brightness is smoothed over {@code transition}. */
+        public boolean positional() {
+            return biomes != null || !heights.isEmpty();
+        }
+
+        /**
+         * getPositionBrightnessRaw for the viewer's Entity.getPosition (block y of feet + 0.5) and the biome there,
+         * before smoothing.
+         */
+        public float position(int blockY, int biome) {
+            if (biomes != null && !BiomeNames189.contains(biomes, biome)) {
+                return 0f;
+            }
             return heights.isEmpty() || inRanges(heights, blockY) ? 1f : 0f;
         }
 
@@ -110,6 +125,24 @@ public final class CustomSky {
             }
             return false;
         }
+    }
+
+    /**
+     * SmoothFloat.getSmoothValue: moves {@code previous} toward {@code value} over {@code fadeSeconds}, by a share of
+     * the gap that grows with the time since the last step; jumps there when the step is longer than the fade.
+     */
+    public static float smooth(float previous, float value, float seconds, float fadeSeconds) {
+        if (seconds <= 0f) {
+            return previous;
+        }
+        float gap = value - previous;
+        if (fadeSeconds > 0f && seconds < fadeSeconds && Math.abs(gap) > 1.0E-6F) {
+            float steps = fadeSeconds / seconds;
+            float scale = 4.61F - 1.0F / (0.13F + steps / 10.0F);
+            float share = Math.max(0f, Math.min(1f, seconds / fadeSeconds * scale));
+            return previous + gap * share;
+        }
+        return value;
     }
 
     private final List<Layer> layers;
@@ -175,6 +208,8 @@ public final class CustomSky {
                 !"false".equalsIgnoreCase(properties.getProperty("rotate", "true").trim()), speed,
                 axis(properties.getProperty("axis")), weather.contains("clear"), weather.contains("rain"),
                 weather.contains("thunder"), ConnectedTextures.ranges(properties.getProperty("heights", "")),
+                BiomeNames189.parse(properties.getProperty("biomes")),
+                parseFloat(properties.getProperty("transition"), 1f),
                 ConnectedTextures.ranges(properties.getProperty("days", "")), daysLoop);
     }
 

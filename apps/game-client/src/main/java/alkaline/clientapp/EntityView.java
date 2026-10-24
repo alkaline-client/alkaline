@@ -128,6 +128,8 @@ final class EntityView implements AutoCloseable {
         }
     }
 
+    private alkaline.renderer.world.CustomColors customColors = alkaline.renderer.world.CustomColors.NONE;
+
     EntityView(VulkanRenderer renderer, AssetSource assets, RenderTargetFormat target, Skins skins,
                ItemCatalog catalog) {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
@@ -154,6 +156,11 @@ final class EntityView implements AutoCloseable {
         armorOuter = new ModelPose(EntityModels.model(EntityModels.Kind.ARMOR_OUTER));
         armorInner = new ModelPose(EntityModels.model(EntityModels.Kind.ARMOR_INNER));
         handPose = new ModelPose(EntityModels.model(EntityModels.Kind.PLAYER));
+    }
+
+    /** The packs' custom colors (OptiFine sheep.<dye> fleece colors). */
+    void customColors(alkaline.renderer.world.CustomColors colors) {
+        customColors = Objects.requireNonNull(colors, "colors");
     }
 
     // ---- assets -------------------------------------------------------------------------------------------
@@ -548,7 +555,8 @@ final class EntityView implements AutoCloseable {
                 if ((fleece & 16) == 0) {
                     extraKind = EntityModels.Kind.SHEEP_WOOL;
                     extraTexture = "entity/sheep/sheep_fur";
-                    extraTint = fleeceColor(fleece & 15);
+                    int custom = customColors.sheep(fleece & 15);
+                    extraTint = custom >= 0 ? 0xFF000000 | custom : fleeceColor(fleece & 15);
                 }
             }
             case EntityTypes.CHICKEN -> {

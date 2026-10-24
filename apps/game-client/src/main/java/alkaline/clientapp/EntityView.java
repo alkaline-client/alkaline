@@ -385,6 +385,7 @@ final class EntityView implements AutoCloseable {
             }
         }
         models.flush();
+        drawFramedMaps(frame, viewProjection);
         renderLabels(frame, entities, viewProjection, cameraYaw, cameraPitch, partialTick, cameraX, cameraY, cameraZ);
     }
 
@@ -1369,32 +1370,52 @@ final class EntityView implements AutoCloseable {
         return 0xFF000000 | red << 16 | green << 8 | blue;
     }
 
+    /** Maps in item frames waiting for the end of the entity pass: matrix (map pixels to view), id and tint. */
+    private float[][] framedMatrices = new float[8][16];
+    private int[] framedIds = new int[8];
+    private int[] framedColors = new int[8];
+    private int framed;
+
     /**
      * RenderItemFrame's map: the bare map (and the holder's own marker) one block square on the frame's face.
      * {@code stand} is the frame's matrix at its hanging block's center, turned to face out; the rotation is the
-     * frame's, in quarter turns for maps. Call between {@link #beginFramedMaps} and {@link #endFramedMaps}.
+     * frame's raw rotation byte (maps turn in quarter turns). The map is queued: it draws after the models, which
+     * write the depth its quad is tested against, in {@link #drawFramedMaps}.
      */
     void framedMap(float[] stand, int mapId, int rotation, int light) {
         if (mapStore == null) {
             return;
         }
-        System.arraycopy(stand, 0, mapSheet, 0, 16);
-        Mat4.translate(mapSheet, 0f, 0f, 0.4375f, mapSheet);
-        Mat4.rotate(mapSheet, (float) Math.toRadians(rotation % 4 * 2 * 360.0F / 8.0F), 0f, 0f, 1f, mapSheet);
-        Mat4.rotate(mapSheet, (float) Math.PI, 0f, 0f, 1f, mapSheet);
-        Mat4.scale(mapSheet, 0.0078125f, 0.0078125f, 0.0078125f, mapSheet);
-        Mat4.translate(mapSheet, -64f, -64f, 0f, mapSheet);
-        Mat4.translate(mapSheet, 0f, 0f, -1f, mapSheet);
-        mapView.drawFramed(quads, mapStore, mapId, mapSheet, 0xFF000000 | light);
+        if (framed == framedIds.length) {
+            framedMatrices = java.util.Arrays.copyOf(framedMatrices, framed * 2);
+            for (int index = framed; index < framedMatrices.length; index++) {
+                framedMatrices[index] = new float[16];
+            }
+            framedIds = java.util.Arrays.copyOf(framedIds, framed * 2);
+            framedColors = java.util.Arrays.copyOf(framedColors, framed * 2);
+        }
+        float[] matrix = framedMatrices[framed];
+        System.arraycopy(stand, 0, matrix, 0, 16);
+        Mat4.translate(matrix, 0f, 0f, 0.4375f, matrix);
+        Mat4.rotate(matrix, (float) Math.toRadians(rotation % 4 * 2 * 360.0F / 8.0F), 0f, 0f, 1f, matrix);
+        Mat4.rotate(matrix, (float) Math.PI, 0f, 0f, 1f, matrix);
+        Mat4.scale(matrix, 0.0078125f, 0.0078125f, 0.0078125f, matrix);
+        Mat4.translate(matrix, -64f, -64f, 0f, matrix);
+        Mat4.translate(matrix, 0f, 0f, -1f, matrix);
+        framedIds[framed] = mapId;
+        framedColors[framed] = 0xFF000000 | light; // lighting is off in frames: only the world's light shades them
+        framed++;
     }
 
-    /** Starts the maps in frames of a world pass. */
-    void beginFramedMaps(VulkanFrame frame, float[] viewProjection) {
-        quads.begin(frame, viewProjection);
-    }
-
-    void endFramedMaps() {
-        quads.flush();
+    private void drawFramedMaps(VulkanFrame frame, float[] viewProjection) {
+        if (framed > 0) {
+            quads.begin(frame, viewProjection);
+            for (int index = 0; index < framed; index++) {
+                mapView.drawFramed(quads, mapStore, framedIds[index], framedMatrices[index], framedColors[index]);
+            }
+            quads.flush();
+            framed = 0;
+        }
     }
 
     /**

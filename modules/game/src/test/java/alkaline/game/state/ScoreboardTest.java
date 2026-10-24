@@ -17,7 +17,7 @@ class ScoreboardTest {
         board.apply(new ServerSession.UpdateScore("Red", 0, "game", 3));
         board.apply(new ServerSession.UpdateScore("Blue", 0, "game", 7));
         board.apply(new ServerSession.UpdateScore("#hidden", 0, "game", 9));
-        board.apply(new ServerSession.Team("t1", 0, "", "§c", " ✔", 12, List.of("Red")));
+        board.apply(new ServerSession.Team("t1", 0, "", "§c", " ✔", 12, List.of("Red"), 0, "always"));
         Scoreboard.Sidebar sidebar = board.sidebar();
         assertEquals("§eBEDWARS", sidebar.title());
         assertEquals(List.of(new Scoreboard.Line("Blue", 7), new Scoreboard.Line("§cRed ✔", 3)), sidebar.lines());

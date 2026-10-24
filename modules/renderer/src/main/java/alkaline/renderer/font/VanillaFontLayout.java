@@ -24,6 +24,11 @@ public final class VanillaFontLayout {
     private VanillaFontLayout() {
     }
 
+    /** The character at an ASCII atlas cell. */
+    public static char legacyCharacter(int index) {
+        return LEGACY_CHARACTERS.charAt(index);
+    }
+
     public static int atlasIndex(char character) {
         return LEGACY_CHARACTERS.indexOf(character);
     }

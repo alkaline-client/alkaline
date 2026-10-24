@@ -12,12 +12,14 @@ import alkaline.game.inventory.ItemStack;
 import alkaline.game.inventory.Window;
 import alkaline.game.inventory.WindowInput;
 import alkaline.game.net.ServerSession;
+import alkaline.game.player.AttackCooldown;
 import alkaline.game.player.BlockTarget;
 import alkaline.game.player.Interactions;
 import alkaline.game.player.LocalPlayer;
 import alkaline.game.state.PlayerList;
 import alkaline.game.state.Scoreboard;
 import alkaline.game.world.ClientWorld;
+import alkaline.game.world.MapStore;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.LinkedHashMap;
@@ -61,6 +63,11 @@ public final class PlaySession implements AutoCloseable {
         animation.attach(entities);
     }
     private final EntityPicker picker = new EntityPicker();
+    /** Minecraft.leftClickCounter. */
+    private final AttackCooldown cooldown = new AttackCooldown();
+    private final MapStore maps = new MapStore();
+    /** The living entity under the crosshair within reach (RenderManager.pointedEntity), or null. */
+    private Entity pointed;
     private final Inventory inventory = new Inventory();
     /** GuiContainer's input for the open screen's container; its clicks apply here and go to the server. */
     private WindowInput windowInput = new WindowInput(inventory, this::click);
@@ -165,6 +172,21 @@ public final class PlaySession implements AutoCloseable {
         return scoreboard;
     }
 
+    /** The maps the server sent. */
+    MapStore maps() {
+        return maps;
+    }
+
+    /** The entity the crosshair is on, within reach, or null: it shows its custom name tag. */
+    Entity pointed() {
+        return pointed;
+    }
+
+    /** Minecraft.leftClickCounter, for the digging that holds the attack key. */
+    AttackCooldown cooldown() {
+        return cooldown;
+    }
+
     Map<Integer, Effect> effects() {
         return effects;
     }
@@ -176,6 +198,16 @@ public final class PlaySession implements AutoCloseable {
     /** Bumped whenever a chat line arrives. */
     int chatVersion() {
         return chatVersion;
+    }
+
+    /** The local player's account name, which scoreboard teams know it by. */
+    String name() {
+        return session.profile().username();
+    }
+
+    /** The id of the entity the player rides, or -1. */
+    int vehicle() {
+        return vehicle;
     }
 
     UUID self() {
@@ -263,7 +295,7 @@ public final class PlaySession implements AutoCloseable {
      * within reach. Sprinting into a player slows the attacker and ends the sprint, as vanilla's client does.
      */
     void attack() {
-        if (!spawned) {
+        if (!spawned || !cooldown.ready()) {
             return;
         }
         // EntityPlayerSP.swingItem sends the animation even when the swing is already under way.
@@ -273,6 +305,11 @@ public final class PlaySession implements AutoCloseable {
         ClientWorld world = session.world();
         Entity target = picker.pick(entities, world::state, player.x, player.eyeY(1f), player.z, player.yaw,
                 player.pitch, reach);
+        if (target == null && BlockTarget.pick(world::state, player.x, player.eyeY(1f), player.z, player.yaw,
+                player.pitch, gameMode == 1 ? 5.0 : 4.5) == null) {
+            // clickMouse's miss: nothing to attack or dig, so survival waits ten ticks before the next click acts.
+            cooldown.missed(gameMode == 1);
+        }
         if (target == null || gameMode == 3) {
             return;
         }
@@ -667,6 +704,7 @@ public final class PlaySession implements AutoCloseable {
         if (useDelay > 0) {
             useDelay--;
         }
+        cooldown.tick(!controls);
         boolean useHeld = controls && held(settings.get(ClientSettings.KEY_USE), keys, buttons);
         if (player.usingItem) {
             // Minecraft.runTick: letting go of the use key stops using; a finished use ends by itself.
@@ -697,7 +735,12 @@ public final class PlaySession implements AutoCloseable {
         ClientWorld world = session.world();
         boolean loaded = world.isLoaded(Math.floorDiv((int) Math.floor(player.x), 16),
                 Math.floorDiv((int) Math.floor(player.z), 16));
+        player.border = world.border();
         player.tick(input, world::state, loaded);
+        pointed = gameMode == 3 ? null : picker.pick(entities, world::state, player.x, player.eyeY(1f), player.z,
+                player.yaw, player.pitch, gameMode == 1 ? 6.0 : 3.0);
+        // sendClickBlockToController: the counter clears whenever the attack key is up.
+        cooldown.sustain(controls && held(settings.get(ClientSettings.KEY_ATTACK), keys, buttons));
         if (sounds != null) {
             sounds.tick(this);
         }
@@ -743,6 +786,14 @@ public final class PlaySession implements AutoCloseable {
             if (target != null && view != null) {
                 view.critical(target, animation.animation() == 5);
             }
+            return;
+        }
+        if (event instanceof ServerSession.MapData map) {
+            maps.apply(map);
+            return;
+        }
+        if (event instanceof ServerSession.WorldBorder border) {
+            session.world().border().apply(border);
             return;
         }
         if (entities.apply(event) || players.apply(event) || scoreboard.apply(event)) {
@@ -979,6 +1030,8 @@ public final class PlaySession implements AutoCloseable {
         thunder = 0.0F;
         entities.clear();
         signs.clear();
+        maps.clear();
+        pointed = null;
         vehicle = -1;
         player.usingItem = false;
         if (view != null) {

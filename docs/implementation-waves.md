@@ -34,13 +34,14 @@ Prompt style follows Anthropic's guidance for Claude 5.5 models:
 | Model and effort | Use for |
 |---|---|
 | Opus 5.5 High | New subsystems, Vulkan or shader work, exact-vanilla ports with hard math, and the performance pass |
-| Opus 5.5 Medium | Hard but well-specified work, all frontend work, and the integrators (conflict resolution needs judgment) |
+| Opus 5.5 Medium | Hard but well-specified work, Compose UI work, and the integrators (conflict resolution needs judgment) |
 | Sonnet 5.5 Medium | Well-specified features in one area, and mechanical ports with a clear reference |
 | Sonnet 5.5 High | Non-UI features across several files or modules |
 | Haiku 5.5 High | Tests, docs and small isolated changes |
 
-**All frontend work goes to Opus 5.5**, whatever its size: Compose screens, HUD elements, in-game overlays and
-prompts. Sonnet's UI work needed rework, and design quality there matters more than the cost.
+**Compose UI work goes to Opus 5.5**: code that writes Compose screens, HUD elements, overlays or prompts. Sonnet's
+Compose work needed rework, and design quality there matters more than the cost. Everything else, including
+in-world rendering such as name tags, stays on the tier listed.
 | Haiku 5.5 Extra (xhigh) | Small vanilla-rule fixes that need careful reading |
 
 If a cheaper session stalls or reports a check it could not run, rerun the task one tier up with its handoff note
@@ -570,7 +571,7 @@ Read docs/agent-brief.md first.
 
 | Task | Model | Owns | Port |
 |---|---|---|---|
-| 3A Name tags and scoreboard | Opus Medium | new name-tag and scoreboard files; the label hook in `EntityView` | 25651 |
+| 3A Name tags and scoreboard | Sonnet High | new name-tag and scoreboard files; the label hook in `EntityView` | 25651 |
 | 3B OptiFine extras | Opus Medium | new random-entity, animation and emissive files; texture lookups | 25652 |
 | 3C Sky and color leftovers | Sonnet Medium | `CustomSky`, `SkyRenderer`, `CustomColors` | 25653 |
 | 3D Maps and world border | Sonnet Medium | new map and border files | 25654 |
@@ -578,10 +579,11 @@ Read docs/agent-brief.md first.
 
 The integrator merges in this order: 3C, 3D, 3B, 3A. 3E runs on the merged main and is then merged on its own.
 
-### 3A Name tags and scoreboard (Opus 5.5 Medium)
+### 3A Name tags and scoreboard (Sonnet 5.5 High)
 
 The sidebar scoreboard already exists (`PlaySession` and `HudBridge` pass `sidebarTitle` and `sidebar`); check it,
-then focus on name tags, team formatting and the below-name score.
+then focus on name tags, team formatting and the below-name score. Name tags are drawn in the world, not in Compose,
+so this stays on Sonnet; if the sidebar's Compose element needs changes, hand that part to Opus.
 
 ```text
 Read docs/agent-brief.md first and follow it. Task id 3A, branch wave3/3A, server port 25651.

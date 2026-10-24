@@ -181,8 +181,8 @@ public final class PipelineSpec {
 
         /** Declares {@code count} combined image samplers, one per set (0..count-1), each at binding 0. */
         public Builder sampledImages(int count) {
-            if (count < 0 || count > 2) {
-                throw new IllegalArgumentException("Pipelines sample at most two images.");
+            if (count < 0 || count > 3) {
+                throw new IllegalArgumentException("Pipelines sample at most three images.");
             }
             sampledImages = count;
             return this;

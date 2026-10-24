@@ -42,19 +42,24 @@ public final class ModelRenderer implements AutoCloseable {
     private static final int MAX_INSTANCES = 16_384;
 
     private final VulkanRenderer renderer;
-    private static final int GLINT_PUSH_BYTES = 96;
+    private static final int GLINT_PUSH_BYTES = 128;
 
     private final VulkanPipeline pipeline;
-    /** Glint on the color attachment's UNORM alias (vanilla's blend), and the linear fallback without one. */
-    private final VulkanPipeline glintPipeline;
-    private final VulkanPipeline glintLinearPipeline;
-    private final boolean[] instanceGlint = new boolean[MAX_INSTANCES];
+    private final RenderTargetFormat target;
+    /**
+     * Glint pipelines by blend: [0] on the color attachment's UNORM alias (vanilla's blend), [1] the linear
+     * fallback without one. Vanilla's are built up front, a pack's other blends by {@link #prepare}.
+     */
+    private final java.util.EnumMap<PipelineSpec.Blend, VulkanPipeline[]> glintPipelines =
+            new java.util.EnumMap<>(PipelineSpec.Blend.class);
+    private final GlintEffect[] instanceGlint = new GlintEffect[MAX_INSTANCES];
+    private final float[] instanceGlintTime = new float[MAX_INSTANCES];
+    /** This frame's distinct glint effects; a glinted record's sort key carries its index here. */
+    private final List<GlintEffect> frameGlints = new ArrayList<>();
+    /** Distinct glint effects one frame draws; the sort key has 7 bits for them. */
+    private static final int MAX_FRAME_GLINTS = 127;
     private VulkanSampledImage glintTexture;
-    private float glintScrollA;
-    private float glintScrollB;
-    /** Vanilla's item sprites are 16 px in its 512x512 block atlas (logged as such by unmodded 1.8.9). */
-    private static final float GLINT_SPRITE_SPAN = 16f / 512f;
-    private static final float[] GLINT_ANGLES = {(float) Math.toRadians(-50), (float) Math.toRadians(10)};
+    private long glintTime;
     private final ByteBuffer push;
     private final float[] matrices = new float[CuboidModel.MAX_PARTS * PoseMath.FLOATS_PER_PART];
     private final List<GpuModel> models = new ArrayList<>();
@@ -89,19 +94,9 @@ public final class ModelRenderer implements AutoCloseable {
                 .blend(PipelineSpec.Blend.ALPHA)
                 .pushConstants(PUSH_BYTES)
                 .build());
-        // Glint redraws the same geometry with the same transform: depth matches, so test without writing.
-        glintPipeline = renderer.createPipeline(modelSpec("model_glint.vert", "model_glint.frag", target)
-                .depth(true, false)
-                .blend(PipelineSpec.Blend.SOURCE_SQUARED)
-                .pushConstants(GLINT_PUSH_BYTES)
-                .gammaSpace()
-                .build());
-        glintLinearPipeline = renderer.createPipeline(modelSpec("model_glint.vert", "model_glint.frag", target)
-                .depth(true, false)
-                .blend(PipelineSpec.Blend.SOURCE_SQUARED)
-                .pushConstants(GLINT_PUSH_BYTES)
-                .build());
-        push = MemoryUtil.memCalloc(PUSH_BYTES);
+        this.target = target;
+        prepare(GlintEffect.ITEM);
+        push = MemoryUtil.memCalloc(Math.max(PUSH_BYTES, GLINT_PUSH_BYTES));
         normalize(light0);
         normalize(light1);
     }
@@ -143,8 +138,33 @@ public final class ModelRenderer implements AutoCloseable {
      */
     public void setGlint(VulkanSampledImage texture, long timeMillis) {
         glintTexture = texture;
-        glintScrollA = (timeMillis % 3000L) / 3000.0F / 8.0F;
-        glintScrollB = (timeMillis % 4873L) / 4873.0F / 8.0F;
+        glintTime = timeMillis;
+    }
+
+    /** Builds the pipelines an effect's blends need; call outside a frame before submitting it. */
+    public void prepare(GlintEffect effect) {
+        for (GlintEffect.Layer layer : effect.layers) {
+            if (!glintPipelines.containsKey(layer.blend())) {
+                // Glint redraws the same geometry with the same transform: depth matches, so test without writing.
+                VulkanPipeline gamma = renderer.createPipeline(glintSpec(layer.blend()).gammaSpace().build());
+                VulkanPipeline linear;
+                try {
+                    linear = renderer.createPipeline(glintSpec(layer.blend()).build());
+                } catch (RuntimeException | Error failure) {
+                    gamma.close();
+                    throw failure;
+                }
+                glintPipelines.put(layer.blend(), new VulkanPipeline[]{gamma, linear});
+            }
+        }
+    }
+
+    private PipelineSpec.Builder glintSpec(PipelineSpec.Blend blend) {
+        return modelSpec("model_glint.vert", "model_glint.frag", target)
+                .depth(true, false)
+                .blend(blend)
+                .sampledImages(2)
+                .pushConstants(GLINT_PUSH_BYTES);
     }
 
     /** Uploads a cuboid model's static geometry for posed instances; call outside a frame. */
@@ -207,12 +227,15 @@ public final class ModelRenderer implements AutoCloseable {
             throw new IllegalArgumentException("Pose and model must match a cuboid model uploaded by this renderer.");
         }
         PoseMath.resolve(pose, root, matrices);
-        return queue(model, texture, model.partCount, tintArgb, overlayArgb, lightRgb, false);
+        return queue(model, texture, model.partCount, tintArgb, overlayArgb, lightRgb, null, 0f);
     }
 
-    /** A posed entity with the enchantment glint over it (enchanted armor). */
+    /**
+     * A posed entity with a glint over it (enchanted armor), or none when {@code glint} is null. {@code glintTime}
+     * drives the effect's per-instance scroll: vanilla armor uses the wearer's ticksExisted plus the partial tick.
+     */
     public boolean submit(GpuModel model, VulkanSampledImage texture, ModelPose pose, float[] root,
-                          int tintArgb, int overlayArgb, int lightRgb, boolean glint) {
+                          int tintArgb, int overlayArgb, int lightRgb, GlintEffect glint, float glintTime) {
         if (frame == null) {
             throw new IllegalStateException("Call begin() before submitting entities.");
         }
@@ -220,7 +243,7 @@ public final class ModelRenderer implements AutoCloseable {
             throw new IllegalArgumentException("Pose and model must match a cuboid model uploaded by this renderer.");
         }
         PoseMath.resolve(pose, root, matrices);
-        return queue(model, texture, model.partCount, tintArgb, overlayArgb, lightRgb, glint);
+        return queue(model, texture, model.partCount, tintArgb, overlayArgb, lightRgb, glint, glintTime);
     }
 
     /**
@@ -231,12 +254,18 @@ public final class ModelRenderer implements AutoCloseable {
      */
     public boolean submit(GpuModel model, VulkanSampledImage texture, float[] root, int tintArgb, int overlayArgb,
                           int lightRgb) {
-        return submit(model, texture, root, tintArgb, overlayArgb, lightRgb, false);
+        return submit(model, texture, root, tintArgb, overlayArgb, lightRgb, null);
     }
 
     /** A rigid instance, with vanilla's enchantment glint over it when {@code glint} is set. */
     public boolean submit(GpuModel model, VulkanSampledImage texture, float[] root, int tintArgb, int overlayArgb,
                           int lightRgb, boolean glint) {
+        return submit(model, texture, root, tintArgb, overlayArgb, lightRgb, glint ? GlintEffect.ITEM : null);
+    }
+
+    /** A rigid instance with a glint over it, or none when {@code glint} is null. */
+    public boolean submit(GpuModel model, VulkanSampledImage texture, float[] root, int tintArgb, int overlayArgb,
+                          int lightRgb, GlintEffect glint) {
         if (frame == null) {
             throw new IllegalStateException("Call begin() before submitting models.");
         }
@@ -255,11 +284,11 @@ public final class ModelRenderer implements AutoCloseable {
         matrices[9] = root[6];
         matrices[10] = root[10];
         matrices[11] = root[14];
-        return queue(model, texture, 1, tintArgb, overlayArgb, lightRgb, glint);
+        return queue(model, texture, 1, tintArgb, overlayArgb, lightRgb, glint, 0f);
     }
 
     private boolean queue(GpuModel model, VulkanSampledImage texture, int parts, int tintArgb, int overlayArgb,
-                          int lightRgb, boolean glint) {
+                          int lightRgb, GlintEffect glint, float glintTime) {
         long offset = instanceCount < MAX_INSTANCES
                 ? frame.allocate((long) parts * PoseMath.FLOATS_PER_PART * Float.BYTES, MATRIX_ROW_BYTES) : -1L;
         if (offset < 0) {
@@ -279,6 +308,7 @@ public final class ModelRenderer implements AutoCloseable {
         instanceOverlay[instance] = abgr(overlayArgb);
         instanceLight[instance] = abgr(0xFF000000 | lightRgb);
         instanceGlint[instance] = glint;
+        instanceGlintTime[instance] = glintTime;
         sortKeys[instance] = ((long) model.id << 48) | ((long) textureSlot << 32) | instance;
         return true;
     }
@@ -356,16 +386,33 @@ public final class ModelRenderer implements AutoCloseable {
         flushGlint(target);
     }
 
-    /** Redraws glinted instances, in the same sorted order, with the glint pipeline. */
+    /**
+     * Redraws glinted instances with each layer of their effect: grouped by effect, then model, so every layer of
+     * every effect is a few instanced draws.
+     */
     private void flushGlint(VulkanFrame target) {
         if (glintTexture == null) {
             return;
         }
+        frameGlints.clear();
         int glinted = 0;
         for (int sorted = 0; sorted < instanceCount; sorted++) {
-            if (instanceGlint[(int) (sortKeys[sorted] & 0xFFFF_FFFFL)]) {
-                glinted++;
+            int instance = (int) (sortKeys[sorted] & 0xFFFF_FFFFL);
+            GlintEffect effect = instanceGlint[instance];
+            if (effect == null) {
+                continue;
             }
+            int slot = frameGlints.indexOf(effect);
+            if (slot < 0) {
+                if (frameGlints.size() == MAX_FRAME_GLINTS) {
+                    continue;
+                }
+                slot = frameGlints.size();
+                frameGlints.add(effect);
+            }
+            // The spare half of sortKeys holds each glinted instance as effect, model, texture, and its index.
+            sortKeys[instanceCount + glinted] = (long) slot << 56 | (sortKeys[sorted] >>> 32) << 24 | instance;
+            glinted++;
         }
         if (glinted == 0) {
             return;
@@ -374,42 +421,63 @@ public final class ModelRenderer implements AutoCloseable {
         if (offset < 0) {
             return;
         }
+        Arrays.sort(sortKeys, instanceCount, instanceCount + glinted);
         ByteBuffer stream = target.stream();
-        int written = 0;
-        for (int sorted = 0; sorted < instanceCount; sorted++) {
-            int instance = (int) (sortKeys[sorted] & 0xFFFF_FFFFL);
-            if (instanceGlint[instance]) {
-                stream.putInt((int) offset + written * INSTANCE_BYTES, instanceMatrixRow[instance]);
-                stream.putInt((int) offset + written * INSTANCE_BYTES + 12, instanceLight[instance]);
-                // The spare half of sortKeys records each glint record's model, in draw order.
-                sortKeys[instanceCount + written] = sortKeys[sorted] >>> 48 << 32 | written;
-                written++;
-            }
+        for (int index = 0; index < glinted; index++) {
+            int instance = (int) (sortKeys[instanceCount + index] & 0xFF_FFFFL);
+            int position = (int) offset + index * INSTANCE_BYTES;
+            stream.putInt(position, instanceMatrixRow[instance]);
+            stream.putFloat(position + 4, instanceGlintTime[instance]);
+            stream.putInt(position + 8, instanceTint[instance]);
+            stream.putInt(position + 12, instanceLight[instance]);
         }
         boolean gamma = target.beginGammaSpace();
-        target.bindPipeline(gamma ? glintPipeline : glintLinearPipeline);
-        target.bindImage(glintTexture);
         push.clear();
         push.limit(GLINT_PUSH_BYTES);
-        // Vanilla draws the two layers as two passes over the item; so does this, layer by layer.
-        for (int layer = 0; layer < 2; layer++) {
-            push.putFloat(80, layer == 0 ? glintScrollA : -glintScrollB).putFloat(84, GLINT_ANGLES[layer])
-                    .putFloat(88, GLINT_SPRITE_SPAN).putFloat(92, gamma ? 0f : 1f);
-            int runStart = 0;
-            while (runStart < glinted) {
-                long model = sortKeys[instanceCount + runStart] >>> 32;
-                int runEnd = runStart + 1;
-                while (runEnd < glinted && sortKeys[instanceCount + runEnd] >>> 32 == model) {
-                    runEnd++;
-                }
-                GpuModel gpu = models.get((int) model);
-                push.putLong(64, target.streamAddress(offset + (long) runStart * INSTANCE_BYTES));
-                target.pushConstants(push);
-                target.bindVertices(0, gpu.buffer, 0);
-                target.bindIndices(gpu.buffer, gpu.vertexBytes);
-                target.drawIndexed(gpu.indexCount, runEnd - runStart, 0, 0, 0);
-                runStart = runEnd;
+        int effectStart = 0;
+        while (effectStart < glinted) {
+            long slot = sortKeys[instanceCount + effectStart] >>> 56;
+            int effectEnd = effectStart + 1;
+            while (effectEnd < glinted && sortKeys[instanceCount + effectEnd] >>> 56 == slot) {
+                effectEnd++;
             }
+            GlintEffect effect = frameGlints.get((int) slot);
+            // Vanilla draws the layers as separate passes over the item; so does this, layer by layer.
+            for (GlintEffect.Layer layer : effect.layers) {
+                VulkanPipeline[] pipelines = glintPipelines.get(layer.blend());
+                if (pipelines == null) {
+                    continue;
+                }
+                target.bindPipeline(pipelines[gamma ? 0 : 1]);
+                target.bindImage(layer.texture() == null ? glintTexture : layer.texture());
+                float scroll = layer.scroll(glintTime);
+                int flags = (gamma ? 0 : 1) | (effect.modelUv ? 2 : 0)
+                        | (layer.blend() == PipelineSpec.Blend.SOURCE_SQUARED ? 4 : 0);
+                push.putFloat(80, layer.m00()).putFloat(84, layer.m10()).putFloat(88, layer.m01())
+                        .putFloat(92, layer.m11())
+                        .putFloat(96, layer.scrollX() * scroll).putFloat(100, layer.scrollY() * scroll)
+                        .putFloat(104, layer.driftX()).putFloat(108, layer.driftY())
+                        .putFloat(112, layer.tint()[0]).putFloat(116, layer.tint()[1])
+                        .putFloat(120, layer.tint()[2]).putFloat(124, flags);
+                int runStart = effectStart;
+                while (runStart < effectEnd) {
+                    long group = sortKeys[instanceCount + runStart] >>> 24 & 0xFFFF_FFFFL;
+                    int runEnd = runStart + 1;
+                    while (runEnd < effectEnd && (sortKeys[instanceCount + runEnd] >>> 24 & 0xFFFF_FFFFL) == group) {
+                        runEnd++;
+                    }
+                    GpuModel gpu = models.get((int) (group >>> 16));
+                    target.bindImage(1, frameTextures.get((int) (group & 0xFFFF)));
+                    // The view-projection and matrix stream address stay as flush() pushed them.
+                    push.putLong(64, target.streamAddress(offset + (long) runStart * INSTANCE_BYTES));
+                    target.pushConstants(push);
+                    target.bindVertices(0, gpu.buffer, 0);
+                    target.bindIndices(gpu.buffer, gpu.vertexBytes);
+                    target.drawIndexed(gpu.indexCount, runEnd - runStart, 0, 0, 0);
+                    runStart = runEnd;
+                }
+            }
+            effectStart = effectEnd;
         }
         if (gamma) {
             target.endGammaSpace();
@@ -442,8 +510,10 @@ public final class ModelRenderer implements AutoCloseable {
             }
         }
         models.clear();
-        glintPipeline.close();
-        glintLinearPipeline.close();
+        for (VulkanPipeline[] pipelines : glintPipelines.values()) {
+            pipelines[0].close();
+            pipelines[1].close();
+        }
         pipeline.close();
         MemoryUtil.memFree(push);
     }

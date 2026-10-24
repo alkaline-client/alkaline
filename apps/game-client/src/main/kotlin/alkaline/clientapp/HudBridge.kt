@@ -186,7 +186,8 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
         stack ?: return null
         val max = Items.maxDamage(stack.id())
         val durability = if (max > 0 && stack.damage() > 0) (1f - stack.damage().toFloat() / max).coerceIn(0f, 1f) else -1f
-        return HudItem(icon(stack), stack.count(), durability, stack.glint())
+        val glint = catalog.glintStyle(stack)
+        return HudItem(icon(stack), stack.count(), durability, glint >= 0, glint)
     }
 
     /**

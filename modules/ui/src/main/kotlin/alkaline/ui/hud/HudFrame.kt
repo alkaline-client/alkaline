@@ -11,6 +11,8 @@ data class HudItem(
     /** Remaining durability 0..1, or -1 for items that do not wear. */
     val durability: Float = -1f,
     val glint: Boolean = false,
+    /** Which glint the game draws over the icon (see the game's ItemCatalog.glintStyle), when [glint] is set. */
+    val glintStyle: Int = 0,
 )
 
 /** An active potion effect: vanilla's English name, level (1 = I), ticks left and its inventory.png icon. */

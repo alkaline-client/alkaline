@@ -4,6 +4,7 @@ import alkaline.client.modules.Module
 import alkaline.client.modules.Modules
 import alkaline.config.ConfigSnapshot
 import alkaline.renderer.vulkan.ui.glass
+import alkaline.renderer.vulkan.ui.sceneAnchor
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -392,14 +394,14 @@ private fun Hotbar(frame: HudFrame) {
 @Composable
 internal fun ItemIcon(item: HudItem, sprites: HudSprites?) {
     val bitmap = item.icon?.let { sprites?.texture(it) }
+    // The game draws the animated glint over this rectangle on the GPU (HudGlint), so the layer stays cached.
+    val slot = remember { glintAnchors++ }
     Box(Modifier.size(Px * 16)) {
         if (bitmap != null) {
-            Canvas(Modifier.size(Px * 16)) {
+            val anchor = if (item.glint) Modifier.sceneAnchor("glint:$slot:${item.glintStyle}:${item.icon}") else Modifier
+            Canvas(Modifier.size(Px * 16).then(anchor)) {
                 drawImage(bitmap, IntOffset.Zero, IntSize(bitmap.width, bitmap.height), IntOffset.Zero,
                     IntSize(size.width.toInt(), size.height.toInt()), filterQuality = FilterQuality.None)
-                if (item.glint) {
-                    drawRect(Color(0x33A050FF))
-                }
             }
         }
         if (item.durability in 0f..0.999f) {
@@ -424,6 +426,9 @@ internal fun ItemIcon(item: HudItem, sprites: HudSprites?) {
         }
     }
 }
+
+/** Distinguishes the glint anchors of item icons showing the same stack. */
+private var glintAnchors = 0
 
 /** Draws a texel rectangle of a pixel-art texture at [scale] screen pixels per texel, hard-edged. */
 internal fun DrawScope.sprite(image: ImageBitmap, u: Int, v: Int, width: Int, height: Int, at: Offset, scale: Float) {

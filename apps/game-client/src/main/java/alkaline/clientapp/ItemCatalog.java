@@ -50,6 +50,9 @@ public final class ItemCatalog {
     /** The CIT rule index each stack last matched (-1 for none); stacks are values, so equal stacks share it. */
     private final Map<ItemStack, Integer> matched = new HashMap<>();
     private final Map<ItemStack, Integer> armorMatched = new HashMap<>();
+    /** Glint styles by stack (see {@link #glintStyle}), and each custom style's enchantment rules from 1 up. */
+    private final Map<ItemStack, Integer> glintMatched = new HashMap<>();
+    private final java.util.List<java.util.List<CustomItems.Rule>> glintStyles = new java.util.ArrayList<>();
     private static Map<String, Integer> ids;
 
     ItemCatalog(AssetSource assets) {
@@ -68,6 +71,8 @@ public final class ItemCatalog {
         generation++;
         matched.clear();
         armorMatched.clear();
+        glintMatched.clear();
+        glintStyles.clear();
         custom = source == null ? CustomItems.NONE : CustomItems.load(source, ItemCatalog::id);
         if (!custom.rules().isEmpty()) {
             System.err.println("Custom item textures: " + custom.rules().size() + " rules.");
@@ -166,6 +171,44 @@ public final class ItemCatalog {
             matched.put(stack, index);
         }
         return index < 0 ? null : custom.rule(index);
+    }
+
+    /**
+     * The enchantment glint a stack draws: -1 for none, 0 for vanilla's, or n > 0 for a resource pack's
+     * enchantment rules ({@link #glintRules}). Styles stay numbered until the assets change ({@link #generation}).
+     */
+    int glintStyle(ItemStack stack) {
+        if (stack == null || !stack.glint()) {
+            return -1;
+        }
+        if (!custom.hasEnchantmentRules()) {
+            return custom.useGlint() ? 0 : -1;
+        }
+        Integer style = glintMatched.get(stack);
+        if (style == null) {
+            if (glintMatched.size() > 4096) {
+                glintMatched.clear();
+            }
+            java.util.List<CustomItems.Rule> rules = custom.enchantments(new Query(stack));
+            int index = glintStyles.indexOf(rules);
+            if (index < 0 && !rules.isEmpty()) {
+                glintStyles.add(rules);
+                index = glintStyles.size() - 1;
+            }
+            style = rules.isEmpty() ? (custom.useGlint() ? 0 : -1) : index + 1;
+            glintMatched.put(stack, style);
+        }
+        return style;
+    }
+
+    /** The enchantment rules of a custom glint style (n > 0), drawn in order. */
+    java.util.List<CustomItems.Rule> glintRules(int style) {
+        return glintStyles.get(style - 1);
+    }
+
+    /** The active assets (resource packs included), or null. */
+    AssetSource assets() {
+        return assets;
     }
 
     /** Item or block id by registry name, with or without {@code minecraft:}; -1 when unknown. */
@@ -379,6 +422,11 @@ public final class ItemCatalog {
             out.put(id, icon);
         }
         return id;
+    }
+
+    /** An icon {@link #icon} rendered, by its key, or null. */
+    RgbaImage iconImage(String key) {
+        return icons.get(key);
     }
 
     /** ColorizerGrass / ColorizerFoliage at temperature 0.5 and rainfall 1.0: the colormaps' pixel (127, 127). */

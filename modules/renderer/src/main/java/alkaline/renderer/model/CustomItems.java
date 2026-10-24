@@ -20,11 +20,12 @@ import java.util.regex.Pattern;
  * {@code mcpatcher/cit/} in the active resource packs that give matching items another sprite, item model or armor
  * texture. A rule matches by item, damage (or damage percentage, with an optional mask), stack size, enchantments
  * and NBT values (exact, {@code pattern:}, {@code ipattern:}, {@code regex:}, {@code iregex:}); among matching rules
- * the highest {@code weight} wins, then the first by path. Enchantment glint rules ({@code type=enchantment}) are
- * read but not drawn.
+ * the highest {@code weight} wins, then the first by path. Enchantment glint rules ({@code type=enchantment})
+ * replace vanilla's glint per enchantment on the stack (see {@link #enchantments}); {@code useGlint=false} in
+ * {@code cit.properties} turns vanilla's glint off where no rule applies.
  */
 public final class CustomItems {
-    public static final CustomItems NONE = new CustomItems(List.of());
+    public static final CustomItems NONE = new CustomItems(List.of(), true);
     private static final String[] ROOTS = {"assets/minecraft/optifine/cit/", "assets/minecraft/mcpatcher/cit/"};
 
     public enum Type { ITEM, ARMOR, ENCHANTMENT }
@@ -59,10 +60,12 @@ public final class CustomItems {
      * @param textures replacement texture (full asset path) by the original texture's base name, and "" for the
      *                 default
      * @param model    a replacement item model (full asset path), or null
+     * @param glint    an enchantment rule's blend, speed, rotation and layer; null for other types
      */
     public record Rule(int index, String path, Type type, int weight, int[] items, List<int[]> damage,
                        boolean damagePercent, int damageMask, List<int[]> stackSize, int[] enchantmentIds,
-                       List<int[]> enchantmentLevels, List<NbtTest> nbt, Map<String, String> textures, String model) {
+                       List<int[]> enchantmentLevels, List<NbtTest> nbt, Map<String, String> textures, String model,
+                       Glint glint) {
         /** The replacement for an original texture path (for example {@code items/bow_pulling_0}), or null. */
         public String texture(String original, boolean primary) {
             String base = original.substring(original.lastIndexOf('/') + 1);
@@ -112,6 +115,12 @@ public final class CustomItems {
         }
     }
 
+    /**
+     * CustomItemProperties for {@code type=enchantment}: the blend (Blender.parseBlend's names, {@code add} by
+     * default), scroll speed, rotation in degrees, and the layer rules sort by.
+     */
+    public record Glint(String blend, float speed, float rotation, int layer) { }
+
     /** {@code nbt.<path>=<value>}: the value at the path compared exactly or by pattern. */
     public record NbtTest(String[] path, String value, Pattern pattern) {
         boolean matches(String actual) {
@@ -125,25 +134,29 @@ public final class CustomItems {
     private final List<Rule> rules;
     private final Map<Integer, List<Rule>> itemRules = new HashMap<>();
     private final Map<Integer, List<Rule>> armorRules = new HashMap<>();
+    private final Map<Integer, List<Rule>> enchantmentRules = new HashMap<>();
+    private final boolean useGlint;
 
-    private CustomItems(List<Rule> rules) {
+    private CustomItems(List<Rule> rules, boolean useGlint) {
         this.rules = List.copyOf(rules);
+        this.useGlint = useGlint;
         for (Rule rule : this.rules) {
             Map<Integer, List<Rule>> index = switch (rule.type()) {
                 case ITEM -> itemRules;
                 case ARMOR -> armorRules;
-                case ENCHANTMENT -> null;
+                case ENCHANTMENT -> enchantmentRules;
             };
-            if (index == null) {
-                continue;
-            }
-            for (int item : rule.items()) {
+            // CustomItems.addToEnchantmentList: enchantment rules are listed under each enchantment id they name.
+            for (int item : rule.type() == Type.ENCHANTMENT ? rule.enchantmentIds() : rule.items()) {
                 index.computeIfAbsent(item, key -> new ArrayList<>()).add(rule);
             }
         }
         Comparator<Rule> order = Comparator.comparingInt(Rule::weight).reversed().thenComparing(Rule::path);
         itemRules.values().forEach(list -> list.sort(order));
         armorRules.values().forEach(list -> list.sort(order));
+        // CustomItems.getPropertiesComparator: enchantment rules go by layer first.
+        Comparator<Rule> layered = Comparator.comparingInt((Rule rule) -> rule.glint().layer()).thenComparing(order);
+        enchantmentRules.values().forEach(list -> list.sort(layered));
     }
 
     public List<Rule> rules() {
@@ -152,6 +165,40 @@ public final class CustomItems {
 
     public boolean isEmpty() {
         return itemRules.isEmpty() && armorRules.isEmpty();
+    }
+
+    /** Whether any {@code type=enchantment} rule is loaded. */
+    public boolean hasEnchantmentRules() {
+        return !enchantmentRules.isEmpty();
+    }
+
+    /** {@code useGlint} in {@code cit.properties}: whether vanilla's glint draws where no enchantment rule does. */
+    public boolean useGlint() {
+        return useGlint;
+    }
+
+    /**
+     * The enchantment rules drawn over a glinted stack, in order (CustomItems.renderCustomEffect): for each
+     * enchantment on it, the first rule listed under that id, if it matches. Empty means vanilla's glint draws
+     * instead. As in OptiFine, a rule's {@code items} are not checked, and a later rule under the same id is not
+     * tried when the first does not match.
+     */
+    public List<Rule> enchantments(Stack stack) {
+        if (stack == null || enchantmentRules.isEmpty()) {
+            return List.of();
+        }
+        List<Rule> drawn = new ArrayList<>();
+        java.util.Set<Integer> tried = new java.util.HashSet<>();
+        for (int id : stack.enchantments()) {
+            List<Rule> candidates = enchantmentRules.get(id);
+            if (candidates != null && tried.add(id)) {
+                Rule rule = candidates.get(0);
+                if (rule.matches(stack)) {
+                    drawn.add(rule);
+                }
+            }
+        }
+        return drawn;
     }
 
     /** The item rule for a stack, or null. */
@@ -191,6 +238,19 @@ public final class CustomItems {
      */
     public static CustomItems load(AssetSource assets, ToIntFunction<String> itemIds) {
         List<Rule> rules = new ArrayList<>();
+        boolean useGlint = true;
+        for (String file : new String[]{"assets/minecraft/mcpatcher/cit.properties",
+                "assets/minecraft/optifine/cit.properties"}) {
+            try (InputStream input = assets.open(file)) {
+                if (input != null) {
+                    Properties properties = new Properties();
+                    properties.load(new InputStreamReader(input, StandardCharsets.UTF_8));
+                    useGlint = !"false".equalsIgnoreCase(properties.getProperty("useGlint", "true").trim());
+                }
+            } catch (IOException | RuntimeException failure) {
+                System.err.println("Custom item " + file + " skipped: " + failure.getMessage());
+            }
+        }
         for (String root : ROOTS) {
             List<String> paths;
             try {
@@ -217,7 +277,7 @@ public final class CustomItems {
                 }
             }
         }
-        return rules.isEmpty() ? NONE : new CustomItems(rules);
+        return rules.isEmpty() && useGlint ? NONE : new CustomItems(rules, useGlint);
     }
 
     static Rule parse(int index, String path, Properties properties, ToIntFunction<String> itemIds) {
@@ -274,10 +334,19 @@ public final class CustomItems {
             // Without a texture the file names its own: sword.properties draws sword.png beside it.
             textures.put("", directory + fileName + ".png");
         }
+        Glint glint = null;
+        if (type == Type.ENCHANTMENT) {
+            if (enchantments.isEmpty()) {
+                return null; // CustomItemProperties.isValid: "No enchantmentIDs specified"
+            }
+            glint = new Glint(properties.getProperty("blend", "add").trim().toLowerCase(Locale.ROOT),
+                    parseFloat(properties.getProperty("speed"), 0f), parseFloat(properties.getProperty("rotation"), 0f),
+                    parseInt(properties.getProperty("layer"), 0));
+        }
         return new Rule(index, path, type, parseInt(properties.getProperty("weight"), 0),
                 items.stream().mapToInt(Integer::intValue).toArray(), damage, percent, mask, stackSize,
                 enchantments.stream().mapToInt(Integer::intValue).toArray(), levels, List.copyOf(nbt),
-                Map.copyOf(textures), model);
+                Map.copyOf(textures), model, glint);
     }
 
     /**
@@ -384,6 +453,17 @@ public final class CustomItems {
         }
         try {
             return Integer.decode(text.trim());
+        } catch (NumberFormatException invalid) {
+            return fallback;
+        }
+    }
+
+    private static float parseFloat(String text, float fallback) {
+        if (text == null || text.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Float.parseFloat(text.trim());
         } catch (NumberFormatException invalid) {
             return fallback;
         }

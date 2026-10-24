@@ -27,4 +27,5 @@ include(
     ":apps:game-client",
     ":apps:screen-space-check",
     ":apps:hud-preview",
+    ":modules:audio",
 )

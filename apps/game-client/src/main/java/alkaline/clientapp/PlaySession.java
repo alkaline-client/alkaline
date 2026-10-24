@@ -118,6 +118,8 @@ public final class PlaySession implements AutoCloseable {
     private int titleTicks;
     private int chatVersion;
     private boolean flat;
+    /** Plays what the client hears itself; null without audio. */
+    private GameSounds sounds;
 
     PlaySession(ServerSession session, ChatText chat, Consumer<String> disconnected) {
         this.session = session;
@@ -229,6 +231,10 @@ public final class PlaySession implements AutoCloseable {
     /** Air from the player's own metadata (300 = full), as vanilla's air bubbles show it. */
     int air() {
         return entities.self().getShort(1, 300);
+    }
+
+    void sounds(GameSounds sounds) {
+        this.sounds = sounds;
     }
 
     void view(GameView view) {
@@ -670,6 +676,9 @@ public final class PlaySession implements AutoCloseable {
         boolean loaded = world.isLoaded(Math.floorDiv((int) Math.floor(player.x), 16),
                 Math.floorDiv((int) Math.floor(player.z), 16));
         player.tick(input, world::state, loaded);
+        if (sounds != null) {
+            sounds.tick(this);
+        }
         report();
     }
 
@@ -683,6 +692,9 @@ public final class PlaySession implements AutoCloseable {
     }
 
     private void handle(ServerSession.Event event) {
+        if (sounds != null) {
+            sounds.event(event, this);
+        }
         if (event instanceof ServerSession.EntityVelocity velocity && velocity.entityId() == entities.selfId()) {
             player.velocity(velocity.motionX(), velocity.motionY(), velocity.motionZ());
             return;

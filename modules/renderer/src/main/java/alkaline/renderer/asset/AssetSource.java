@@ -30,6 +30,13 @@ public interface AssetSource extends AutoCloseable {
     default void close() throws IOException {
     }
 
+    /** Every layer's copy of an asset, lowest priority first (vanilla's getAllResources, for sounds.json). */
+    default List<byte[]> readAll(String path) throws IOException {
+        try (InputStream input = open(path)) {
+            return input == null ? List.of() : List.of(input.readAllBytes());
+        }
+    }
+
     /** Tries each source in order, so a resource pack can override the vanilla jar. */
     static AssetSource layered(AssetSource... sources) {
         AssetSource[] copy = sources.clone();
@@ -52,6 +59,15 @@ public interface AssetSource extends AutoCloseable {
                     paths.addAll(source.list(prefix));
                 }
                 return new ArrayList<>(paths);
+            }
+
+            @Override
+            public List<byte[]> readAll(String path) throws IOException {
+                List<byte[]> copies = new ArrayList<>();
+                for (int index = copy.length - 1; index >= 0; index--) {
+                    copies.addAll(copy[index].readAll(path));
+                }
+                return copies;
             }
 
             @Override

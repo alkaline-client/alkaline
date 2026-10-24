@@ -140,6 +140,8 @@ final class ClientApp implements AutoCloseable {
     private int displayRate;
     private float displayHz;
     private final VsyncPacer pacer = new VsyncPacer();
+    /** Sound output; its own threads open the device and decode, so nothing here waits on audio. */
+    private final alkaline.audio.AudioEngine audio = alkaline.audio.AudioEngine.start();
     /** Input sampling time by present id (ring), to measure input to screen with --stats. */
     private final long[] inputNanos = new long[64];
     private long measuredPresent;
@@ -291,6 +293,12 @@ final class ClientApp implements AutoCloseable {
         uiDensity = density(size);
         ui = MenuUi.createHost(size.width(), size.height(), uiDensity, menu);
         compositor = new MenuCompositor(renderer, ui);
+        // GuiButton.playPressSound: PositionedSoundRecord.create(gui.button.press, 1.0) plays at volume 0.25.
+        ui.setOnControlPressed(() -> {
+            audio.playUi("gui.button.press", 0.25F, 1.0F);
+            return kotlin.Unit.INSTANCE;
+        });
+        audio.logging(options.stats());
         textInput(true);
         refreshDisplayRate();
     }
@@ -425,6 +433,9 @@ final class ClientApp implements AutoCloseable {
             }
             assets = assetLoad.join();
             palette = paletteLoad.join();
+            if (assets != null) {
+                audio.assets(GameSounds.assets(assets));
+            }
             chatText = ChatText.load(assets);
             itemCatalog = new ItemCatalog(assets);
             hudGlint = new HudGlint(renderer, itemCatalog);
@@ -712,6 +723,7 @@ final class ClientApp implements AutoCloseable {
         }
         PlaySession created = new PlaySession(session, chatText != null ? chatText : ChatText.load(assets),
                 reason -> mainThreadTasks.add(() -> endGame(reason)));
+        created.sounds(new GameSounds(audio));
         try {
             GameView view = new GameView(renderer, assets, palette, created, skins, itemCatalog, config::snapshot);
             created.view(view);
@@ -749,6 +761,7 @@ final class ClientApp implements AutoCloseable {
 
     /** Leaves the game (or reports that it ended) and restores the menu. Render thread, outside frames. */
     private void endGame(String reason) {
+        audio.stopAll();
         if (play != null) {
             play.close();
             play = null;
@@ -802,6 +815,11 @@ final class ClientApp implements AutoCloseable {
         }
         if (background != null) {
             background.beforeFrame(size.width(), size.height());
+        }
+        if (play != null) {
+            // SoundManager.setListener: the player's interpolated eyes and look, every frame.
+            alkaline.game.player.LocalPlayer self = play.player();
+            audio.listener(self.eyeX(partialTick), self.eyeY(partialTick), self.eyeZ(partialTick), self.yaw, self.pitch);
         }
         VulkanFrame frame = renderer.acquireFrame();
         if (frame == null) {
@@ -872,6 +890,7 @@ final class ClientApp implements AutoCloseable {
             renderer.presentMode(presentMode(snapshot.get(ClientSettings.VIDEO_VSYNC), window.xwayland()));
         }
         appliedSettings = snapshot;
+        GameSounds.volumes(audio, snapshot);
         float density = density(window.pixelSize());
         if (density != uiDensity) {
             uiDensity = density;
@@ -988,6 +1007,7 @@ final class ClientApp implements AutoCloseable {
     /** Render thread, outside frames: everything drawn from the assets is rebuilt from the new ones. */
     private void swapAssets(AssetSource layered, BlockPalette loadedPalette, ChatText loadedText, String selection) {
         AssetSource previous = assets;
+        audio.assets(GameSounds.assets(layered));
         assets = layered;
         palette = loadedPalette;
         chatText = loadedText;
@@ -1037,7 +1057,10 @@ final class ClientApp implements AutoCloseable {
             return null;
         }
         try {
-            return new ZipAssetSource(jar.get());
+            // The jar, with the launcher's asset objects (sounds.json and every sound) under it, as 1.8.9 reads them.
+            AssetSource vanilla = new ZipAssetSource(jar.get());
+            AssetSource index = alkaline.renderer.asset.AssetIndexSource.open(MinecraftInstallation.gameDirectory());
+            return index == null ? vanilla : AssetSource.layered(vanilla, index);
         } catch (IOException failure) {
             System.err.println("Cannot open " + jar.get() + ": " + failure.getMessage());
             return null;
@@ -1488,6 +1511,7 @@ final class ClientApp implements AutoCloseable {
                     + (pacer.paced() > 0 ? String.format(", V-Sync paced %d frames (%d queued), margin %.2f ms, %d missed refreshes",
                             pacer.paced(), pacer.lag(), pacer.marginNanos() / 1e6, pacer.misses()) : ""));
             System.out.println(stats.report());
+            System.out.println(audio.describe());
             System.out.printf("UI: %d Compose frames uploaded, %d rows%n", compositor.uiUploads(),
                     compositor.uploadedRows());
             long refreshes = compositor.blurRefreshes();
@@ -1503,6 +1527,7 @@ final class ClientApp implements AutoCloseable {
         }
         compositor.close();
         ui.close();
+        audio.close();
         services.close();
         skins.close();
         try {

@@ -694,6 +694,7 @@ private fun valueLabel(setting: Setting<*>, value: Number): String = when (setti
         1f -> "HYPERSPEED!!!"
         else -> "${(value.toFloat() * 200f).toInt()}%"
     }
+    in ClientSettings.AUDIO_VOLUMES -> if (value.toFloat() <= 0f) "Off" else percent(value.toFloat())
     else -> if (value is Float) String.format(Locale.ROOT, "%.2f", value) else value.toString()
 }
 
@@ -704,6 +705,7 @@ private fun categoryIcon(category: String): ImageVector = when (category) {
     "Advanced" -> AlkalineIcons.Code
     "Controls" -> AlkalineIcons.Keyboard
     RESOURCE_PACKS_CATEGORY -> AlkalineIcons.Image
+    "Audio" -> AlkalineIcons.Music
     else -> AlkalineIcons.Tune
 }
 
@@ -712,6 +714,7 @@ private fun categoryDescription(category: String): String = when (category) {
     "Interface" -> "Color scheme, density, and what plays behind the menus."
     "Advanced" -> "Fine tuning and diagnostics. Defaults suit most players."
     "Controls" -> "Bindings follow key positions. Select one and press the new key or button; Esc cancels, Backspace clears."
+    "Audio" -> "Volume by kind of sound, as vanilla groups them. Applied at once, to sounds already playing too."
     else -> ""
 }
 

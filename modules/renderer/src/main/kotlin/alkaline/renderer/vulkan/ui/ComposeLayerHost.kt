@@ -106,6 +106,9 @@ class ComposeLayerHost(
     @Volatile private var running = true
     @Volatile private var failure: Throwable? = null
 
+    /** Called on the UI thread when a primary press lands on an enabled control (vanilla's button click sound). */
+    @Volatile var onControlPressed: () -> Unit = {}
+
     // UI-thread state.
     private var scene: ImageComposeScene? = null
     private var sceneWidth = width
@@ -336,6 +339,11 @@ class ComposeLayerHost(
                 }
             }
             is Command.Pointer -> {
+                if (command.type == PointerEventType.Press && command.button == PointerButton.Primary
+                    && ClickTargets.pressable(scene!!.semanticsOwners, command.x, command.y)
+                ) {
+                    onControlPressed()
+                }
                 primaryDown = command.primary
                 secondaryDown = command.secondary
                 scene!!.sendPointerEvent(

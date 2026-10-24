@@ -4,6 +4,7 @@ import alkaline.renderer.asset.AssetSource;
 import alkaline.renderer.image.ImageDecoder;
 import alkaline.renderer.image.RgbaImage;
 import alkaline.renderer.world.vanilla.BlockModels189;
+import alkaline.renderer.world.vanilla.BlockStates189;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -89,6 +90,34 @@ public final class ItemMeshes {
         } else {
             throw new IOException("Item model " + name + " has no elements.");
         }
+        return blockMesh(assets, definition, name, elements);
+    }
+
+    /**
+     * A block state's own model (a minecart's load, a falling block, primed TNT, an item frame) as the world draws it,
+     * not the block's item model: the first alternative of the state's variants, in 0..1 block space. Chests, which
+     * vanilla draws with the chest model, come out of {@link ChestModels} as they sit in a cart (not turned the half
+     * turn the item path adds). Throws when the state has no model.
+     *
+     * @param chestTexture the chest texture under {@code textures/} for chest-like blocks, else null
+     */
+    public static Mesh state(AssetSource assets, BlockModels189 blocks, BlockStates189.Location location,
+                             String chestTexture, String name) throws IOException {
+        ItemDefinition definition = new ItemDefinition(name, List.of(), ItemDefinition.Display.IDENTITY,
+                ItemDefinition.Display.IDENTITY, ItemDefinition.Display.IDENTITY, true);
+        if (chestTexture != null) {
+            return blockMesh(assets, definition, name, ChestModels.itemQuads(chestTexture, false));
+        }
+        List<BlockModels189.Choice> choices = blocks.variants(location);
+        if (choices.isEmpty() || choices.get(0).model().quads().isEmpty()) {
+            throw new IOException("Block model " + location + " has no elements.");
+        }
+        return blockMesh(assets, definition, name, choices.get(0).model().quads());
+    }
+
+    /** Packs the textures a block model's quads use into one small atlas, one layer per tint index. */
+    private static Mesh blockMesh(AssetSource assets, ItemDefinition definition, String name,
+                                  List<BlockModels189.Quad> elements) throws IOException {
         Map<String, RgbaImage> textures = new LinkedHashMap<>();
         for (BlockModels189.Quad quad : elements) {
             if (!textures.containsKey(quad.texture())) {

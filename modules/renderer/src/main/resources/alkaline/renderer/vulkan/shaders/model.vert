@@ -50,7 +50,8 @@ void main() {
     float diffuse = scene.light1.w
             + 0.6 * (max(dot(normal, scene.light0.xyz), 0.0) + max(dot(normal, scene.light1.xyz), 0.0));
     vec4 light = unpackUnorm4x8(record.w);
-    shade = min(vec3(diffuse), vec3(1.0)) * light.rgb;
+    // A zero light alpha marks an unlit instance (lightning, flashes): its color is drawn flat.
+    shade = (light.a < 0.5 ? vec3(1.0) : min(vec3(diffuse), vec3(1.0))) * light.rgb;
     uv = inUv;
     tint = unpackUnorm4x8(record.y);
     overlay = unpackUnorm4x8(record.z);

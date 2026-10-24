@@ -42,10 +42,20 @@ public final class ChestModels {
      * built-in path turns it half a turn about y, then TileEntityChestRenderer flips y and z.
      */
     public static List<BlockModels189.Quad> itemQuads(String texture) {
+        return itemQuads(texture, true);
+    }
+
+    /**
+     * The closed chest in block space. {@code turned} adds RenderItem's half turn about y that items get; a chest
+     * drawn by ChestRenderer.renderChestBrightness (a minecart's load) skips it.
+     */
+    public static List<BlockModels189.Quad> itemQuads(String texture, boolean turned) {
         float[] item = Mat4.identity(new float[16]);
-        Mat4.translate(item, 0.5f, 0.5f, 0.5f, item);
-        Mat4.rotate(item, (float) Math.PI, 0f, 1f, 0f, item);
-        Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
+        if (turned) {
+            Mat4.translate(item, 0.5f, 0.5f, 0.5f, item);
+            Mat4.rotate(item, (float) Math.PI, 0f, 1f, 0f, item);
+            Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
+        }
         Mat4.translate(item, 0f, 1f, 1f, item);
         Mat4.scale(item, 1f, -1f, -1f, item);
         CuboidModel model = chest(false);

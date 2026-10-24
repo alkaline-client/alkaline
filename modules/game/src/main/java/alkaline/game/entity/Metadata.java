@@ -90,6 +90,11 @@ public final class Metadata {
         return values[index] instanceof ItemStack value ? value : null;
     }
 
+    /** A rotation triple (degrees), or null when the entity has none at this index. */
+    public float[] getRotations(int index) {
+        return values[index] instanceof float[] value ? value : null;
+    }
+
     @Override
     public String toString() {
         StringBuilder text = new StringBuilder("Metadata{");

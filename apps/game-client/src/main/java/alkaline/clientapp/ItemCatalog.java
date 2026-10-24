@@ -12,6 +12,7 @@ import alkaline.renderer.model.ItemMeshes;
 import alkaline.renderer.model.ItemModelNames;
 import alkaline.renderer.world.CustomColors;
 import alkaline.renderer.world.vanilla.BlockModels189;
+import alkaline.renderer.world.vanilla.BlockStates189;
 import alkaline.renderer.world.vanilla.Blocks189;
 import java.io.IOException;
 import java.io.InputStream;
@@ -362,7 +363,9 @@ public final class ItemCatalog {
             String name = pending.poll();
             queued.remove(name);
             try {
-                if (name.startsWith("cit:")) {
+                if (name.startsWith("state:") || name.startsWith("loc:")) {
+                    meshes.put(name, stateMesh(name));
+                } else if (name.startsWith("cit:")) {
                     int split = name.indexOf(':', 4);
                     CustomItems.Rule rule = custom.rule(Integer.parseInt(name.substring(4, split)));
                     meshes.put(name, ItemMeshes.build(assets, blocks, name.substring(split + 1), rule));
@@ -376,6 +379,40 @@ public final class ItemCatalog {
             }
         }
         return built;
+    }
+
+    /** The model name of block state ({@code id}, {@code meta}) drawn as the world draws it, not as an item. */
+    static String stateModel(int id, int meta) {
+        return "state:" + id + ':' + meta;
+    }
+
+    /** The model name of one variant of a blockstate file ({@code item_frame}, {@code normal}). */
+    static String locationModel(String file, String variant) {
+        return "loc:" + file + '#' + variant;
+    }
+
+    /** Builds a {@link #stateModel} or {@link #locationModel}. */
+    private ItemMeshes.Mesh stateMesh(String name) throws IOException {
+        if (name.startsWith("loc:")) {
+            int split = name.indexOf('#');
+            return ItemMeshes.state(assets, blocks, new BlockStates189.Location(name.substring(4, split),
+                    name.substring(split + 1)), null, name);
+        }
+        String[] parts = name.split(":");
+        int id = Integer.parseInt(parts[1]);
+        int meta = Integer.parseInt(parts[2]);
+        // Chests (and ender and trapped ones) are drawn with the chest model, not a block model.
+        String chest = switch (id) {
+            case 54 -> "entity/chest/normal";
+            case 146 -> "entity/chest/trapped";
+            case 130 -> "entity/chest/ender";
+            default -> null;
+        };
+        BlockStates189.Location location = BlockStates189.location(id, meta, 0);
+        if (location == null && chest == null) {
+            throw new IOException("Block " + id + ":" + meta + " has no model.");
+        }
+        return ItemMeshes.state(assets, blocks, location, chest, name);
     }
 
     /** The tint of each of a mesh's tint slots for a stack (0xFFRRGGBB, or 0xFFFFFFFF untinted). */

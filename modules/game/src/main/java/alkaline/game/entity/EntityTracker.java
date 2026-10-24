@@ -81,14 +81,21 @@ public final class EntityTracker {
                 entity.motionX = spawn.motionX();
                 entity.motionY = spawn.motionY();
                 entity.motionZ = spawn.motionZ();
+                if (spawn.type() == EntityTypes.OBJECT_ITEM_FRAME) {
+                    // The packet carries the frame's block and facing (the data); the entity stands in the wall.
+                    int facing = spawn.data() & 3;
+                    entity = hanging(spawn.entityId(), EntityTypes.OBJECT_ITEM_FRAME, (int) Math.floor(spawn.x()),
+                            (int) Math.floor(spawn.y()), (int) Math.floor(spawn.z()), facing, Hanging.FRAME_PIXELS,
+                            Hanging.FRAME_PIXELS);
+                    entity.objectData = facing;
+                }
                 entities.put(entity.id, entity);
             }
             case ServerSession.SpawnPainting spawn -> {
-                // EntityPainting hangs half a block out from the wall block's center, on the facing side.
-                double[][] out = {{0, 1}, {-1, 0}, {0, -1}, {1, 0}};
-                Entity entity = new Entity(spawn.entityId(), Entity.Category.OBJECT, EntityTypes.OBJECT_PAINTING,
-                        null, spawn.x() + 0.5 + out[spawn.facing()][0] * 0.46875, spawn.y() + 0.5,
-                        spawn.z() + 0.5 + out[spawn.facing()][1] * 0.46875, spawn.facing() * 90f, 0f);
+                Hanging.Art art = Hanging.art(Hanging.artIndex(spawn.title()));
+                Entity entity = hanging(spawn.entityId(), EntityTypes.OBJECT_PAINTING, spawn.x(), spawn.y(),
+                        spawn.z(), spawn.facing(), art.width(), art.height());
+                entity.objectData = Hanging.artIndex(spawn.title());
                 entities.put(entity.id, entity);
             }
             case ServerSession.SpawnExperienceOrb spawn -> {
@@ -210,6 +217,12 @@ public final class EntityTracker {
         return true;
     }
 
+    /** A painting or item frame at its wall block, standing where EntityHanging puts it, turned to its facing. */
+    private static Entity hanging(int id, int type, int x, int y, int z, int facing, int width, int height) {
+        double[] at = Hanging.position(x, y, z, facing, width, height);
+        return new Entity(id, Entity.Category.OBJECT, type, null, at[0], at[1], at[2], (facing & 3) * 90f, 0f);
+    }
+
     /** One 20 Hz tick for every entity; entities that finished dying are dropped as the client does. */
     public void tick() {
         tick(null);
@@ -220,10 +233,9 @@ public final class EntityTracker {
         removed.clear();
         for (Entity entity : entities.values()) {
             entity.tick(world);
-            // EntityLightningBolt flashes for a few ticks and is gone; the server never destroys it.
-            if (entity.dead && entity.deathTime >= 20
-                    || entity.type == EntityTypes.OBJECT_LIGHTNING && entity.category == Entity.Category.OBJECT
-                    && entity.ticksExisted > 10) {
+            // EntityLightningBolt strikes a few times and is gone; the server never destroys it.
+            if (entity.dead && (entity.deathTime >= 20
+                    || entity.category == Entity.Category.OBJECT && entity.type == EntityTypes.OBJECT_LIGHTNING)) {
                 removed.add(entity.id);
             }
         }

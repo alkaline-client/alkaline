@@ -45,6 +45,8 @@ public final class ModelRenderer implements AutoCloseable {
     private static final int GLINT_PUSH_BYTES = 128;
 
     private final VulkanPipeline pipeline;
+    /** The same shaders with additive blending and no depth writes, for models uploaded with {@link #uploadAdditive}. */
+    private VulkanPipeline additivePipeline;
     private final RenderTargetFormat target;
     /**
      * Glint pipelines by blend: [0] on the color attachment's UNORM alias (vanilla's blend), [1] the linear
@@ -78,6 +80,8 @@ public final class ModelRenderer implements AutoCloseable {
     private VulkanFrame frame;
     private int instanceCount;
     private int droppedInstances;
+    /** Whether the models submitted now ignore the two lights (flat color, like fixed-function with lighting off). */
+    private boolean unlit;
 
     public ModelRenderer(VulkanRenderer renderer) {
         this(renderer, null);
@@ -172,6 +176,34 @@ public final class ModelRenderer implements AutoCloseable {
         return upload(ModelMesher.bake(Objects.requireNonNull(model, "model")), model);
     }
 
+    /**
+     * Draws the rigid instances submitted after this call at their flat color, without the two directional
+     * lights; {@link #begin} turns it off again.
+     */
+    public void setUnlit(boolean value) {
+        unlit = value;
+    }
+
+    /**
+     * Uploads rigid geometry drawn additively (source * alpha + destination, no depth writes) after everything else,
+     * as vanilla draws lightning with {@code blendFunc(SRC_ALPHA, ONE)}; call outside a frame.
+     */
+    public GpuModel uploadAdditive(BakedModel model) {
+        if (model.partCount() != 1) {
+            throw new IllegalArgumentException("Additive geometry is a single rigid part.");
+        }
+        if (additivePipeline == null) {
+            additivePipeline = renderer.createPipeline(modelSpec("model.vert", "model.frag", target)
+                    .depth(true, false)
+                    .blend(PipelineSpec.Blend.ADDITIVE)
+                    .pushConstants(PUSH_BYTES)
+                    .build());
+        }
+        GpuModel gpu = upload(model, null);
+        gpu.additive = true;
+        return gpu;
+    }
+
     /** Uploads baked geometry for rigid (single-transform) instances, such as items; call outside a frame. */
     public GpuModel upload(BakedModel model) {
         if (model.partCount() != 1) {
@@ -209,6 +241,7 @@ public final class ModelRenderer implements AutoCloseable {
         System.arraycopy(viewProjectionMatrix, 0, viewProjection, 0, 16);
         instanceCount = 0;
         frameTextures.clear();
+        unlit = false;
     }
 
     /**
@@ -306,7 +339,8 @@ public final class ModelRenderer implements AutoCloseable {
         instanceMatrixRow[instance] = (int) (offset / MATRIX_ROW_BYTES);
         instanceTint[instance] = abgr(tintArgb);
         instanceOverlay[instance] = abgr(overlayArgb);
-        instanceLight[instance] = abgr(0xFF000000 | lightRgb);
+        // The light word's alpha byte tells the shader to skip the directional lights (zero) or not (opaque).
+        instanceLight[instance] = abgr((unlit ? 0 : 0xFF000000) | lightRgb);
         instanceGlint[instance] = glint;
         instanceGlintTime[instance] = glintTime;
         sortKeys[instance] = ((long) model.id << 48) | ((long) textureSlot << 32) | instance;
@@ -339,7 +373,6 @@ public final class ModelRenderer implements AutoCloseable {
             stream.putInt(position + 12, instanceLight[instance]);
         }
 
-        target.bindPipeline(pipeline);
         push.clear();
         for (int index = 0; index < 16; index++) {
             push.putFloat(index * 4, viewProjection[index]);
@@ -366,22 +399,33 @@ public final class ModelRenderer implements AutoCloseable {
         push.putLong(112, target.streamAddress(fogOffset));
         push.limit(PUSH_BYTES);
 
-        int runStart = 0;
-        while (runStart < instanceCount) {
-            long groupKey = sortKeys[runStart] >>> 32;
-            int runEnd = runStart + 1;
-            while (runEnd < instanceCount && (sortKeys[runEnd] >>> 32) == groupKey) {
-                runEnd++;
+        // Opaque and alpha-tested models first; additive ones last, over the finished scene.
+        for (int pass = 0; pass < 2; pass++) {
+            boolean additive = pass == 1;
+            boolean bound = false;
+            int runStart = 0;
+            while (runStart < instanceCount) {
+                long groupKey = sortKeys[runStart] >>> 32;
+                int runEnd = runStart + 1;
+                while (runEnd < instanceCount && (sortKeys[runEnd] >>> 32) == groupKey) {
+                    runEnd++;
+                }
+                GpuModel model = models.get((int) (groupKey >>> 16));
+                if (model.additive == additive) {
+                    if (!bound) {
+                        target.bindPipeline(additive ? additivePipeline : pipeline);
+                        bound = true;
+                    }
+                    VulkanSampledImage texture = frameTextures.get((int) (groupKey & 0xFFFF));
+                    push.putLong(64, target.streamAddress(instancesOffset + (long) runStart * INSTANCE_BYTES));
+                    target.bindImage(texture);
+                    target.pushConstants(push);
+                    target.bindVertices(0, model.buffer, 0);
+                    target.bindIndices(model.buffer, model.vertexBytes);
+                    target.drawIndexed(model.indexCount, runEnd - runStart, 0, 0, 0);
+                }
+                runStart = runEnd;
             }
-            GpuModel model = models.get((int) (groupKey >>> 16));
-            VulkanSampledImage texture = frameTextures.get((int) (groupKey & 0xFFFF));
-            push.putLong(64, target.streamAddress(instancesOffset + (long) runStart * INSTANCE_BYTES));
-            target.bindImage(texture);
-            target.pushConstants(push);
-            target.bindVertices(0, model.buffer, 0);
-            target.bindIndices(model.buffer, model.vertexBytes);
-            target.drawIndexed(model.indexCount, runEnd - runStart, 0, 0, 0);
-            runStart = runEnd;
         }
         flushGlint(target);
     }
@@ -515,6 +559,9 @@ public final class ModelRenderer implements AutoCloseable {
             pipelines[1].close();
         }
         pipeline.close();
+        if (additivePipeline != null) {
+            additivePipeline.close();
+        }
         MemoryUtil.memFree(push);
     }
 
@@ -555,6 +602,7 @@ public final class ModelRenderer implements AutoCloseable {
         private final VulkanStaticBuffer buffer;
         private final int vertexBytes;
         private final int indexCount;
+        private boolean additive;
 
         private GpuModel(ModelRenderer owner, int id, CuboidModel model, int partCount, VulkanStaticBuffer buffer,
                          int vertexBytes, int indexCount) {

@@ -54,6 +54,9 @@ import kotlinx.coroutines.delay
 /** Corner radius of every frosted panel; glass and Compose surfaces must agree. */
 internal val PanelRadius = 32.dp
 
+/** Page panels stop growing here and center, so a tall window does not stretch them into a column. */
+internal val PagePanelMaxHeight = 620.dp
+
 /** How long the background plays alone between the loading screen fading and the menu arriving. */
 private const val REVEAL_PAUSE_MILLIS = 450L
 

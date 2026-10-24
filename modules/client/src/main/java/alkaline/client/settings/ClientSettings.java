@@ -135,7 +135,7 @@ public final class ClientSettings {
             Theme.MONET_DARK));
     public static final Setting.IntSetting GUI_SCALE = BUILDER.add(Setting.integer(
             "interface.gui_scale", "Interface", "GUI scale",
-            "Auto uses the largest size the window fits. Larger sizes are capped to fit.",
+            "Auto leaves room around the menus as the window grows. Larger sizes are capped to fit.",
             GuiScale.AUTO, GuiScale.AUTO, GuiScale.MAX_STEP));
     public static final Setting.EnumSetting<Background> MENU_BACKGROUND = BUILDER.add(Setting.choice(
             "menu.background", "Interface", "Menu background", "Animated scene behind the menus.",

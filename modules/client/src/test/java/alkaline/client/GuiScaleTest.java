@@ -7,10 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class GuiScaleTest {
     @Test
-    void autoPicksLargestStepThatFits() {
-        assertEquals(1.0f, GuiScale.scale(GuiScale.AUTO, 1280, 760));
-        assertEquals(1.5f, GuiScale.scale(GuiScale.AUTO, 1920, 1080));
-        assertEquals(3.0f, GuiScale.scale(GuiScale.AUTO, 3840, 2160));
+    void autoLeavesRoomAroundTheLayout() {
+        assertEquals(1.0f, GuiScale.scale(GuiScale.AUTO, 1280, 760), "100% while it fits");
+        assertEquals(1.0f, GuiScale.scale(GuiScale.AUTO, 1920, 1080));
+        assertEquals(1.5f, GuiScale.scale(GuiScale.AUTO, 2560, 1440), "2.0 fits");
+        assertEquals(2.25f, GuiScale.scale(GuiScale.AUTO, 3840, 2160));
     }
 
     @Test

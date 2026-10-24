@@ -6,7 +6,9 @@ package alkaline.client.settings;
  *
  * <p>A scale is UI pixels per density-independent unit (dp). Steps are 25% apart from 75% to 400%; the setting
  * stores 0 for Auto, or the step index {@code n >= 1} for {@code 0.5 + 0.25 * n}. Layouts are designed for at
- * least {@link #MIN_WIDTH_DP} x {@link #MIN_HEIGHT_DP} dp, which sets the largest step a window allows.
+ * least {@link #MIN_WIDTH_DP} x {@link #MIN_HEIGHT_DP} dp, which sets the largest step a window allows. Auto
+ * stops short of that: the layout takes at most {@link #AUTO_FILL} of the window, so a maximized window shows the
+ * scene around its menus, though never below 100% while 100% fits.
  */
 public final class GuiScale {
     public static final int AUTO = 0;
@@ -15,6 +17,7 @@ public final class GuiScale {
     public static final float MIN_HEIGHT_DP = 700f;
     private static final float STEP = 0.25f;
     private static final float SMALLEST = 0.75f;
+    private static final float AUTO_FILL = 0.75f;
 
     private GuiScale() {
     }
@@ -34,9 +37,16 @@ public final class GuiScale {
         return Math.max(SMALLEST, Math.min(requested(MAX_STEP), stepped));
     }
 
+    /** The step Auto picks: the largest whose layout fills at most {@link #AUTO_FILL} of the window. */
+    public static float auto(int widthPixels, int heightPixels) {
+        float maximum = maximum(widthPixels, heightPixels);
+        float roomy = maximum(Math.round(widthPixels * AUTO_FILL), Math.round(heightPixels * AUTO_FILL));
+        return Math.max(roomy, Math.min(1f, maximum));
+    }
+
     /** Effective scale for a setting value and window size. */
     public static float scale(int setting, int widthPixels, int heightPixels) {
         float maximum = maximum(widthPixels, heightPixels);
-        return setting == AUTO ? maximum : Math.min(requested(setting), maximum);
+        return setting == AUTO ? auto(widthPixels, heightPixels) : Math.min(requested(setting), maximum);
     }
 }

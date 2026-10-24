@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -90,7 +91,7 @@ internal fun SettingsPage(controller: MenuController) {
     val categories = remember(store) { store.schema().categories() }
     val pending = controller.pendingRestart(snapshot)
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().fillMaxHeight()) {
+        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BackHeader(controller, "Settings")
                 Spacer(Modifier.weight(1f))

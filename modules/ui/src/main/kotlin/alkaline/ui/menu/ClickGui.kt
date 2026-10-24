@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -70,7 +71,7 @@ internal fun ClickGui(controller: MenuController) {
     val store = profiles.store()
     val snapshot by rememberConfig(store)
     Box(Modifier.fillMaxSize().padding(horizontal = 72.dp, vertical = 48.dp), contentAlignment = Alignment.Center) {
-        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().fillMaxHeight()) {
+        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     when (controller.clickGuiSection) {

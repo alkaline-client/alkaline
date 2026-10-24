@@ -59,10 +59,16 @@ public final class ClientWorld {
     private volatile int columnVersion;
     private final ConcurrentLinkedQueue<Long> changed = new ConcurrentLinkedQueue<>();
     private final boolean skyLight;
+    private final WorldBorder border = new WorldBorder();
 
     /** @param skyLight whether the dimension has sky light (the overworld; not the nether or end) */
     public ClientWorld(boolean skyLight) {
         this.skyLight = skyLight;
+    }
+
+    /** The border of this world; a new dimension starts with a new one, which the server then initializes. */
+    public WorldBorder border() {
+        return border;
     }
 
     public boolean hasSkyLight() {

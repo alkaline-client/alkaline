@@ -223,9 +223,13 @@ public final class ServerSession implements AutoCloseable {
     public record DisplayScoreboard(int position, String objective) implements Event {
     }
 
-    /** Teams: mode 0 create, 1 remove, 2 update info, 3 add players, 4 remove players. */
+    /**
+     * Teams: mode 0 create, 1 remove, 2 update info, 3 add players, 4 remove players. {@code flags} bit 0 is friendly
+     * fire and bit 1 seeing invisible teammates; {@code nameTagVisibility} is always, never, hideForOtherTeams or
+     * hideForOwnTeam. Both are absent (0 and null) in modes that carry no team info.
+     */
     public record Team(String name, int mode, String displayName, String prefix, String suffix, int color,
-                       List<String> players) implements Event {
+                       List<String> players, int flags, String nameTagVisibility) implements Event {
     }
 
     /** Particle: the EnumParticleTypes id and its arguments (item or block state ids). */
@@ -1013,12 +1017,14 @@ public final class ServerSession implements AutoCloseable {
         String prefix = null;
         String suffix = null;
         int color = -1;
+        int flags = 0;
+        String visibility = null;
         if (mode == 0 || mode == 2) {
             display = in.readString();
             prefix = in.readString();
             suffix = in.readString();
-            in.readByte(); // friendly fire flags
-            in.readString(); // name tag visibility
+            flags = in.readByte();
+            visibility = in.readString();
             color = in.readByte();
         }
         List<String> players = List.of();
@@ -1030,7 +1036,7 @@ public final class ServerSession implements AutoCloseable {
             }
             players = names;
         }
-        return new Team(name, mode, display, prefix, suffix, color, players);
+        return new Team(name, mode, display, prefix, suffix, color, players, flags, visibility);
     }
 
     /** Plugin messages: MC|TrList and MC|Brand are decoded, any other channel is passed on with its bytes. */

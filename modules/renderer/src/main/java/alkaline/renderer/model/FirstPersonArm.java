@@ -50,6 +50,16 @@ public final class FirstPersonArm {
         pose.visible(model.partIndex(PlayerModels.RIGHT_SLEEVE), true);
     }
 
+    /** RenderPlayer.renderLeftArm's pose: everything at rest, only the left arm and its sleeve shown. */
+    public static void poseLeft(ModelPose pose) {
+        EntityModels.Motion rest = new EntityModels.Motion();
+        EntityModels.animate(EntityModels.Kind.PLAYER, rest, pose);
+        pose.visibleAll(false);
+        CuboidModel model = pose.model();
+        pose.visible(EntityModels.LEFT_ARM, true);
+        pose.visible(model.partIndex(PlayerModels.LEFT_SLEEVE), true);
+    }
+
     private static float sin(float radians) {
         return (float) Math.sin(radians);
     }

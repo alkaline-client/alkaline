@@ -27,6 +27,7 @@ import alkaline.renderer.texture.EmissiveTextures;
 import alkaline.renderer.texture.RandomEntities;
 import alkaline.renderer.texture.TextureAnimations;
 import alkaline.renderer.vulkan.model.ModelRenderer;
+import alkaline.renderer.vulkan.model.QuadRenderer;
 import alkaline.renderer.vulkan.resource.RenderTargetFormat;
 import alkaline.renderer.vulkan.resource.TextureOptions;
 import alkaline.renderer.vulkan.resource.VulkanFrame;
@@ -198,6 +199,12 @@ final class EntityView implements AutoCloseable {
         ModelRenderer.GpuModel model;
         boolean seen;
     }
+    /** Name tags, and the game they read; null viewer draws none. */
+    private final QuadRenderer quads;
+    private final NameTagRenderer labels;
+    private final MapView mapView;
+    private alkaline.game.world.MapStore mapStore;
+    private NameTags.Viewer viewer;
 
     /** An item model on the GPU: its mesh (for the display transforms) and one model and texture per layer. */
     private record GpuItem(ItemMeshes.Mesh mesh, ModelRenderer.GpuModel[] models, VulkanTexture[] textures) {
@@ -218,6 +225,9 @@ final class EntityView implements AutoCloseable {
         emissiveSuffix = EmissiveTextures.suffix(assets);
         animations = TextureAnimations.load(assets);
         models = new ModelRenderer(renderer, target);
+        quads = new QuadRenderer(renderer, target);
+        labels = new NameTagRenderer(renderer, assets, quads);
+        mapView = new MapView(renderer, assets);
         glints = new GlintStyles(renderer, catalog, models::prepare);
         arrowModel = models.upload(ProjectileModels.arrow());
         CuboidModel chest = alkaline.renderer.model.ChestModels.chest(false);
@@ -244,9 +254,16 @@ final class EntityView implements AutoCloseable {
         handPose = new ModelPose(EntityModels.model(EntityModels.Kind.PLAYER));
     }
 
-    /** The packs' custom colors (OptiFine sheep.<dye> fleece colors). */
+    /** The packs' custom colors (OptiFine sheep.<dye> fleece, xporb and map.<name> colors). */
     void customColors(alkaline.renderer.world.CustomColors colors) {
         customColors = Objects.requireNonNull(colors, "colors");
+        int[] map = new int[alkaline.renderer.world.CustomColors.MAP_COLOR_COUNT];
+        boolean any = false;
+        for (int index = 0; index < map.length; index++) {
+            map[index] = colors.map(index);
+            any |= map[index] >= 0;
+        }
+        mapView.colors(any ? map : null);
     }
 
     /**
@@ -327,6 +344,10 @@ final class EntityView implements AutoCloseable {
     /** Loads a few queued textures and item models; call outside frames. */
     void beforeFrame() {
         uploadSkins();
+        labels.beforeFrame();
+        if (mapStore != null) {
+            mapView.beforeFrame(mapStore);
+        }
         glints.beforeFrame();
         if (!glintLoaded) {
             glintLoaded = true;
@@ -642,6 +663,58 @@ final class EntityView implements AutoCloseable {
             }
         }
         models.flush();
+        drawFramedMaps(frame, viewProjection);
+        renderLabels(frame, entities, viewProjection, cameraYaw, cameraPitch, partialTick, cameraX, cameraY, cameraZ);
+    }
+
+    /** The maps the server sent, for filled maps in hand and in frames. */
+    void maps(alkaline.game.world.MapStore store) {
+        this.mapStore = store;
+    }
+
+    /** The game the name tags read (who is on whose team, what the crosshair is on). */
+    void viewer(NameTags.Viewer viewer) {
+        this.viewer = viewer;
+    }
+
+    /**
+     * RendererLivingEntity.renderName for each entity that carries a tag: the tag above the head, the below-name
+     * score under it for players, drawn after the models so their depth hides the full-brightness pass.
+     */
+    private void renderLabels(VulkanFrame frame, Collection<Entity> entities, float[] viewProjection, float yaw,
+                              float pitch, float partialTick, double cameraX, double cameraY, double cameraZ) {
+        if (viewer == null || !labels.ready()) {
+            return;
+        }
+        boolean begun = false;
+        for (Entity entity : entities) {
+            if (entity.category == Entity.Category.OBJECT && entity.type != EntityTypes.OBJECT_ARMOR_STAND) {
+                continue;
+            }
+            NameTags.Tag tag = NameTags.of(entity, viewer);
+            if (tag == null) {
+                continue;
+            }
+            if (!begun) {
+                labels.begin(frame, viewProjection, yaw, pitch);
+                begun = true;
+            }
+            float x = (float) (entity.renderX(partialTick) - cameraX);
+            float y = (float) (entity.renderY(partialTick) - cameraY);
+            float z = (float) (entity.renderZ(partialTick) - cameraZ);
+            if (entity.category == Entity.Category.PLAYER && entity.sneaking()) {
+                y -= 0.125f; // RenderPlayer lowers other sneaking players, and their tags with them
+            }
+            float top = y + NameTags.labelHeight(entity);
+            if (tag.score() != null) {
+                labels.label(tag.score(), x, top, z, false);
+                top += NameTags.SCORE_LIFT;
+            }
+            labels.label(tag.text(), x, top, z, tag.sneaking());
+        }
+        if (begun) {
+            labels.end();
+        }
     }
 
     /** The chests to draw this frame and the world their neighbors are read from. */
@@ -1751,7 +1824,7 @@ final class EntityView implements AutoCloseable {
 
     /**
      * RenderItemFrame: the frame model (the map variant when it holds a map), then the item 7 pixels out, turned by
-     * the frame's rotation in eighths; sprites are turned to face out. Maps are not drawn into the frame.
+     * the frame's rotation in eighths; sprites are turned to face out. A map is queued for {@link #framedMap}.
      */
     private void itemFrame(Entity entity, int light) {
         int facing = entity.objectData & 3;
@@ -1772,6 +1845,9 @@ final class EntityView implements AutoCloseable {
         System.arraycopy(stand, 0, item, 0, 16);
         Mat4.translate(item, -0.5f, -0.5f, -0.5f, item);
         submitItem(frame, null, item, light);
+        if (map) {
+            framedMap(stand, stack.damage(), entity.metadata.getByte(9, 0), light);
+        }
         if (stack == null || map) {
             return;
         }
@@ -1818,15 +1894,23 @@ final class EntityView implements AutoCloseable {
         // EntityXPOrb.getBrightnessForRender adds 120 of the block light's 240.
         int light = average(lightmapColors[sky * 16 + Math.min(15, block + 7)],
                 lightmapColors[sky * 16 + Math.min(15, block + 8)]);
-        float age = (entity.ticksExisted + partialTick) / 2.0F;
+        // OptiFine's xporb.time rescales the timer and its xporb.png palette replaces the pulse.
+        float age = customColors.xpOrbTimer((entity.ticksExisted + partialTick) / 2.0F);
+        int custom = customColors.xpOrb(age);
         int red = (int) (((float) Math.sin(age) + 1.0F) * 0.5F * 255.0F);
+        int green = 255;
         int blue = (int) (((float) Math.sin(age + (float) (Math.PI * 4.0 / 3.0)) + 1.0F) * 0.1F * 255.0F);
+        if (custom >= 0) {
+            red = custom >> 16 & 255;
+            green = custom >> 8 & 255;
+            blue = custom & 255;
+        }
         Mat4.identity(item);
         Mat4.translate(item, x, y, z, item);
         Mat4.rotate(item, (float) Math.toRadians(180.0F - viewYaw), 0f, 1f, 0f, item);
         Mat4.rotate(item, (float) Math.toRadians(-viewPitch), 1f, 0f, 0f, item);
         Mat4.scale(item, 0.3f, 0.3f, 0.3f, item);
-        models.submit(orbModels[orbIcon(entity.objectData)], texture, item, 128 << 24 | red << 16 | 255 << 8 | blue, 0,
+        models.submit(orbModels[orbIcon(entity.objectData)], texture, item, 128 << 24 | red << 16 | green << 8 | blue, 0,
                 light);
     }
 
@@ -1932,6 +2016,11 @@ final class EntityView implements AutoCloseable {
         models.setLighting(light0[0], light0[1], light0[2], light1[0], light1[1], light1[2], 0.4f);
         models.setGlint(glint, System.currentTimeMillis());
         models.begin(frame, projection);
+        if (held != null && held.id() == MapView.FILLED_MAP && mapStore != null) {
+            renderMapHand(frame, self, players, held, equipProgress, swingProgress, pitch, armPitchLag, armYawLag,
+                    light, bob, projection);
+            return;
+        }
         GpuItem item = gpuItem(catalog.model(held, use.bowPull(), use.cast()));
         if (item != null) {
             FirstPersonItem.transform(item.definition().firstPerson(), item.definition().block(), equipProgress,
@@ -1951,6 +2040,140 @@ final class EntityView implements AutoCloseable {
             }
         }
         models.flush();
+    }
+
+    private final float[] mapBase = new float[16];
+    private final float[] mapArm = new float[16];
+    private final float[] mapSheet = new float[16];
+
+    /**
+     * ItemRenderer.renderItemMap: both arms holding the map out, tilted toward the view as the head lowers, and the map
+     * on its background sheet. The arms are skin models; the sheet and map are quads shaded by the item lights.
+     */
+    private void renderMapHand(VulkanFrame frame, UUID self, PlayerList players, ItemStack held, float equipProgress,
+                               float swingProgress, float pitch, float armPitchLag, float armYawLag, int light,
+                               float[] bob, float[] projection) {
+        float root = (float) Math.sqrt(swingProgress);
+        float angle = 1.0F - pitch / 45.0F + 0.1F;
+        angle = Math.max(0f, Math.min(1f, angle));
+        angle = -(float) Math.cos(angle * Math.PI) * 0.5F + 0.5F;
+        Mat4.identity(mapBase);
+        Mat4.rotate(mapBase, (float) Math.toRadians(armPitchLag * 0.1f), 1f, 0f, 0f, mapBase);
+        Mat4.rotate(mapBase, (float) Math.toRadians(armYawLag * 0.1f), 0f, 1f, 0f, mapBase);
+        Mat4.translate(mapBase, -0.4f * (float) Math.sin(root * Math.PI),
+                0.2f * (float) Math.sin(root * Math.PI * 2.0), -0.2f * (float) Math.sin(swingProgress * Math.PI),
+                mapBase);
+        Mat4.translate(mapBase, 0f, 0.04f, -0.72f, mapBase);
+        Mat4.translate(mapBase, 0f, equipProgress * -1.2f, 0f, mapBase);
+        Mat4.translate(mapBase, 0f, angle * -0.5f, 0f, mapBase);
+        Mat4.rotate(mapBase, (float) Math.toRadians(90), 0f, 1f, 0f, mapBase);
+        Mat4.rotate(mapBase, (float) Math.toRadians(angle * -85f), 0f, 0f, 1f, mapBase);
+        VulkanTexture skin = skin(self, players.get(self));
+        if (skin != null) {
+            EntityModels.Kind kind = slim ? EntityModels.Kind.PLAYER_SLIM : EntityModels.Kind.PLAYER;
+            ModelPose pose = poses.get(kind);
+            // renderRightArm, then renderLeftArm: each turned and moved against the map's base.
+            System.arraycopy(mapBase, 0, mapArm, 0, 16);
+            Mat4.rotate(mapArm, (float) Math.toRadians(54), 0f, 1f, 0f, mapArm);
+            Mat4.rotate(mapArm, (float) Math.toRadians(64), 1f, 0f, 0f, mapArm);
+            Mat4.rotate(mapArm, (float) Math.toRadians(-62), 0f, 0f, 1f, mapArm);
+            Mat4.translate(mapArm, 0.25f, -0.85f, 0.75f, mapArm);
+            FirstPersonArm.pose(pose);
+            prepend(bob, mapArm);
+            models.submit(gpu.get(kind), skin, pose, mapArm, 0xFFFFFFFF, 0, light);
+            System.arraycopy(mapBase, 0, mapArm, 0, 16);
+            Mat4.rotate(mapArm, (float) Math.toRadians(92), 0f, 1f, 0f, mapArm);
+            Mat4.rotate(mapArm, (float) Math.toRadians(45), 1f, 0f, 0f, mapArm);
+            Mat4.rotate(mapArm, (float) Math.toRadians(41), 0f, 0f, 1f, mapArm);
+            Mat4.translate(mapArm, -0.3f, -1.1f, 0.45f, mapArm);
+            FirstPersonArm.poseLeft(pose);
+            prepend(bob, mapArm);
+            models.submit(gpu.get(kind), skin, pose, mapArm, 0xFFFFFFFF, 0, light);
+        }
+        models.flush();
+        // The sheet: swung and tilted further, then a unit of 128 map pixels laid out as one block.
+        float swingTurn = (float) Math.sin(swingProgress * swingProgress * Math.PI);
+        float swingRoot = (float) Math.sin(root * Math.PI);
+        System.arraycopy(mapBase, 0, mapSheet, 0, 16);
+        Mat4.rotate(mapSheet, (float) Math.toRadians(swingTurn * -20f), 0f, 1f, 0f, mapSheet);
+        Mat4.rotate(mapSheet, (float) Math.toRadians(swingRoot * -20f), 0f, 0f, 1f, mapSheet);
+        Mat4.rotate(mapSheet, (float) Math.toRadians(swingRoot * -80f), 1f, 0f, 0f, mapSheet);
+        Mat4.scale(mapSheet, 0.38f, 0.38f, 0.38f, mapSheet);
+        Mat4.rotate(mapSheet, (float) Math.toRadians(90), 0f, 1f, 0f, mapSheet);
+        Mat4.rotate(mapSheet, (float) Math.toRadians(180), 0f, 0f, 1f, mapSheet);
+        Mat4.translate(mapSheet, -1f, -1f, 0f, mapSheet);
+        Mat4.scale(mapSheet, 0.015625f, 0.015625f, 0.015625f, mapSheet);
+        prepend(bob, mapSheet);
+        // glNormal3f(0, 0, -1) under standard item lighting: two lights and the ambient, as ModelRenderer's.
+        float nx = -mapSheet[8];
+        float ny = -mapSheet[9];
+        float nz = -mapSheet[10];
+        float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+        nx /= length;
+        ny /= length;
+        nz /= length;
+        float diffuse = 0.4f + 0.6f * (Math.max(nx * light0[0] + ny * light0[1] + nz * light0[2], 0f)
+                + Math.max(nx * light1[0] + ny * light1[1] + nz * light1[2], 0f));
+        float shade = Math.min(diffuse, 1f);
+        quads.begin(frame, projection);
+        mapView.drawHeld(quads, mapStore, held.damage(), mapSheet, shaded(light, shade));
+        quads.flush();
+    }
+
+    /** A lightmap color (0xRRGGBB) scaled by a shade, as an opaque ARGB tint. */
+    private static int shaded(int light, float shade) {
+        int red = Math.min(255, Math.round((light >> 16 & 255) * shade));
+        int green = Math.min(255, Math.round((light >> 8 & 255) * shade));
+        int blue = Math.min(255, Math.round((light & 255) * shade));
+        return 0xFF000000 | red << 16 | green << 8 | blue;
+    }
+
+    /** Maps in item frames waiting for the end of the entity pass: matrix (map pixels to view), id and tint. */
+    private float[][] framedMatrices = new float[8][16];
+    private int[] framedIds = new int[8];
+    private int[] framedColors = new int[8];
+    private int framed;
+
+    /**
+     * RenderItemFrame's map: the bare map (and the holder's own marker) one block square on the frame's face.
+     * {@code stand} is the frame's matrix at its hanging block's center, turned to face out; the rotation is the
+     * frame's raw rotation byte (maps turn in quarter turns). The map is queued: it draws after the models, which
+     * write the depth its quad is tested against, in {@link #drawFramedMaps}.
+     */
+    void framedMap(float[] stand, int mapId, int rotation, int light) {
+        if (mapStore == null) {
+            return;
+        }
+        if (framed == framedIds.length) {
+            framedMatrices = java.util.Arrays.copyOf(framedMatrices, framed * 2);
+            for (int index = framed; index < framedMatrices.length; index++) {
+                framedMatrices[index] = new float[16];
+            }
+            framedIds = java.util.Arrays.copyOf(framedIds, framed * 2);
+            framedColors = java.util.Arrays.copyOf(framedColors, framed * 2);
+        }
+        float[] matrix = framedMatrices[framed];
+        System.arraycopy(stand, 0, matrix, 0, 16);
+        Mat4.translate(matrix, 0f, 0f, 0.4375f, matrix);
+        Mat4.rotate(matrix, (float) Math.toRadians(rotation % 4 * 2 * 360.0F / 8.0F), 0f, 0f, 1f, matrix);
+        Mat4.rotate(matrix, (float) Math.PI, 0f, 0f, 1f, matrix);
+        Mat4.scale(matrix, 0.0078125f, 0.0078125f, 0.0078125f, matrix);
+        Mat4.translate(matrix, -64f, -64f, 0f, matrix);
+        Mat4.translate(matrix, 0f, 0f, -1f, matrix);
+        framedIds[framed] = mapId;
+        framedColors[framed] = 0xFF000000 | light; // lighting is off in frames: only the world's light shades them
+        framed++;
+    }
+
+    private void drawFramedMaps(VulkanFrame frame, float[] viewProjection) {
+        if (framed > 0) {
+            quads.begin(frame, viewProjection);
+            for (int index = 0; index < framed; index++) {
+                mapView.drawFramed(quads, mapStore, framedIds[index], framedMatrices[index], framedColors[index]);
+            }
+            quads.flush();
+            framed = 0;
+        }
     }
 
     /**
@@ -1997,6 +2220,9 @@ final class EntityView implements AutoCloseable {
         if (white != null) {
             white.close();
         }
+        labels.close();
+        mapView.close();
+        quads.close();
         models.close();
         for (VulkanTexture texture : textures.values()) {
             texture.close();

@@ -74,14 +74,25 @@ public final class PlayerList {
         return true;
     }
 
-    /** Players sorted as GuiPlayerTabOverlay does: spectators last, then by team, then by name. */
+    /**
+     * Players sorted as GuiPlayerTabOverlay's comparator does: spectators last, then by the registered name of their
+     * team (players without one first), then by name; both comparisons are case-sensitive, as ComparisonChain's.
+     */
     public List<Player> sorted(Scoreboard scoreboard) {
         List<Player> sorted = new ArrayList<>(players.values());
         sorted.sort((a, b) -> {
             int spectator = Boolean.compare(a.gameMode() == 3, b.gameMode() == 3);
-            return spectator != 0 ? spectator : String.CASE_INSENSITIVE_ORDER.compare(
-                    String.valueOf(a.name()), String.valueOf(b.name()));
+            if (spectator != 0) {
+                return spectator;
+            }
+            int team = teamName(scoreboard, a).compareTo(teamName(scoreboard, b));
+            return team != 0 ? team : String.valueOf(a.name()).compareTo(String.valueOf(b.name()));
         });
         return sorted;
+    }
+
+    private static String teamName(Scoreboard scoreboard, Player player) {
+        Scoreboard.Team team = scoreboard == null ? null : scoreboard.teamOf(player.name());
+        return team == null ? "" : team.name();
     }
 }

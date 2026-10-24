@@ -19,14 +19,33 @@ public final class Scoreboard {
     public record Sidebar(String title, List<Line> lines) {
     }
 
-    private record TeamInfo(String prefix, String suffix) {
+    /** Team.EnumVisible: who sees the team's name tags. */
+    public enum Visibility {
+        ALWAYS, NEVER, HIDE_FOR_OTHER_TEAMS, HIDE_FOR_OWN_TEAM;
+
+        /** Team.EnumVisible.func_178824_a; an unknown name counts as always. */
+        static Visibility of(String name) {
+            if (name != null) {
+                for (Visibility value : values()) {
+                    if (value.name().replace("_", "").equalsIgnoreCase(name.replace("_", ""))) {
+                        return value;
+                    }
+                }
+            }
+            return ALWAYS;
+        }
+    }
+
+    /** A team as the client holds it: its registered name, text around its members' names, and name tag rule. */
+    public record Team(String name, String prefix, String suffix, Visibility nameTags) {
     }
 
     private final Map<String, String> objectives = new HashMap<>();
     private final Map<String, Map<String, Integer>> scores = new HashMap<>();
-    private final Map<String, TeamInfo> teams = new HashMap<>();
+    private final Map<String, Team> teams = new HashMap<>();
     private final Map<String, String> teamOf = new HashMap<>();
     private String sidebarObjective;
+    private String belowNameObjective;
     private int version;
 
     /** Bumped on every change, so the HUD rebuilds its lines only when something changed. */
@@ -40,6 +59,7 @@ public final class Scoreboard {
         teams.clear();
         teamOf.clear();
         sidebarObjective = null;
+        belowNameObjective = null;
         version++;
     }
 
@@ -52,6 +72,9 @@ public final class Scoreboard {
                     scores.remove(objective.name());
                     if (objective.name().equals(sidebarObjective)) {
                         sidebarObjective = null;
+                    }
+                    if (objective.name().equals(belowNameObjective)) {
+                        belowNameObjective = null;
                     }
                 } else {
                     objectives.put(objective.name(), objective.displayName());
@@ -78,6 +101,8 @@ public final class Scoreboard {
             case ServerSession.DisplayScoreboard display -> {
                 if (display.position() == 1) {
                     sidebarObjective = display.objective().isEmpty() ? null : display.objective();
+                } else if (display.position() == 2) {
+                    belowNameObjective = display.objective().isEmpty() ? null : display.objective();
                 }
             }
             case ServerSession.Team team -> applyTeam(team);
@@ -92,7 +117,8 @@ public final class Scoreboard {
     private void applyTeam(ServerSession.Team team) {
         switch (team.mode()) {
             case 0, 2 -> {
-                teams.put(team.name(), new TeamInfo(team.prefix(), team.suffix()));
+                teams.put(team.name(), new Team(team.name(), team.prefix(), team.suffix(),
+                        Visibility.of(team.nameTagVisibility())));
                 if (team.mode() == 0) {
                     for (String player : team.players()) {
                         teamOf.put(player, team.name());
@@ -120,9 +146,33 @@ public final class Scoreboard {
 
     /** ScorePlayerTeam.formatPlayerName: the team's prefix and suffix around a name (with § codes). */
     public String format(String name) {
-        String team = teamOf.get(name);
-        TeamInfo info = team == null ? null : teams.get(team);
+        Team info = teamOf(name);
         return info == null ? name : info.prefix() + name + info.suffix();
+    }
+
+    /** The team a player (by name) belongs to, or null (World.getScoreboard().getPlayersTeam). */
+    public Team teamOf(String player) {
+        String team = player == null ? null : teamOf.get(player);
+        return team == null ? null : teams.get(team);
+    }
+
+    /** Team.isSameTeam: both on the same team. */
+    public boolean sameTeam(String a, String b) {
+        Team first = teamOf(a);
+        return first != null && first == teamOf(b);
+    }
+
+    /**
+     * The text under a player's name tag: the below-name objective's score (zero when the server sent none, as
+     * Scoreboard.getValueFromObjective creates it) and the objective's display name, or null without an objective.
+     */
+    public String belowName(String player) {
+        if (belowNameObjective == null || !objectives.containsKey(belowNameObjective)) {
+            return null;
+        }
+        int points = scores.getOrDefault(belowNameObjective, Map.of()).getOrDefault(player, 0);
+        String title = objectives.get(belowNameObjective);
+        return points + " " + (title == null ? belowNameObjective : title);
     }
 
     /**

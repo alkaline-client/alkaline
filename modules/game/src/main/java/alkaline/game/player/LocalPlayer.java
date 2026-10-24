@@ -888,8 +888,25 @@ public final class LocalPlayer {
         }
     }
 
+    /** The world border to collide with; null for none (set by the session each tick). */
+    public alkaline.game.world.WorldBorder border;
+    /** Entity.isOutsideBorder: the player got past the border and is held to its outside (a one-block margin). */
+    private boolean outsideBorder;
+
+    /** World.isInsideBorder: inside the border square, widened a block when inside and narrowed when outside. */
+    private boolean insideBorder() {
+        double margin = outsideBorder ? 1 : -1;
+        return x > border.minX() + margin && x < border.maxX() - margin && z > border.minZ() + margin
+                && z < border.maxZ() - margin;
+    }
+
     private List<AxisAlignedBB> collisions(CollisionShapes.States world, AxisAlignedBB area) {
         boxes.clear();
+        // World.getCollidingBoundingBoxes: beyond the border the world reads as stone, so it is a wall from inside.
+        boolean inside = border != null && insideBorder();
+        if (border != null) {
+            outsideBorder = !inside;
+        }
         int minX = (int) Math.floor(area.minX);
         int maxX = (int) Math.floor(area.maxX + 1);
         int minY = (int) Math.floor(area.minY);
@@ -899,8 +916,16 @@ public final class LocalPlayer {
         for (int bx = minX; bx < maxX; bx++) {
             for (int bz = minZ; bz < maxZ; bz++) {
                 // One block lower so 1.5-high fences below the box are found.
+                boolean wall = inside && !border.contains(bx, bz);
                 for (int by = minY - 1; by < maxY; by++) {
-                    CollisionShapes.add(world, bx, by, bz, area, boxes);
+                    if (wall) {
+                        AxisAlignedBB stone = new AxisAlignedBB(bx, by, bz, bx + 1, by + 1, bz + 1);
+                        if (stone.intersectsWith(area)) {
+                            boxes.add(stone);
+                        }
+                    } else {
+                        CollisionShapes.add(world, bx, by, bz, area, boxes);
+                    }
                 }
             }
         }

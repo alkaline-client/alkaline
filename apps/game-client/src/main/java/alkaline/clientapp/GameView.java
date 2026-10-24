@@ -73,6 +73,8 @@ final class GameView implements MenuBackground {
     private final VulkanPipeline blit;
     private final float[] forward = new float[3];
     private final EntityView entities;
+    private final PlayViewer viewer;
+    private final BorderView border;
     private final CloudRenderer clouds;
     private final ParticleSystem particles = new ParticleSystem(PARTICLE_CAPACITY, 1_8_9L);
     private final ParticleRenderer particleRenderer;
@@ -176,6 +178,10 @@ final class GameView implements MenuBackground {
         damageOverlay = overlay;
         entities = new EntityView(renderer, assets, SCENE_FORMAT, skins, catalog);
         entities.customColors(palette.customColors());
+        viewer = new PlayViewer(play);
+        entities.viewer(viewer);
+        entities.maps(play.maps());
+        border = new BorderView(renderer, assets, SCENE_FORMAT);
         CloudRenderer createdClouds = null;
         try {
             createdClouds = new CloudRenderer(renderer, assets, SCENE_FORMAT);
@@ -611,6 +617,7 @@ final class GameView implements MenuBackground {
         // Weather.getWeather: thunder (World.getThunderStrength, already times rain) or rain over half strength.
         entities.world(sky.moonPhase, worldTime, thunder * rain > 0.5f ? RandomEntities.THUNDER
                 : rain > 0.5f ? RandomEntities.RAIN : RandomEntities.CLEAR, columnBiomes);
+        viewer.refresh();
         entities.render(frame, play.entities().all(), play.players(), entityLight, lightmap,
                 fog, hitColor, partialTick, eyeX, eyeY, eyeZ, world.viewProjection(), cameraYaw, cameraPitch,
                 perspective > 0 ? selfModel : null);
@@ -625,12 +632,17 @@ final class GameView implements MenuBackground {
         }
         world.renderWeather(frame);
         world.renderTranslucent(frame);
+        border.drawWall(frame, world.viewProjection(), current.border(), distance, eyeX, eyeY, eyeZ,
+                player.previousX + (player.x - player.previousX) * partialTick,
+                player.previousZ + (player.z - player.previousZ) * partialTick, player.x, player.z,
+                System.currentTimeMillis());
         if (!belowClouds) {
             drawClouds(frame, cloudMode, sky, cloudTicks, eyeX, eyeY, eyeZ, cloudHeight);
         }
         if (perspective == 0) {
             drawHand(frame, partialTick, current, eyeX, eyeY, eyeZ, medium != Sky.Medium.AIR, reach);
         }
+        border.drawWarning(frame, current.border().warning(player.x, player.z));
         frame.endRendering();
         frame.beginRendering(scene, false, 0f, 0f, 0f, 1f);
         frame.bindPipeline(blit);
@@ -772,6 +784,7 @@ final class GameView implements MenuBackground {
             target.close();
         }
         entities.close();
+        border.close();
         if (clouds != null) {
             clouds.close();
         }

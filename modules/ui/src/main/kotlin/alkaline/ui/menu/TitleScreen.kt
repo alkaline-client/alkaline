@@ -119,6 +119,14 @@ fun AlkalineMenu(controller: MenuController) {
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.SIGN) {
                     SignEditor(controller)
                 }
+                if (controller.phase == MenuPhase.READY && overlay == Overlay.SERVER_PACK) {
+                    ServerPackPrompt(controller)
+                }
+                if (controller.phase == MenuPhase.READY && controller.serverPackProgress != null
+                    && (controller.play == PlayPhase.PLAYING || controller.play == PlayPhase.PAUSED)
+                ) {
+                    ServerPackProgress(controller, Modifier.align(Alignment.TopCenter))
+                }
                 if (controller.phase == MenuPhase.READY && controller.play == PlayPhase.CONNECTING) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         ConnectingCard(controller)

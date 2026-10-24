@@ -321,6 +321,7 @@ final class GameView implements MenuBackground {
     @Override
     public void tick() {
         ticks++;
+        entities.tick();
         ConfigSnapshot values = config.get();
         // EntityRenderer.updateRenderer: the fog color follows the light where the player stands.
         ClientWorld current = session.world();

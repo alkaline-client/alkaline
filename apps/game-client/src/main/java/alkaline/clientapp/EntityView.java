@@ -22,6 +22,7 @@ import alkaline.renderer.model.ModelPose;
 import alkaline.renderer.model.PoseMath;
 import alkaline.renderer.texture.EmissiveTextures;
 import alkaline.renderer.texture.RandomEntities;
+import alkaline.renderer.texture.TextureAnimations;
 import alkaline.renderer.vulkan.model.ModelRenderer;
 import alkaline.renderer.vulkan.resource.RenderTargetFormat;
 import alkaline.renderer.vulkan.resource.TextureOptions;
@@ -105,6 +106,34 @@ final class EntityView implements AutoCloseable {
     private long worldTime;
     private int weather;
     private java.util.function.IntBinaryOperator biomes = (x, z) -> 1;
+    /**
+     * OptiFine's texture animations over entity textures: per animated texture, every look composed so far (each
+     * uploaded once, in {@link #beforeFrame}) and the one the current tick shows. Drawing only picks.
+     */
+    private final TextureAnimations animations;
+    private final Map<String, Animated> animated = new HashMap<>();
+    /** Distinct looks one animated texture keeps; past it, new looks wait and the last one stays on screen. */
+    private static final int MAX_ANIMATION_STATES = 256;
+    /** New looks composed and uploaded per frame (each upload waits for the GPU queue). */
+    private static final int ANIMATION_UPLOADS_PER_FRAME = 2;
+    private static final TextureOptions ANIMATION_OPTIONS = new TextureOptions(ImageSampling.NEAREST, false, false, 1);
+
+    private static final class Animated {
+        final TextureAnimations.Target target;
+        final RgbaImage base;
+        final VulkanTexture glow;
+        final long[] states = new long[MAX_ANIMATION_STATES];
+        final VulkanTexture[] looks = new VulkanTexture[MAX_ANIMATION_STATES];
+        int count;
+        VulkanTexture current;
+
+        Animated(TextureAnimations.Target target, RgbaImage base, VulkanTexture glow) {
+            this.target = target;
+            this.base = base;
+            this.glow = glow;
+        }
+    }
+
     /** This entity's light at full block light (EmissiveTextures.beginRenderEmissive: block 240, sky kept). */
     private int emissiveLight;
     private final Map<String, VulkanTexture> skinTextures = new HashMap<>();
@@ -155,6 +184,7 @@ final class EntityView implements AutoCloseable {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         randomEntities = RandomEntities.load(assets);
         emissiveSuffix = EmissiveTextures.suffix(assets);
+        animations = TextureAnimations.load(assets);
         models = new ModelRenderer(renderer, target);
         glints = new GlintStyles(renderer, catalog, models::prepare);
         arrowModel = models.upload(ProjectileModels.arrow());
@@ -270,8 +300,11 @@ final class EntityView implements AutoCloseable {
             String path = pendingTextures.poll();
             // Custom armor textures name full asset paths; the rest are short paths under textures/.
             TextureOptions nearest = new TextureOptions(ImageSampling.NEAREST, false, false, 1);
+            String asset = path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png";
+            TextureAnimations.Target animation = path.indexOf('+') >= 0 ? null : animations.target(asset);
+            RgbaImage animationBase = animation == null ? null : image(asset);
             VulkanTexture texture = path.indexOf('+') >= 0 ? layered(path, nearest)
-                    : load(path.startsWith("assets/") ? path : "assets/minecraft/textures/" + path + ".png", nearest);
+                    : animationBase != null ? renderer.createTexture(animationBase, nearest) : load(asset, nearest);
             if (texture == null) {
                 failedTextures.add(path);
             } else {
@@ -282,8 +315,12 @@ final class EntityView implements AutoCloseable {
                 if (glowing != null) {
                     emissive.put(texture, glowing);
                 }
+                if (animationBase != null) {
+                    animated.put(path, new Animated(animation, animationBase, glowing));
+                }
             }
         }
+        animate(ANIMATION_OPTIONS);
         if (catalog.generation() != gpuGeneration) {
             // The assets changed (resource packs): drop every item uploaded from the old ones.
             closeItems();
@@ -301,6 +338,41 @@ final class EntityView implements AutoCloseable {
                 } else if (catalog.failed(name)) {
                     names.remove();
                 }
+            }
+        }
+    }
+
+    /** Advances the packs' texture animations one game tick; their new looks upload in the next beforeFrame. */
+    void tick() {
+        animations.tick();
+    }
+
+    /**
+     * Picks each animated texture's look for the current tick, composing and uploading looks not seen before
+     * (a few per frame). Outside frames only.
+     */
+    private void animate(TextureOptions options) {
+        int uploads = 0;
+        for (Animated texture : animated.values()) {
+            long state = texture.target.state();
+            VulkanTexture look = null;
+            for (int index = 0; index < texture.count; index++) {
+                if (texture.states[index] == state) {
+                    look = texture.looks[index];
+                    break;
+                }
+            }
+            if (look == null && texture.count < MAX_ANIMATION_STATES && uploads < ANIMATION_UPLOADS_PER_FRAME) {
+                look = renderer.createTexture(texture.target.compose(texture.base), options);
+                texture.states[texture.count] = state;
+                texture.looks[texture.count++] = look;
+                if (texture.glow != null) {
+                    emissive.put(look, texture.glow);
+                }
+                uploads++;
+            }
+            if (look != null) {
+                texture.current = look;
             }
         }
     }
@@ -340,6 +412,12 @@ final class EntityView implements AutoCloseable {
             path = randomEntities.texture(path, subject, moonPhase, worldTime, weather);
         }
         VulkanTexture texture = textures.get(path);
+        if (texture != null && !animated.isEmpty()) {
+            Animated animation = animated.get(path);
+            if (animation != null && animation.current != null) {
+                return animation.current;
+            }
+        }
         if (texture == null && !failedTextures.contains(path) && !pendingTextures.contains(path)) {
             pendingTextures.add(path);
         }
@@ -1387,8 +1465,13 @@ final class EntityView implements AutoCloseable {
         for (VulkanTexture texture : textures.values()) {
             texture.close();
         }
-        for (VulkanTexture texture : emissive.values()) {
+        for (VulkanTexture texture : new java.util.HashSet<>(emissive.values())) {
             texture.close();
+        }
+        for (Animated texture : animated.values()) {
+            for (int index = 0; index < texture.count; index++) {
+                texture.looks[index].close();
+            }
         }
         for (VulkanTexture texture : skinTextures.values()) {
             texture.close();

@@ -18,6 +18,8 @@ public final class CuboidModel {
     private final int textureHeight;
     private final List<ModelPart> parts;
     private final Map<String, Integer> indexByName;
+    /** Each part's parent index (-1 for roots), flat for the per-frame pose walk. */
+    private final int[] parents;
 
     private CuboidModel(String id, int textureWidth, int textureHeight, List<ModelPart> parts) {
         this.id = id;
@@ -29,6 +31,10 @@ public final class CuboidModel {
             names.put(this.parts.get(index).name(), index);
         }
         indexByName = Map.copyOf(names);
+        parents = new int[this.parts.size()];
+        for (int index = 0; index < parents.length; index++) {
+            parents[index] = this.parts.get(index).parent();
+        }
     }
 
     public static Builder builder(String id, int textureWidth, int textureHeight) {
@@ -52,7 +58,12 @@ public final class CuboidModel {
     }
 
     public int partCount() {
-        return parts.size();
+        return parents.length;
+    }
+
+    /** The parent part's index, or -1 for a root part. */
+    public int parent(int part) {
+        return parents[part];
     }
 
     /** Index of a named part; throws when absent so pose code fails at setup, not per frame. */

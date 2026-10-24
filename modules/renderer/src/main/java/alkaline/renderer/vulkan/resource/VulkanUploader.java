@@ -54,12 +54,75 @@ final class VulkanUploader {
     private final VkDevice device;
     private final VkQueue graphicsQueue;
     private final long commandPool;
+    private final boolean hostImageCopy;
 
-    VulkanUploader(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue graphicsQueue, long commandPool) {
+    VulkanUploader(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue graphicsQueue, long commandPool,
+                   boolean hostImageCopy) {
         this.physicalDevice = physicalDevice;
         this.device = device;
         this.graphicsQueue = graphicsQueue;
         this.commandPool = commandPool;
+        this.hostImageCopy = hostImageCopy;
+    }
+
+    /**
+     * Whether static textures are written from the CPU (Vulkan 1.4 host image copy): their images need
+     * VK_IMAGE_USAGE_HOST_TRANSFER_BIT and go through {@link #uploadImageFromHost}.
+     */
+    boolean hostImageCopy() {
+        return hostImageCopy;
+    }
+
+    /**
+     * {@link #uploadImage(long, int, int, int, int, ByteBuffer)} for an image created with host transfer usage:
+     * the host moves it to SHADER_READ_ONLY_OPTIMAL and copies each mip level into it. Nothing is submitted, so
+     * the GPU keeps working on the frames in flight instead of draining for a staging copy.
+     */
+    void uploadImageFromHost(long destinationImage, int width, int height, int layers, int mipLevels,
+                             ByteBuffer pixels) {
+        if (!hostImageCopy) {
+            throw new IllegalStateException("Host image copy is not enabled on this device.");
+        }
+        requireTightlyPacked(width, height, layers, mipLevels, pixels);
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            var transition = org.lwjgl.vulkan.VkHostImageLayoutTransitionInfo.calloc(1, stack);
+            transition.get(0).sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO)
+                    .image(destinationImage).oldLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+                    .newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    .subresourceRange(range -> range.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                            .baseMipLevel(0).levelCount(mipLevels).baseArrayLayer(0).layerCount(layers));
+            requireSuccess(org.lwjgl.vulkan.VK14.vkTransitionImageLayout(device, transition),
+                    "vkTransitionImageLayout");
+            var regions = org.lwjgl.vulkan.VkMemoryToImageCopy.calloc(mipLevels, stack);
+            long address = org.lwjgl.system.MemoryUtil.memAddress(pixels);
+            for (int level = 0; level < mipLevels; level++) {
+                int levelWidth = Math.max(1, width >> level);
+                int levelHeight = Math.max(1, height >> level);
+                int mip = level;
+                regions.get(level).sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY)
+                        .pHostPointer(address).memoryRowLength(0).memoryImageHeight(0)
+                        .imageSubresource(subresource -> subresource.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                                .mipLevel(mip).baseArrayLayer(0).layerCount(layers))
+                        .imageOffset(origin -> origin.set(0, 0, 0))
+                        .imageExtent(extent -> extent.set(levelWidth, levelHeight, 1));
+                address += (long) levelWidth * levelHeight * 4 * layers;
+            }
+            var copy = org.lwjgl.vulkan.VkCopyMemoryToImageInfo.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO)
+                    .dstImage(destinationImage).dstImageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    .pRegions(regions);
+            requireSuccess(org.lwjgl.vulkan.VK14.vkCopyMemoryToImage(device, copy), "vkCopyMemoryToImage");
+        }
+    }
+
+    private static void requireTightlyPacked(int width, int height, int layers, int mipLevels, ByteBuffer pixels) {
+        long expected = 0;
+        for (int level = 0; level < mipLevels; level++) {
+            expected += (long) Math.max(1, width >> level) * Math.max(1, height >> level) * 4 * layers;
+        }
+        if (width <= 0 || height <= 0 || layers <= 0 || mipLevels <= 0 || expected != pixels.remaining()) {
+            throw new IllegalArgumentException("Texture upload dimensions must match tightly packed RGBA pixels.");
+        }
     }
 
     void upload(VulkanBuffer destination, long destinationOffset, ByteBuffer source) {
@@ -97,13 +160,7 @@ final class VulkanUploader {
      */
     void uploadImage(long destinationImage, int width, int height, int layers, int mipLevels, ByteBuffer pixels) {
         ByteBuffer payload = pixels.duplicate();
-        long expected = 0;
-        for (int level = 0; level < mipLevels; level++) {
-            expected += (long) Math.max(1, width >> level) * Math.max(1, height >> level) * 4 * layers;
-        }
-        if (width <= 0 || height <= 0 || layers <= 0 || mipLevels <= 0 || expected != payload.remaining()) {
-            throw new IllegalArgumentException("Texture upload dimensions must match tightly packed RGBA pixels.");
-        }
+        requireTightlyPacked(width, height, layers, mipLevels, payload);
         VulkanBuffer staging = createStaging(payload.remaining());
         try {
             staging.upload(0, payload);

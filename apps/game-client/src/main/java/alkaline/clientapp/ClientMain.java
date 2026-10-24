@@ -42,7 +42,8 @@ public final class ClientMain {
                      ClientApp.presentMode(config.snapshot().get(ClientSettings.VIDEO_VSYNC), window.xwayland()),
                      config.snapshot().get(ClientSettings.DEVELOPER_VALIDATION));
              ClientApp app = new ClientApp(window, renderer, options, config)) {
-            System.out.println("Alkaline 1.8.9 client on " + window.videoDriver() + " / SDL " + window.runtimeVersion());
+            System.out.println("Alkaline 1.8.9 client on " + window.videoDriver() + " / SDL " + window.runtimeVersion()
+                    + (renderer.hostImageCopy() ? "; textures upload by Vulkan 1.4 host image copy" : ""));
             app.run();
             restart = app.restartRequested();
         } catch (IOException failure) {

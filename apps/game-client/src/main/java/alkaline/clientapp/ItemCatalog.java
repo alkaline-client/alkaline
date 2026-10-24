@@ -54,6 +54,20 @@ public final class ItemCatalog {
     /** Glint styles by stack (see {@link #glintStyle}), and each custom style's enchantment rules from 1 up. */
     private final Map<ItemStack, Integer> glintMatched = new HashMap<>();
     private final java.util.List<java.util.List<CustomItems.Rule>> glintStyles = new java.util.ArrayList<>();
+    /**
+     * What drawing asked about each stack instance. Stacks are immutable and an entity keeps the same instance
+     * between metadata updates, so a stack drawn every frame is matched once, without hashing its tag.
+     */
+    private final Map<ItemStack, Looks> looks = new java.util.IdentityHashMap<>();
+
+    private static final class Looks {
+        String model;
+        boolean modelKnown;
+        ItemMeshes.Mesh tintMesh;
+        int[] tints;
+        int glint = Integer.MIN_VALUE;
+        int armor = Integer.MIN_VALUE;
+    }
     private static Map<String, Integer> ids;
 
     ItemCatalog(AssetSource assets) {
@@ -74,6 +88,7 @@ public final class ItemCatalog {
         armorMatched.clear();
         glintMatched.clear();
         glintStyles.clear();
+        looks.clear();
         custom = source == null ? CustomItems.NONE : CustomItems.load(source, ItemCatalog::id);
         if (!custom.rules().isEmpty()) {
             System.err.println("Custom item textures: " + custom.rules().size() + " rules.");
@@ -133,12 +148,36 @@ public final class ItemCatalog {
      * texture ({@code cit:<rule>:<model>}).
      */
     String model(ItemStack stack, int bowPull, boolean cast) {
+        if (stack == null || bowPull >= 0 || cast) {
+            return matchModel(stack, bowPull, cast);
+        }
+        Looks known = looks(stack);
+        if (!known.modelKnown) {
+            known.model = matchModel(stack, -1, false);
+            known.modelKnown = true;
+        }
+        return known.model;
+    }
+
+    private String matchModel(ItemStack stack, int bowPull, boolean cast) {
         String base = modelName(stack, bowPull, cast);
         if (base == null || custom.isEmpty()) {
             return base;
         }
         CustomItems.Rule rule = rule(stack);
         return rule == null ? base : "cit:" + rule.index() + ":" + base;
+    }
+
+    private Looks looks(ItemStack stack) {
+        Looks known = looks.get(stack);
+        if (known == null) {
+            if (looks.size() > 4096) {
+                looks.clear();
+            }
+            known = new Looks();
+            looks.put(stack, known);
+        }
+        return known;
     }
 
     /**
@@ -149,7 +188,8 @@ public final class ItemCatalog {
         if (stack == null || custom.isEmpty()) {
             return null;
         }
-        Integer index = armorMatched.get(stack);
+        Looks known = looks(stack);
+        Integer index = known.armor != Integer.MIN_VALUE ? Integer.valueOf(known.armor) : armorMatched.get(stack);
         if (index == null) {
             if (armorMatched.size() > 256) {
                 armorMatched.clear();
@@ -158,6 +198,7 @@ public final class ItemCatalog {
             index = rule == null ? -1 : rule.index();
             armorMatched.put(stack, index);
         }
+        known.armor = index;
         return index < 0 ? null : custom.rule(index).texture(original, false);
     }
 
@@ -185,6 +226,10 @@ public final class ItemCatalog {
         if (!custom.hasEnchantmentRules()) {
             return custom.useGlint() ? 0 : -1;
         }
+        Looks known = looks(stack);
+        if (known.glint != Integer.MIN_VALUE) {
+            return known.glint;
+        }
         Integer style = glintMatched.get(stack);
         if (style == null) {
             if (glintMatched.size() > 4096) {
@@ -199,6 +244,7 @@ public final class ItemCatalog {
             style = rules.isEmpty() ? (custom.useGlint() ? 0 : -1) : index + 1;
             glintMatched.put(stack, style);
         }
+        known.glint = style;
         return style;
     }
 
@@ -415,8 +461,23 @@ public final class ItemCatalog {
         return ItemMeshes.state(assets, blocks, location, chest, name);
     }
 
-    /** The tint of each of a mesh's tint slots for a stack (0xFFRRGGBB, or 0xFFFFFFFF untinted). */
+    /**
+     * The tint of each of a mesh's tint slots for a stack (0xFFRRGGBB, or 0xFFFFFFFF untinted). The array is
+     * shared with later calls for the same stack and mesh: read it, never write it.
+     */
     int[] tints(ItemStack stack, ItemMeshes.Mesh mesh) {
+        if (stack == null) {
+            return matchTints(null, mesh);
+        }
+        Looks known = looks(stack);
+        if (known.tintMesh != mesh) {
+            known.tints = matchTints(stack, mesh);
+            known.tintMesh = mesh;
+        }
+        return known.tints;
+    }
+
+    private int[] matchTints(ItemStack stack, ItemMeshes.Mesh mesh) {
         int slots = 0;
         for (ItemMeshes.Layer layer : mesh.layers()) {
             slots = Math.max(slots, layer.tintIndex() + 1);

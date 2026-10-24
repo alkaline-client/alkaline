@@ -52,6 +52,7 @@ public final class PipelineSpec {
     private final Blend blend;
     private final boolean depthTest;
     private final boolean depthWrite;
+    private final boolean depthClamp;
     private final boolean cullBackFaces;
     private final boolean sampledImage;
     private final int sampledImages;
@@ -69,6 +70,7 @@ public final class PipelineSpec {
         blend = builder.blend;
         depthTest = builder.depthTest;
         depthWrite = builder.depthWrite;
+        depthClamp = builder.depthClamp;
         cullBackFaces = builder.cullBackFaces;
         sampledImage = builder.sampledImages > 0;
         sampledImages = builder.sampledImages;
@@ -98,6 +100,7 @@ public final class PipelineSpec {
     Blend blend() { return blend; }
     boolean depthTest() { return depthTest; }
     boolean depthWrite() { return depthWrite; }
+    boolean depthClamp() { return depthClamp; }
     boolean cullBackFaces() { return cullBackFaces; }
     boolean sampledImage() { return sampledImage; }
     /** How many single-image descriptor sets (sets 0..n-1, each one combined image sampler at binding 0). */
@@ -122,6 +125,7 @@ public final class PipelineSpec {
         private Blend blend = Blend.NONE;
         private boolean depthTest;
         private boolean depthWrite;
+        private boolean depthClamp;
         private boolean cullBackFaces;
         private int sampledImages;
         private int pushConstantBytes;
@@ -164,6 +168,15 @@ public final class PipelineSpec {
         public Builder depth(boolean test, boolean write) {
             depthTest = test;
             depthWrite = write;
+            return this;
+        }
+
+        /**
+         * Clamps fragment depth to the viewport's range instead of clipping at the near and far planes; needs the
+         * device's depthClamp feature ({@link VulkanRenderer#depthClamp}).
+         */
+        public Builder depthClamp(boolean value) {
+            depthClamp = value;
             return this;
         }
 

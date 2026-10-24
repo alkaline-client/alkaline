@@ -328,10 +328,9 @@ public final class ModelRenderer implements AutoCloseable {
             droppedInstances++;
             return false;
         }
-        ByteBuffer stream = frame.stream();
-        int position = (int) offset;
+        long pointer = frame.streamPointer(offset);
         for (int index = 0; index < parts * PoseMath.FLOATS_PER_PART; index++) {
-            stream.putFloat(position + index * Float.BYTES, matrices[index]);
+            MemoryUtil.memPutFloat(pointer + (long) index * Float.BYTES, matrices[index]);
         }
         int textureSlot = textureSlot(texture);
         int instance = instanceCount++;
@@ -363,14 +362,14 @@ public final class ModelRenderer implements AutoCloseable {
             return;
         }
         Arrays.sort(sortKeys, 0, instanceCount);
-        ByteBuffer stream = target.stream();
+        long instances = target.streamPointer(instancesOffset);
         for (int sorted = 0; sorted < instanceCount; sorted++) {
             int instance = (int) (sortKeys[sorted] & 0xFFFF_FFFFL);
-            int position = (int) instancesOffset + sorted * INSTANCE_BYTES;
-            stream.putInt(position, instanceMatrixRow[instance]);
-            stream.putInt(position + 4, instanceTint[instance]);
-            stream.putInt(position + 8, instanceOverlay[instance]);
-            stream.putInt(position + 12, instanceLight[instance]);
+            long position = instances + (long) sorted * INSTANCE_BYTES;
+            MemoryUtil.memPutInt(position, instanceMatrixRow[instance]);
+            MemoryUtil.memPutInt(position + 4, instanceTint[instance]);
+            MemoryUtil.memPutInt(position + 8, instanceOverlay[instance]);
+            MemoryUtil.memPutInt(position + 12, instanceLight[instance]);
         }
 
         push.clear();

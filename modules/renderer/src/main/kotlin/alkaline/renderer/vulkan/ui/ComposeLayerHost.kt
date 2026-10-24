@@ -58,10 +58,19 @@ class ComposeLayerHost(
         var rowBands: IntArray? = null
             internal set
 
+        /**
+         * Rows holding any non-transparent pixel, as {@code start, end} pairs (end exclusive), small gaps merged;
+         * the rest of the frame is clear, so the compositor need not blend it. Null when unknown.
+         */
+        var contentBands: IntArray? = null
+            internal set
+
         internal var sequence = 0L
     }
 
     private companion object {
+        /** Clear gaps shorter than this many rows stay inside one content band. */
+        const val CONTENT_GAP = 32
         const val MIN_RATE = 10
         const val MAX_RATE = 1000
     }
@@ -213,6 +222,8 @@ class ComposeLayerHost(
     /** Rows changed since the last consumed frame (a superset is safe), and the previous frame's pixels. */
     private var pendingRows: BooleanArray? = null
     private var lastPixels: ByteBuffer? = null
+    /** Per row of [lastPixels]: whether it has any non-clear pixel (see [Frame.contentBands]). */
+    private var filledRows: BooleanArray? = null
 
     fun release(frame: Frame) {
         if (frame.generation == generationSnapshot) free.offer(frame) else MemoryUtil.memFree(frame.pixels)
@@ -285,8 +296,11 @@ class ComposeLayerHost(
                 MemoryUtil.memCopy(MemoryUtil.memAddress(pixels), MemoryUtil.memAddress(it), pixels.capacity().toLong())
             }
             pendingRows = BooleanArray(sceneHeight) { true }
+            val source = MemoryUtil.memAddress(pixels)
+            filledRows = BooleanArray(sceneHeight) { row -> filled(source + row.toLong() * rowBytes, rowBytes) }
             return null
         }
+        val filled = filledRows ?: BooleanArray(sceneHeight) { true }.also { filledRows = it }
         val pending = pendingRows ?: BooleanArray(sceneHeight).also { pendingRows = it }
         if (consumedSequence == publishedSequence) pending.fill(false)
         val source = MemoryUtil.memAddress(pixels)
@@ -309,6 +323,7 @@ class ComposeLayerHost(
             if (differs) {
                 pending[row] = true
                 MemoryUtil.memCopy(source + base, copy + base, rowBytes.toLong())
+                filled[row] = filled(source + base, rowBytes)
             }
         }
         var bands = IntArray(8)
@@ -330,9 +345,50 @@ class ComposeLayerHost(
         return if (changed * 4 > sceneHeight * 3) null else bands.copyOf(count)
     }
 
+    /** Whether a row of {@code bytes} at {@code address} has any non-zero (not fully clear) pixel. */
+    private fun filled(address: Long, bytes: Int): Boolean {
+        var offset = 0
+        while (offset + 8 <= bytes) {
+            if (MemoryUtil.memGetLong(address + offset) != 0L) return true
+            offset += 8
+        }
+        return offset < bytes && MemoryUtil.memGetInt(address + offset) != 0
+    }
+
+    /** {@link #filledRows} as bands, merging gaps shorter than [CONTENT_GAP] rows so the bands stay few. */
+    private fun contentBands(): IntArray? {
+        val filled = filledRows ?: return null
+        var bands = IntArray(8)
+        var count = 0
+        var row = 0
+        while (row < filled.size) {
+            if (!filled[row]) {
+                row++
+                continue
+            }
+            val start = row
+            var end = row + 1
+            row++
+            while (row < filled.size) {
+                if (filled[row]) {
+                    end = ++row
+                } else if (row - end < CONTENT_GAP) {
+                    row++
+                } else {
+                    break
+                }
+            }
+            if (count + 2 > bands.size) bands = bands.copyOf(bands.size * 2)
+            bands[count++] = start
+            bands[count++] = end
+        }
+        return bands.copyOf(count)
+    }
+
     private fun createScene() {
         lastPixels?.let(MemoryUtil::memFree)
         lastPixels = null
+        filledRows = null
         scene?.close()
         generation++
         generationSnapshot = generation
@@ -433,6 +489,7 @@ class ComposeLayerHost(
             }
             pixmap.close()
             frame.rowBands = changedRows(frame.pixels)
+            frame.contentBands = contentBands()
             frame.sequence = ++publishedSequence
             frame.glass = glassRegistry.snapshot()
             frame.anchors = glassRegistry.anchorSnapshot()

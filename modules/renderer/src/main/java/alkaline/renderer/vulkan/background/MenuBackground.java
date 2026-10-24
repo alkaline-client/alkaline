@@ -34,6 +34,14 @@ public interface MenuBackground extends AutoCloseable {
     default void pointer(float x, float y) {
     }
 
+    /**
+     * Whether the scene target should carry a depth attachment, so a 3D background draws into it directly instead
+     * of into its own target and a full-screen copy.
+     */
+    default boolean needsDepth() {
+        return false;
+    }
+
     /** Advances fixed-rate state at the game's 20 Hz tick cadence. */
     default void tick() {
     }

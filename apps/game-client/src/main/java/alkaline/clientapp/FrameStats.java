@@ -10,7 +10,8 @@ import java.util.Arrays;
  */
 final class FrameStats {
     private static final int CAPACITY = 1 << 16;
-    private static final long WARMUP_NANOS = 2_000_000_000L;
+    /** Two seconds, or {@code -Dalkaline.stats.warmupMs} to measure a scripted scene without loading and joining. */
+    private static final long WARMUP_NANOS = Long.getLong("alkaline.stats.warmupMs", 2000L) * 1_000_000L;
 
     private final long[] intervals = new long[CAPACITY];
     private final long[] cpu = new long[CAPACITY];
@@ -89,10 +90,10 @@ final class FrameStats {
             sum += interval;
         }
         return String.format(
-                "Frame stats (%d frames after 2 s warm-up): mean %.3f ms (%.0f fps), p50 %.3f ms, p95 %.3f ms, "
+                "Frame stats (%d frames after %.1f s warm-up): mean %.3f ms (%.0f fps), p50 %.3f ms, p95 %.3f ms, "
                         + "p99 %.3f ms, max %.3f ms; render thread allocated %.1f bytes/frame%n"
                         + "  %s%n  %s%n  %s",
-                count, sum / count / 1e6, 1e9 / (sum / count), percentile(sorted, 0.50), percentile(sorted, 0.95),
+                count, WARMUP_NANOS / 1e9, sum / count / 1e6, 1e9 / (sum / count), percentile(sorted, 0.50), percentile(sorted, 0.95),
                 percentile(sorted, 0.99), sorted[count - 1] / 1e6,
                 allocationFrames == 0 ? 0.0 : allocated / (double) allocationFrames,
                 line("CPU record", cpu, cpuCount), line("GPU frame ", gpu, gpuCount),

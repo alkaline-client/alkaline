@@ -48,14 +48,18 @@ public final class ClientWorld {
 
     private final ConcurrentHashMap<Long, Column> columns = new ConcurrentHashMap<>();
     /**
-     * The last column looked up, so repeated lookups in one column (the render thread asks about the same few
-     * columns many times a frame) neither box a key nor search the map. The version guards against keeping a
-     * column that was replaced or unloaded while it was being looked up.
+     * A column looked up, so repeated lookups (the render thread asks about the same few columns many times a
+     * frame) neither box a key nor search the map. The version guards against keeping a column that was replaced
+     * or unloaded while it was being looked up.
      */
     private record Cached(long key, Column column, int version) {
     }
 
-    private volatile Cached cached;
+    /**
+     * Direct-mapped by the chunk's low coordinate bits, so lookups that alternate between nearby columns (entities
+     * spread over several chunks) keep hitting. Entries are immutable, so a racing reader sees a whole one.
+     */
+    private final Cached[] cached = new Cached[64];
     private volatile int columnVersion;
     private final ConcurrentLinkedQueue<Long> changed = new ConcurrentLinkedQueue<>();
     private final boolean skyLight;
@@ -106,13 +110,14 @@ public final class ClientWorld {
     private Column column(int chunkX, int chunkZ) {
         long key = columnKey(chunkX, chunkZ);
         int version = columnVersion;
-        Cached hit = cached;
+        int slot = (chunkX & 7) | (chunkZ & 7) << 3;
+        Cached hit = cached[slot];
         if (hit != null && hit.key == key && hit.version == version) {
             return hit.column;
         }
         Column column = columns.get(key);
         if (column != null) {
-            cached = new Cached(key, column, version);
+            cached[slot] = new Cached(key, column, version);
         }
         return column;
     }

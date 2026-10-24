@@ -20,6 +20,16 @@ import static org.lwjgl.vulkan.VK10.vkDestroySampler;
 
 /** Immutable sampled RGBA texture (optionally a same-size 2D array) owned by one Vulkan renderer. */
 public final class VulkanTexture extends VulkanSampledImage implements AutoCloseable {
+    /** Usage of every static texture image; host image copy adds VK_IMAGE_USAGE_HOST_TRANSFER_BIT. */
+    static final int STATIC_USAGE = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+            | VK_IMAGE_USAGE_SAMPLED_BIT;
+    /**
+     * The largest texture (level 0, all layers) written by host image copy. Host-transfer images may need the
+     * small host-visible device heap (246 MiB on a GTX 1660 SUPER without resizable BAR), so only the textures
+     * created during play (skins, items, maps, font pages, animation frames) take that path; atlases and sky
+     * images loaded with the assets keep the staging copy.
+     */
+    private static final long HOST_COPY_MAX_BYTES = 1L << 20;
     private final VulkanRenderer owner;
     private final VkDevice device;
     private final VulkanTextureDescriptors descriptors;
@@ -57,10 +67,22 @@ public final class VulkanTexture extends VulkanSampledImage implements AutoClose
         try {
             int mipLevels = Math.min(options.mipLevels(),
                     32 - Integer.numberOfLeadingZeros(Math.max(first.width(), first.height())));
-            createdImage = VulkanImage.create(physicalDevice, device, first.width(), first.height(), sources.size(),
-                    mipLevels, format, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
-                            | VK_IMAGE_USAGE_SAMPLED_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT, arrayView);
+            boolean host = uploader.hostImageCopy()
+                    && (long) first.width() * first.height() * 4 * sources.size() <= HOST_COPY_MAX_BYTES;
+            if (host) {
+                try {
+                    createdImage = VulkanImage.create(physicalDevice, device, first.width(), first.height(),
+                            sources.size(), mipLevels, format,
+                            STATIC_USAGE | org.lwjgl.vulkan.VK14.VK_IMAGE_USAGE_HOST_TRANSFER_BIT,
+                            VK_IMAGE_ASPECT_COLOR_BIT, arrayView);
+                } catch (IllegalStateException full) {
+                    host = false; // its memory heap is full: the staging copy needs none of it
+                }
+            }
+            if (!host) {
+                createdImage = VulkanImage.create(physicalDevice, device, first.width(), first.height(),
+                        sources.size(), mipLevels, format, STATIC_USAGE, VK_IMAGE_ASPECT_COLOR_BIT, arrayView);
+            }
             createdSampler = VulkanImage.createSampler(device, options.sampling() == ImageSampling.LINEAR,
                     options.repeat(), mipLevels);
             createdDescriptor = descriptors.allocate(descriptorSetLayout);
@@ -81,7 +103,13 @@ public final class VulkanTexture extends VulkanSampledImage implements AutoClose
                 }
             }
             pixels.flip();
-            uploader.uploadImage(createdImage.image(), first.width(), first.height(), sources.size(), mipLevels, pixels);
+            if (host) {
+                uploader.uploadImageFromHost(createdImage.image(), first.width(), first.height(), sources.size(),
+                        mipLevels, pixels);
+            } else {
+                uploader.uploadImage(createdImage.image(), first.width(), first.height(), sources.size(), mipLevels,
+                        pixels);
+            }
         } catch (RuntimeException | Error failure) {
             if (createdDescriptor != null) {
                 try {

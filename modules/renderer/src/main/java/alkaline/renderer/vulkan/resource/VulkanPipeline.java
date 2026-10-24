@@ -207,7 +207,7 @@ public final class VulkanPipeline implements AutoCloseable {
                     .sType(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO).viewportCount(1).scissorCount(1);
             VkPipelineRasterizationStateCreateInfo rasterization = VkPipelineRasterizationStateCreateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
-                    .polygonMode(VK_POLYGON_MODE_FILL)
+                    .polygonMode(VK_POLYGON_MODE_FILL).depthClampEnable(spec.depthClamp())
                     .cullMode(spec.cullBackFaces() ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
                     .frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE).lineWidth(1.0f);
             VkPipelineMultisampleStateCreateInfo multisampling = VkPipelineMultisampleStateCreateInfo.calloc(stack)

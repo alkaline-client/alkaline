@@ -8,6 +8,18 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class VanillaFontTest {
+    @Test
+    void atlasIndexIsTheFirstCellHoldingTheCharacter() {
+        StringBuilder table = new StringBuilder();
+        for (int index = 0; index < 256; index++) {
+            table.append(VanillaFontLayout.legacyCharacter(index));
+        }
+        for (int character = 0; character <= Character.MAX_VALUE; character++) {
+            assertEquals(table.indexOf(String.valueOf((char) character)),
+                    VanillaFontLayout.atlasIndex((char) character), "char " + character);
+        }
+    }
+
     /** An atlas where every glyph's cell has opaque pixels in its first {@code columns} columns, 'W' in 7. */
     private static VanillaFont font() {
         byte[] pixels = new byte[128 * 128 * 4];

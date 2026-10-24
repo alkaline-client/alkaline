@@ -54,6 +54,8 @@ public final class SkyRenderer implements AutoCloseable {
     private static final int WEATHER_RANGE = 10;
 
     private final VulkanRenderer renderer;
+    /** See {@link #drawsAtFarPlane}. */
+    private final boolean far;
     private final VulkanPipeline planes;
     private final VulkanPipeline planesLinear;
     private final VulkanPipeline blended;
@@ -81,6 +83,10 @@ public final class SkyRenderer implements AutoCloseable {
     private final java.util.EnumMap<CustomSky.Blend, VulkanPipeline> layerPipelines = new java.util.EnumMap<>(CustomSky.Blend.class);
     /** Per layer: the smoothed biomes-and-heights brightness and when it last stepped (0: not yet drawn). */
     private final float[] layerPosition;
+    /** Per layer: this frame's brightness, 0 when it is not drawn ({@link #updateLayers}). */
+    private final float[] layerBrightness;
+    /** Per layer: the texture's lowest alpha, for whether a "replace" layer covers every pixel. */
+    private final int[] layerMinAlpha;
     private final long[] layerPositionNanos;
 
     /** @param target offscreen color format the world renders into, or null for the main pass */
@@ -88,11 +94,12 @@ public final class SkyRenderer implements AutoCloseable {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         List<AutoCloseable> created = new ArrayList<>();
         try {
-            planes = track(created, renderer.createPipeline(fullscreen(target).gammaSpace().build()));
-            planesLinear = track(created, renderer.createPipeline(fullscreen(target).build()));
-            blended = track(created, renderer.createPipeline(geometry("sky.frag", target, PipelineSpec.Blend.ALPHA, false)));
-            additive = track(created, renderer.createPipeline(geometry("sky.frag", target, PipelineSpec.Blend.ADDITIVE, false)));
-            weather = track(created, renderer.createPipeline(geometry("weather.frag", target, PipelineSpec.Blend.ALPHA, true)));
+            far = renderer.depthClamp();
+            planes = track(created, renderer.createPipeline(fullscreen(target, far).gammaSpace().build()));
+            planesLinear = track(created, renderer.createPipeline(fullscreen(target, far).build()));
+            blended = track(created, renderer.createPipeline(geometry("sky.frag", target, PipelineSpec.Blend.ALPHA, false, far)));
+            additive = track(created, renderer.createPipeline(geometry("sky.frag", target, PipelineSpec.Blend.ADDITIVE, false, far)));
+            weather = track(created, renderer.createPipeline(geometry("weather.frag", target, PipelineSpec.Blend.ALPHA, true, false)));
             white = track(created, texture(renderer, null, null));
             sun = track(created, texture(renderer, assets, "environment/sun"));
             moon = track(created, texture(renderer, assets, "environment/moon_phases"));
@@ -101,15 +108,20 @@ public final class SkyRenderer implements AutoCloseable {
             custom = assets == null ? CustomSky.NONE : CustomSky.load(assets);
             layerTextures = new VulkanTexture[custom.layers().size()];
             layerPosition = new float[layerTextures.length];
+            layerBrightness = new float[layerTextures.length];
+            layerMinAlpha = new int[layerTextures.length];
             layerPositionNanos = new long[layerTextures.length];
             for (int index = 0; index < layerTextures.length; index++) {
                 CustomSky.Layer layer = custom.layers().get(index);
-                layerTextures[index] = track(created, skyTexture(renderer, assets, layer.source()));
+                RgbaImage image = skyImage(assets, layer.source());
+                layerTextures[index] = image == null ? null : track(created, renderer.createTexture(image,
+                        new TextureOptions(ImageSampling.LINEAR, false, true, 1)));
+                layerMinAlpha[index] = image == null ? 0 : minAlpha(image);
                 if (layerTextures[index] != null && !layerPipelines.containsKey(layer.blend())) {
                     // "replace" draws unblended, alpha-tested at 0.1 as OptiFine's does.
                     layerPipelines.put(layer.blend(), track(created, renderer.createPipeline(geometry(
                             layer.blend() == CustomSky.Blend.REPLACE ? "sky_cutout.frag" : "sky.frag", target,
-                            pipelineBlend(layer.blend()), false))));
+                            pipelineBlend(layer.blend()), false, far))));
                 }
             }
         } catch (RuntimeException | Error failure) {
@@ -173,9 +185,21 @@ public final class SkyRenderer implements AutoCloseable {
         return resource;
     }
 
-    private static PipelineSpec.Builder fullscreen(RenderTargetFormat target) {
-        PipelineSpec.Builder builder = PipelineSpec.builder("fullscreen.vert", "sky_planes.frag")
-                .pushConstants(PLANES_PUSH);
+    /**
+     * Whether the sky draws at the far plane, depth-tested (depth clamp available): it then looks the same drawn
+     * before or after the opaque terrain, and after it shades only the pixels the terrain leaves uncovered.
+     */
+    public boolean drawsAtFarPlane() {
+        return far;
+    }
+
+    /** {@code far}: at the far plane, depth-tested ({@link #drawsAtFarPlane}). */
+    private static PipelineSpec.Builder fullscreen(RenderTargetFormat target, boolean far) {
+        PipelineSpec.Builder builder = PipelineSpec.builder(far ? "sky_planes_far.vert" : "fullscreen.vert",
+                        "sky_planes.frag")
+                .pushConstants(PLANES_PUSH)
+                .depth(far, false)
+                .depthClamp(far);
         if (target != null) {
             builder.offscreen(target, true);
         }
@@ -183,15 +207,16 @@ public final class SkyRenderer implements AutoCloseable {
     }
 
     private static PipelineSpec geometry(String fragment, RenderTargetFormat target, PipelineSpec.Blend blend,
-                                         boolean depthTest) {
-        PipelineSpec.Builder builder = PipelineSpec.builder("sky.vert", fragment)
+                                         boolean depthTest, boolean far) {
+        PipelineSpec.Builder builder = PipelineSpec.builder(far ? "sky_far.vert" : "sky.vert", fragment)
                 .binding(0, VERTEX_BYTES, false)
                 .attribute(0, 0, VertexFormat.FLOAT3, 0)
                 .attribute(1, 0, VertexFormat.FLOAT2, 12)
                 .attribute(2, 0, VertexFormat.UNORM8X4, 20)
                 .sampledImage(true)
                 .blend(blend)
-                .depth(depthTest, false)
+                .depth(depthTest || far, false)
+                .depthClamp(far)
                 .pushConstants(GEOMETRY_PUSH)
                 .gammaSpace();
         if (target != null) {
@@ -301,10 +326,14 @@ public final class SkyRenderer implements AutoCloseable {
         planesPush.putFloat(96, sky.fogDensity).putFloat(100, renderDistanceChunks >= 4 ? 1f : 0f)
                 .putFloat(104, 0f).putFloat(108, 0f);
         planesPush.limit(PLANES_PUSH);
-        frame.bindPipeline(gamma ? planes : planesLinear);
-        frame.pushConstants(planesPush);
-        frame.draw(3, 1, 0, 0);
-        if (gamma && renderDistanceChunks >= 4) {
+        boolean layers = gamma && renderDistanceChunks >= 4;
+        int covering = layers ? updateLayers(sky) : -1;
+        if (covering < 0) {
+            frame.bindPipeline(gamma ? planes : planesLinear);
+            frame.pushConstants(planesPush);
+            frame.draw(3, 1, 0, 0);
+        }
+        if (layers) {
             geometryPush.clear();
             for (int index = 0; index < 16; index++) {
                 geometryPush.putFloat(index * 4, viewProjection[index]);
@@ -314,7 +343,7 @@ public final class SkyRenderer implements AutoCloseable {
             // The planes draw with an unflipped viewport (their uv follows the screen); world-space geometry
             // needs the world's y-up one, or it mirrors about the screen center.
             frame.setViewport(0, 0, viewportWidth, viewportHeight, true);
-            drawCelestial(frame, sky, viewProjection);
+            drawCelestial(frame, sky, viewProjection, covering);
             frame.setViewport(0, 0, viewportWidth, viewportHeight, false);
         }
         // The sea-level plane and void box cover what lies below them, sun and moon included.
@@ -328,13 +357,22 @@ public final class SkyRenderer implements AutoCloseable {
     }
 
     private final float[] layerMatrix = new float[9];
-    private final float[] sideMatrix = new float[9];
     private final float[] scratchMatrix = new float[9];
-    private static final float[] TURN_SKY = axis(0, 1, 0, -90.0F);
-    private static final float[] X_PLUS_90 = axis(1, 0, 0, 90.0F);
-    private static final float[] X_MINUS_90 = axis(1, 0, 0, -90.0F);
-    private static final float[] Z_PLUS_90 = axis(0, 0, 1, 90.0F);
-    private static final float[] Z_MINUS_90 = axis(0, 0, 1, -90.0F);
+    // Quarter turns, snapped to exact 0 and 1 (float cos(90) is 4e-8, not 0).
+    private static final float[] TURN_SKY = snap(axis(0, 1, 0, -90.0F));
+    private static final float[] X_PLUS_90 = snap(axis(1, 0, 0, 90.0F));
+    private static final float[] X_MINUS_90 = snap(axis(1, 0, 0, -90.0F));
+    private static final float[] Z_PLUS_90 = snap(axis(0, 0, 1, 90.0F));
+    private static final float[] Z_MINUS_90 = snap(axis(0, 0, 1, -90.0F));
+    /** CustomSkyLayer.render's sides in drawing order: the texture cell each shows. */
+    private static final int[] SIDE_CELLS = {4, 1, 0, 5, 2, 3};
+    /**
+     * Each side's four corners (x, y, z) before the layer's own turn: the plane y = -100 under the side's exact
+     * quarter turns. Shared corners are bit-identical, so the cube has no cracks once the layer's matrix is applied
+     * the same way to each, and a layer that draws every pixel really covers the sky.
+     */
+    private static final float[][] SIDE_CORNERS = sideCorners();
+    private final float[] axisMatrix = new float[9];
 
     /**
      * OptiFine's custom sky layers (CustomSky.renderSky), over the vanilla sky after the sunrise glow and before the
@@ -342,15 +380,10 @@ public final class SkyRenderer implements AutoCloseable {
      * CustomSkyLayer.render's six sides, each the 3x2 texture cell {@code side} on the plane y = -100 under its own
      * rotation.
      */
-    private void drawCustomLayers(VulkanFrame frame, Sky sky) {
-        for (int index = 0; index < layerTextures.length; index++) {
+    private void drawCustomLayers(VulkanFrame frame, Sky sky, int first) {
+        for (int index = first; index < layerTextures.length; index++) {
             CustomSky.Layer layer = custom.layers().get(index);
-            if (layerTextures[index] == null || !layer.active(sky.worldTime)) {
-                continue;
-            }
-            float brightness = position(index, layer, sky) * layer.weather(sky.rain, sky.thunder)
-                    * layer.fade(sky.worldTime);
-            brightness = Math.max(0f, Math.min(1f, brightness));
+            float brightness = layerBrightness[index];
             if (brightness < 1.0E-4F) {
                 continue;
             }
@@ -360,8 +393,9 @@ public final class SkyRenderer implements AutoCloseable {
             }
             System.arraycopy(TURN_SKY, 0, layerMatrix, 0, 9);
             if (layer.rotate()) {
-                multiply(layerMatrix, axis(layer.axis()[0], layer.axis()[1], layer.axis()[2],
-                        layer.angle(sky.worldTime, sky.celestialAngle)), scratchMatrix);
+                axis(layer.axis()[0], layer.axis()[1], layer.axis()[2],
+                        layer.angle(sky.worldTime, sky.celestialAngle), axisMatrix);
+                multiply(layerMatrix, axisMatrix, scratchMatrix);
                 System.arraycopy(scratchMatrix, 0, layerMatrix, 0, 9);
             }
             multiply(layerMatrix, X_PLUS_90, scratchMatrix);
@@ -374,17 +408,9 @@ public final class SkyRenderer implements AutoCloseable {
             };
             ByteBuffer stream = frame.stream();
             int position = (int) offset;
-            position = side(stream, position, layerMatrix, 4, color);
-            multiply(layerMatrix, X_PLUS_90, sideMatrix);
-            position = side(stream, position, sideMatrix, 1, color);
-            multiply(layerMatrix, X_MINUS_90, sideMatrix);
-            position = side(stream, position, sideMatrix, 0, color);
-            multiply(layerMatrix, Z_PLUS_90, sideMatrix);
-            position = side(stream, position, sideMatrix, 5, color);
-            multiply(sideMatrix, Z_PLUS_90, scratchMatrix);
-            position = side(stream, position, scratchMatrix, 2, color);
-            multiply(scratchMatrix, Z_PLUS_90, sideMatrix);
-            side(stream, position, sideMatrix, 3, color);
+            for (int side = 0; side < SIDE_CELLS.length; side++) {
+                position = side(stream, position, layerMatrix, side, color);
+            }
             frame.bindPipeline(layerPipelines.get(layer.blend()));
             frame.bindImage(layerTextures[index]);
             frame.pushConstants(geometryPush);
@@ -414,13 +440,72 @@ public final class SkyRenderer implements AutoCloseable {
         return layerPosition[index];
     }
 
-    /** CustomSkyLayer.renderSide: cell {@code side} of the 3x2 texture on the plane y = -100. */
+    /**
+     * The layer's brightness this frame for each layer (0 when not drawn), and the last layer that covers every
+     * pixel: an unblended "replace" layer whose texture's lowest alpha passes its 0.1 cutout at this brightness.
+     * Everything drawn before that layer is hidden, so it need not be drawn. Returns -1 when no layer covers.
+     */
+    private int updateLayers(Sky sky) {
+        int covering = -1;
+        for (int index = 0; index < layerTextures.length; index++) {
+            CustomSky.Layer layer = custom.layers().get(index);
+            if (layerTextures[index] == null || !layer.active(sky.worldTime)) {
+                layerBrightness[index] = 0f;
+                continue;
+            }
+            float brightness = position(index, layer, sky) * layer.weather(sky.rain, sky.thunder)
+                    * layer.fade(sky.worldTime);
+            brightness = Math.max(0f, Math.min(1f, brightness));
+            layerBrightness[index] = brightness;
+            // The cutout keeps texel alpha times the vertex alpha above 0.1; 0.11 leaves room for filtering.
+            if (brightness >= 1.0E-4F && layer.blend() == CustomSky.Blend.REPLACE
+                    && layerMinAlpha[index] * channel(brightness) > 0.11F * 255 * 255) {
+                covering = index;
+            }
+        }
+        return covering;
+    }
+
+    /** CustomSkyLayer.renderSide: the 3x2 texture cell of side {@code side} (in drawing order) on its plane. */
     private static int side(ByteBuffer stream, int position, float[] m, int side, int color) {
-        float u = (side % 3) / 3.0F;
-        float v = (side / 3) / 2.0F;
+        int cell = SIDE_CELLS[side];
+        float u = (cell % 3) / 3.0F;
+        float v = (cell / 3) / 2.0F;
         float w = 1.0F / 3.0F;
-        return quad(stream, position, m, -100, -100, -100, u, v, -100, -100, 100, u, v + 0.5F,
-                100, -100, 100, u + w, v + 0.5F, 100, -100, -100, u + w, v, color);
+        float[] c = SIDE_CORNERS[side];
+        return quad(stream, position, m, c[0], c[1], c[2], u, v, c[3], c[4], c[5], u, v + 0.5F,
+                c[6], c[7], c[8], u + w, v + 0.5F, c[9], c[10], c[11], u + w, v, color);
+    }
+
+    private static float[][] sideCorners() {
+        float[] identity = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        float[] half = new float[9];
+        float[] threeQuarters = new float[9];
+        multiply(Z_PLUS_90, Z_PLUS_90, half);
+        multiply(half, Z_PLUS_90, threeQuarters);
+        float[][] turns = {identity, X_PLUS_90, X_MINUS_90, Z_PLUS_90, half, threeQuarters};
+        float[] plane = {-100, -100, -100, -100, -100, 100, 100, -100, 100, 100, -100, -100};
+        float[][] corners = new float[turns.length][12];
+        for (int side = 0; side < turns.length; side++) {
+            float[] m = turns[side];
+            for (int corner = 0; corner < 4; corner++) {
+                float x = plane[corner * 3];
+                float y = plane[corner * 3 + 1];
+                float z = plane[corner * 3 + 2];
+                corners[side][corner * 3] = m[0] * x + m[1] * y + m[2] * z;
+                corners[side][corner * 3 + 1] = m[3] * x + m[4] * y + m[5] * z;
+                corners[side][corner * 3 + 2] = m[6] * x + m[7] * y + m[8] * z;
+            }
+        }
+        return corners;
+    }
+
+    /** A quarter-turn matrix with its entries rounded to the exact -1, 0 and 1 they approximate. */
+    private static float[] snap(float[] m) {
+        for (int index = 0; index < m.length; index++) {
+            m[index] = (float) Math.rint(m[index]);
+        }
+        return m;
     }
 
     private static PipelineSpec.Blend pipelineBlend(CustomSky.Blend blend) {
@@ -437,14 +522,23 @@ public final class SkyRenderer implements AutoCloseable {
         };
     }
 
-    /** A custom sky texture by full asset path, filtered smoothly; null when missing. */
-    private static VulkanTexture skyTexture(VulkanRenderer renderer, AssetSource assets, String path) {
+    /** The lowest alpha (0-255) of any texel: filtering cannot sample below it. */
+    private static int minAlpha(RgbaImage image) {
+        ByteBuffer pixels = image.pixels();
+        int lowest = 255;
+        for (int index = 3; index < pixels.limit() && lowest > 0; index += 4) {
+            lowest = Math.min(lowest, pixels.get(index) & 0xFF);
+        }
+        return lowest;
+    }
+
+    /** A custom sky image by full asset path; null when missing. */
+    private static RgbaImage skyImage(AssetSource assets, String path) {
         try (InputStream input = assets.open(path)) {
             if (input == null) {
                 return null;
             }
-            return renderer.createTexture(ImageDecoder.decode(input),
-                    new TextureOptions(ImageSampling.LINEAR, false, true, 1));
+            return ImageDecoder.decode(input);
         } catch (IOException | RuntimeException unreadable) {
             System.err.println("Custom sky texture " + path + " unavailable: " + unreadable.getMessage());
             return null;
@@ -455,9 +549,10 @@ public final class SkyRenderer implements AutoCloseable {
         geometryPush.putFloat(64, value).putFloat(68, value).putFloat(72, value).putFloat(76, value);
     }
 
-    private void drawCelestial(VulkanFrame frame, Sky sky, float[] viewProjection) {
+    /** {@code covering}: the custom layer that hides everything before it (see {@link #updateLayers}), or -1. */
+    private void drawCelestial(VulkanFrame frame, Sky sky, float[] viewProjection, int covering) {
         // The sunrise fan: rotate 90 about X, 180 about Z when the sun is in the other half, then 90 about Z.
-        if (sky.sunMoon && sky.sunrise[3] > 0.0F) {
+        if (covering < 0 && sky.sunMoon && sky.sunrise[3] > 0.0F) {
             long offset = frame.allocate(48L * VERTEX_BYTES, 16);
             if (offset >= 0) {
                 rotation(matrix, 90, 0, sky.sunriseFlipped ? 270 : 90);
@@ -491,7 +586,7 @@ public final class SkyRenderer implements AutoCloseable {
                 frame.draw(48, 1, 0, 0);
             }
         }
-        drawCustomLayers(frame, sky);
+        drawCustomLayers(frame, sky, Math.max(0, covering));
         // Sun, moon and stars turn with the celestial angle: rotate -90 about Y, then the angle about X.
         celestialRotation(matrix, sky.celestialAngle * 360.0F);
         int alpha = color(1, 1, 1, sky.celestialAlpha);
@@ -712,14 +807,25 @@ public final class SkyRenderer implements AutoCloseable {
     }
 
     private static float[] axis(float x, float y, float z, float degrees) {
+        float[] m = new float[9];
+        axis(x, y, z, degrees, m);
+        return m;
+    }
+
+    private static void axis(float x, float y, float z, float degrees, float[] out) {
         float radians = (float) Math.toRadians(degrees);
         float c = (float) Math.cos(radians);
         float s = (float) Math.sin(radians);
         float t = 1 - c;
-        return new float[]{
-                t * x * x + c, t * x * y - s * z, t * x * z + s * y,
-                t * x * y + s * z, t * y * y + c, t * y * z - s * x,
-                t * x * z - s * y, t * y * z + s * x, t * z * z + c};
+        out[0] = t * x * x + c;
+        out[1] = t * x * y - s * z;
+        out[2] = t * x * z + s * y;
+        out[3] = t * x * y + s * z;
+        out[4] = t * y * y + c;
+        out[5] = t * y * z - s * x;
+        out[6] = t * x * z - s * y;
+        out[7] = t * y * z + s * x;
+        out[8] = t * z * z + c;
     }
 
     private static void multiply(float[] a, float[] b, float[] out) {

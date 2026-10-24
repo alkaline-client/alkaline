@@ -94,6 +94,8 @@ final class VulkanDeviceContext implements AutoCloseable {
     /** VK_KHR_get_surface_capabilities2 on the instance: needed to ask a surface about present waits. */
     private boolean surfaceCapabilities2;
     private boolean presentWait;
+    private boolean hostImageCopy;
+    private boolean depthClamp;
 
     private final boolean validation;
 
@@ -118,6 +120,12 @@ final class VulkanDeviceContext implements AutoCloseable {
 
     VkInstance instance() { return instance; }
     VkPhysicalDevice physicalDevice() { return physicalDevice; }
+
+    /** Whether the depthClamp feature is enabled (pipelines may clamp depth instead of clipping it). */
+    boolean depthClamp() { return depthClamp; }
+
+    /** Whether Vulkan 1.4 host image copy is enabled for sampled textures ({@link #supportsHostImageCopy}). */
+    boolean hostImageCopy() { return hostImageCopy; }
 
     /** Whether multiDrawIndirect and drawIndirectFirstInstance were both available and enabled. */
     boolean multiDrawIndirect() { return multiDrawIndirect; }
@@ -194,7 +202,8 @@ final class VulkanDeviceContext implements AutoCloseable {
             names.flip();
             VkApplicationInfo app = VkApplicationInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_APPLICATION_INFO)
                     .pApplicationName(stack.UTF8("Alkaline Vulkan renderer"))
-                    .apiVersion(VulkanApiSupport.MINIMUM_API_VERSION);
+                    // The highest version the renderer can use; 1.4 features stay optional and are gated per device.
+                    .apiVersion(org.lwjgl.vulkan.VK14.VK_API_VERSION_1_4);
             VkInstanceCreateInfo create = VkInstanceCreateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO).pApplicationInfo(app)
                     .ppEnabledExtensionNames(names);
@@ -302,6 +311,10 @@ final class VulkanDeviceContext implements AutoCloseable {
                     swapchainMutableFormat = hasExtension(candidate, MUTABLE_FORMAT_EXTENSION);
                     // Optional: waiting for a present to reach the screen paces V-Sync to the display.
                     presentWait = supportsPresentWait(candidate, candidateStack);
+                    // Optional: the sky draws at exactly the far plane, after the terrain (WorldRenderer).
+                    depthClamp = features.features().depthClamp();
+                    // Optional, Vulkan 1.4 only: textures written from the CPU without a queue round trip.
+                    hostImageCopy = supportsHostImageCopy(candidate, properties.apiVersion(), candidateStack);
                     graphicsFamily = queues.graphics();
                     presentFamily = queues.present();
                     return;
@@ -329,6 +342,67 @@ final class VulkanDeviceContext implements AutoCloseable {
             present[index] = families.get(index).queueCount() > 0 && supported.get(0) != 0;
         }
         return QueueFamilies.choose(graphics, present);
+    }
+
+    /**
+     * Vulkan 1.4's host image copy for the sampled RGBA8 textures: the feature, both formats' host transfer
+     * support, copies straight into SHADER_READ_ONLY_OPTIMAL, and no loss of device access speed for images that
+     * allow it (optimalDeviceAccess). Only then do textures skip the staging copy.
+     */
+    private static boolean supportsHostImageCopy(VkPhysicalDevice candidate, int apiVersion, MemoryStack stack) {
+        if (org.lwjgl.vulkan.VK10.VK_API_VERSION_MAJOR(apiVersion) == 1
+                && org.lwjgl.vulkan.VK10.VK_API_VERSION_MINOR(apiVersion) < 4) {
+            return false;
+        }
+        var v14 = org.lwjgl.vulkan.VkPhysicalDeviceVulkan14Features.calloc(stack)
+                .sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
+        VkPhysicalDeviceFeatures2 features = VkPhysicalDeviceFeatures2.calloc(stack)
+                .sType(org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(v14);
+        org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceFeatures2(candidate, features);
+        if (!v14.hostImageCopy()) {
+            return false;
+        }
+        var copy = org.lwjgl.vulkan.VkPhysicalDeviceHostImageCopyProperties.calloc(stack)
+                .sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_PROPERTIES);
+        var properties = org.lwjgl.vulkan.VkPhysicalDeviceProperties2.calloc(stack)
+                .sType(org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2).pNext(copy);
+        org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceProperties2(candidate, properties);
+        IntBuffer layouts = stack.mallocInt(copy.copyDstLayoutCount());
+        copy.pCopyDstLayouts(layouts);
+        org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceProperties2(candidate, properties);
+        boolean shaderRead = false;
+        for (int index = 0; index < copy.copyDstLayoutCount(); index++) {
+            shaderRead |= layouts.get(index) == org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        if (!shaderRead) {
+            return false;
+        }
+        for (int format : new int[]{org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM,
+                org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB}) {
+            var formatFeatures = org.lwjgl.vulkan.VkFormatProperties3.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3);
+            var formatProperties = org.lwjgl.vulkan.VkFormatProperties2.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2).pNext(formatFeatures);
+            org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceFormatProperties2(candidate, format, formatProperties);
+            if ((formatFeatures.optimalTilingFeatures()
+                    & org.lwjgl.vulkan.VK14.VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT) == 0) {
+                return false;
+            }
+            var performance = org.lwjgl.vulkan.VkHostImageCopyDevicePerformanceQuery.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY);
+            var imageProperties = org.lwjgl.vulkan.VkImageFormatProperties2.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2).pNext(performance);
+            var imageInfo = org.lwjgl.vulkan.VkPhysicalDeviceImageFormatInfo2.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2)
+                    .format(format).type(org.lwjgl.vulkan.VK10.VK_IMAGE_TYPE_2D)
+                    .tiling(org.lwjgl.vulkan.VK10.VK_IMAGE_TILING_OPTIMAL)
+                    .usage(VulkanTexture.STATIC_USAGE | org.lwjgl.vulkan.VK14.VK_IMAGE_USAGE_HOST_TRANSFER_BIT);
+            if (org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceImageFormatProperties2(candidate, imageInfo,
+                    imageProperties) != VK_SUCCESS || !performance.optimalDeviceAccess()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Present id 2 and present wait 2: device extensions, their features, and the surface's support. */
@@ -453,9 +527,14 @@ final class VulkanDeviceContext implements AutoCloseable {
             var enabledWait2 = org.lwjgl.vulkan.VkPhysicalDevicePresentWait2FeaturesKHR.calloc(stack)
                     .sType(org.lwjgl.vulkan.KHRPresentWait2.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR)
                     .pNext(enabledId2.address()).presentWait2(true);
+            var enabled14 = org.lwjgl.vulkan.VkPhysicalDeviceVulkan14Features.calloc(stack)
+                    .sType(org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
+                    .pNext(presentWait ? enabledWait2.address() : 0L)
+                    .hostImageCopy(true);
+            long after13 = hostImageCopy ? enabled14.address() : presentWait ? enabledWait2.address() : 0L;
             VkPhysicalDeviceVulkan13Features enabled13 = VkPhysicalDeviceVulkan13Features.calloc(stack)
                     .sType(org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
-                    .pNext(presentWait ? enabledWait2.address() : 0L)
+                    .pNext(after13)
                     .dynamicRendering(true)
                     // glslc's Vulkan 1.3 target compiles discard to OpDemoteToHelperInvocation.
                     .shaderDemoteToHelperInvocation(true);
@@ -476,7 +555,8 @@ final class VulkanDeviceContext implements AutoCloseable {
             extensions.flip();
             org.lwjgl.vulkan.VkPhysicalDeviceFeatures core = org.lwjgl.vulkan.VkPhysicalDeviceFeatures.calloc(stack)
                     .multiDrawIndirect(multiDrawIndirect)
-                    .drawIndirectFirstInstance(multiDrawIndirect);
+                    .drawIndirectFirstInstance(multiDrawIndirect)
+                    .depthClamp(depthClamp);
             VkDeviceCreateInfo create = VkDeviceCreateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO).pNext(enabled12.address())
                     .pQueueCreateInfos(queues).ppEnabledExtensionNames(extensions).pEnabledFeatures(core);

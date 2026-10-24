@@ -127,17 +127,27 @@ public final class WorldRenderer implements AutoCloseable {
     private final float[] view = new float[16];
     private final float[] viewProjection = new float[16];
     private final float[] planes = new float[24];
+    /** Per plane: its distance term plus the normal's reach across a section (see {@link #inFrustum}). */
+    private final float[] planeReach = new float[6];
+    /** What the last visibility walk saw: unchanged camera, frustum and grid let the next frame reuse it. */
+    private final float[] walkedPlanes = new float[24];
+    private double walkedX = Double.NaN;
+    private double walkedY;
+    private double walkedZ;
+    private long walkedVersion = -1;
+    /** Bumped whenever a slot of the grid changes (sections placed, removed or given new geometry). */
+    private long gridVersion;
     private final TranslucentSorter sorter = new TranslucentSorter();
 
     // Ring grid of sections around the camera. The visibility walk reads only the flat per-slot arrays, which
     // stay contiguous in memory; it never dereferences a section object.
+    // Per slot: the section's key ({@link #key}, EMPTY_SLOT when free), its visibility with GEOMETRY set when it
+    // has something to draw, and the walk's mark (the stamp of the frame that reached it, times 64, plus the faces
+    // it was entered through), so one neighbor costs two array reads.
     private GpuSection[] grid = new GpuSection[0];
-    private int[] slotX = new int[0];
-    private int[] slotY = new int[0];
-    private int[] slotZ = new int[0];
+    private long[] slotKey = new long[0];
     private long[] slotVisibility = new long[0];
-    private int[] slotStamp = new int[0];
-    private int[] slotIncoming = new int[0];
+    private int[] slotMark = new int[0];
     private int[] walk = new int[256];
     private int gridWidth = 1;
     /** gridWidth is a power of two, so ring coordinates wrap with a mask instead of a division. */
@@ -497,6 +507,13 @@ public final class WorldRenderer implements AutoCloseable {
         return data.flip();
     }
 
+    /** A free grid slot's key: x = -2^21 lies past the world border, so no section has it. */
+    private static final long EMPTY_SLOT = Long.MIN_VALUE;
+    /** Above the 36 bits of face connections in a slot's visibility: the section has geometry. */
+    private static final long GEOMETRY = Long.MIN_VALUE;
+    /** Walk stamps stay below this, so a stamp times 64 fits an int; the marks are cleared when it wraps. */
+    private static final int STAMP_LIMIT = 1 << 25;
+
     public static long key(int x, int y, int z) {
         return ((long) x & 0x3FFFFF) << 42 | ((long) z & 0x3FFFFF) << 20 | ((long) y & 0xFFFFF);
     }
@@ -534,14 +551,12 @@ public final class WorldRenderer implements AutoCloseable {
         gridHeight = maxSectionY - minSectionY + 1;
         int slots = width * width * gridHeight;
         grid = new GpuSection[slots];
-        slotX = new int[slots];
-        slotY = new int[slots];
-        slotZ = new int[slots];
+        slotKey = new long[slots];
         slotVisibility = new long[slots];
-        slotStamp = new int[slots];
-        slotIncoming = new int[slots];
+        slotMark = new int[slots];
         walk = new int[slots];
-        Arrays.fill(slotY, Integer.MIN_VALUE);
+        Arrays.fill(slotKey, EMPTY_SLOT);
+        gridVersion++;
         for (GpuSection section : sections.values()) {
             occupy(section);
         }
@@ -551,18 +566,22 @@ public final class WorldRenderer implements AutoCloseable {
         int slot = slot(section.x, section.y, section.z);
         if (slot >= 0) {
             grid[slot] = section;
-            slotX[slot] = section.x;
-            slotY[slot] = section.y;
-            slotZ[slot] = section.z;
-            slotVisibility[slot] = section.visibility;
-            slotStamp[slot] = 0;
+            gridVersion++;
+            slotKey[slot] = key(section.x, section.y, section.z);
+            slotVisibility[slot] = slotVisibility(section);
+            slotMark[slot] = 0;
         }
     }
 
     /** The slot holding section (x, y, z), or -1. */
     private int occupied(int x, int y, int z) {
         int slot = slot(x, y, z);
-        return slot >= 0 && slotY[slot] == y && slotX[slot] == x && slotZ[slot] == z ? slot : -1;
+        return slot >= 0 && slotKey[slot] == key(x, y, z) ? slot : -1;
+    }
+
+    /** The walk's view of a section: its face connections, and GEOMETRY when it draws something. */
+    private static long slotVisibility(GpuSection section) {
+        return section.visibility & ~GEOMETRY | (section.allocation != null ? GEOMETRY : 0L);
     }
 
     private int slot(int x, int y, int z) {
@@ -599,7 +618,8 @@ public final class WorldRenderer implements AutoCloseable {
         int slot = slot(x, y, z);
         if (slot >= 0 && grid[slot] == section) {
             grid[slot] = null;
-            slotY[slot] = Integer.MIN_VALUE;
+            slotKey[slot] = EMPTY_SLOT;
+            gridVersion++;
         }
         if (section.allocation != null) {
             pool.free(section.allocation);
@@ -696,9 +716,10 @@ public final class WorldRenderer implements AutoCloseable {
         }
         section.allocation = allocation;
         section.visibility = mesh.visibility();
+        gridVersion++;
         int slot = slot(section.x, section.y, section.z);
         if (slot >= 0 && grid[slot] == section) {
-            slotVisibility[slot] = section.visibility;
+            slotVisibility[slot] = slotVisibility(section);
         }
         section.translucentCells = mesh.translucentCells();
         section.sortedKey = -1;
@@ -745,7 +766,15 @@ public final class WorldRenderer implements AutoCloseable {
         lastCameraX = cameraX;
         lastCameraY = cameraY;
         lastCameraZ = cameraZ;
-        traverse(cameraX, cameraY, cameraZ);
+        if (cameraX != walkedX || cameraY != walkedY || cameraZ != walkedZ || gridVersion != walkedVersion
+                || !Arrays.equals(planes, walkedPlanes)) {
+            traverse(cameraX, cameraY, cameraZ);
+            walkedX = cameraX;
+            walkedY = cameraY;
+            walkedZ = cameraZ;
+            walkedVersion = gridVersion;
+            System.arraycopy(planes, 0, walkedPlanes, 0, planes.length);
+        }
         sortTranslucent(frame, cameraX, cameraY, cameraZ);
         prepared = writeDrawData(frame, cameraX, cameraY, cameraZ);
         if (!uploading) {
@@ -786,16 +815,11 @@ public final class WorldRenderer implements AutoCloseable {
         scene.putLong(104, tableBuffer.deviceAddress() + slot);
     }
 
+    /** Whether a section whose lowest corner is at (minX, minY, minZ), camera-relative, touches the frustum. */
     private boolean inFrustum(float minX, float minY, float minZ) {
         for (int plane = 0; plane < 6; plane++) {
-            float a = planes[plane * 4];
-            float b = planes[plane * 4 + 1];
-            float c = planes[plane * 4 + 2];
-            float d = planes[plane * 4 + 3];
-            float x = a >= 0 ? minX + 16f : minX;
-            float y = b >= 0 ? minY + 16f : minY;
-            float z = c >= 0 ? minZ + 16f : minZ;
-            if (a * x + b * y + c * z + d < 0f) {
+            if (planes[plane * 4] * minX + planes[plane * 4 + 1] * minY + planes[plane * 4 + 2] * minZ
+                    + planeReach[plane] < 0f) {
                 return false;
             }
         }
@@ -810,7 +834,11 @@ public final class WorldRenderer implements AutoCloseable {
      * geometry are appended to the visible list in walk order.
      */
     private void traverse(double cameraX, double cameraY, double cameraZ) {
-        stamp++;
+        if (++stamp >= STAMP_LIMIT) {
+            Arrays.fill(slotMark, 0);
+            stamp = 1;
+        }
+        int mark = stamp << 6;
         visibleCount = 0;
         reachedCount = 0;
         if (visible.length < sections.size()) {
@@ -832,29 +860,30 @@ public final class WorldRenderer implements AutoCloseable {
             sortByManhattan(cx, cy, cz);
             return;
         }
-        boolean inside = cy == slotY[start];
-        slotStamp[start] = stamp;
+        int startY = Math.max(minSectionY, Math.min(maxSectionY, cy));
+        boolean inside = cy == startY;
         // Above or below the world, the walk enters the column's top or bottom section from outside.
-        slotIncoming[start] = inside ? 0x3F : 1 << (cy > slotY[start] ? 3 : 2);
+        slotMark[start] = mark | (inside ? 0x3F : 1 << (cy > startY ? 3 : 2));
         int head = 0;
         int tail = 0;
         walk[tail++] = start;
         while (head < tail) {
             int slot = walk[head++];
-            GpuSection section = grid[slot];
-            if (section.allocation != null) {
-                visible[visibleCount++] = section;
+            long visibility = slotVisibility[slot];
+            if (visibility < 0L) {
+                visible[visibleCount++] = grid[slot];
             }
-            int x = slotX[slot];
-            int y = slotY[slot];
-            int z = slotZ[slot];
+            long key = slotKey[slot];
+            int x = (int) (key >> 42);
+            int y = (int) (key << 44 >> 44);
+            int z = (int) (key << 22 >> 42);
             int dx = x - cx;
             int dy = y - cy;
             int dz = z - cz;
             // Only step away from the camera: the walk's depth is then the Manhattan distance.
             int outward = (dx <= 0 ? 1 : 0) | (dx >= 0 ? 2 : 0) | (dy <= 0 ? 4 : 0) | (dy >= 0 ? 8 : 0)
                     | (dz <= 0 ? 16 : 0) | (dz >= 0 ? 32 : 0);
-            int exits = slot == start && inside ? 0x3F : exits(slotVisibility[slot], slotIncoming[slot]);
+            int exits = slot == start && inside ? 0x3F : exits(visibility, slotMark[slot] & 0x3F);
             int open = outward & exits;
             while (open != 0) {
                 int out = Integer.numberOfTrailingZeros(open);
@@ -867,17 +896,17 @@ public final class WorldRenderer implements AutoCloseable {
                     continue;
                 }
                 int entry = 1 << (out ^ 1);
-                if (slotStamp[next] == stamp) {
-                    slotIncoming[next] |= entry;
+                int reached = slotMark[next];
+                if ((reached ^ mark) >>> 6 == 0) {
+                    slotMark[next] = reached | entry;
                     continue;
                 }
-                slotStamp[next] = stamp;
                 if (inFrustum((float) (nx * 16.0 - cameraX), (float) (ny * 16.0 - cameraY),
                         (float) (nz * 16.0 - cameraZ))) {
-                    slotIncoming[next] = entry;
+                    slotMark[next] = mark | entry;
                     walk[tail++] = next;
                 } else {
-                    slotIncoming[next] = 0; // marked, never walked
+                    slotMark[next] = mark; // marked, never walked
                 }
             }
         }
@@ -1136,7 +1165,15 @@ public final class WorldRenderer implements AutoCloseable {
         renderWeather(frame);
     }
 
-    /** The sky behind everything: first in the pass. */
+    /**
+     * Whether {@link #renderSky} may follow {@link #renderSolid}: the sky then draws at the far plane, only where
+     * no opaque or cutout terrain is, with the same result as drawn first. Nothing blended may come between.
+     */
+    public boolean skyAfterSolid() {
+        return sky.drawsAtFarPlane();
+    }
+
+    /** The sky behind everything: first in the pass, or right after {@link #renderSolid} (see skyAfterSolid). */
     public void renderSky(VulkanFrame frame) {
         drawSky(frame);
     }
@@ -1150,6 +1187,8 @@ public final class WorldRenderer implements AutoCloseable {
         if (!prepared) {
             return;
         }
+        // The world's y-up viewport; the sky leaves it set too, but the terrain may now come first.
+        frame.setViewport(0, 0, viewportWidth, viewportHeight, true);
         for (int index = 0; index < 16; index++) {
             scene.putFloat(index * 4, viewProjection[index]);
         }
@@ -1298,6 +1337,12 @@ public final class WorldRenderer implements AutoCloseable {
                 };
                 planes[plane * 4 + column] = value;
             }
+            // The section corner farthest along the plane's normal is +16 on each axis it points along.
+            float a = planes[plane * 4];
+            float b = planes[plane * 4 + 1];
+            float c = planes[plane * 4 + 2];
+            planeReach[plane] = planes[plane * 4 + 3] + (a >= 0 ? a * 16f : 0f) + (b >= 0 ? b * 16f : 0f)
+                    + (c >= 0 ? c * 16f : 0f);
         }
     }
 

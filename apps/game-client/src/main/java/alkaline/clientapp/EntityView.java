@@ -1047,7 +1047,7 @@ final class EntityView implements AutoCloseable {
             renderArmor(entity, pose, light, hit.tintArmor() ? overlay : 0, false);
             renderHeld(entity.equipment[0], pose, motion.sneaking, light,
                     entity.equipment[0] != null && entity.equipment[0].id() == 261 && entity.usingItem()
-                            ? entity.usingTicks : -1, hookOwners.contains(entity.id));
+                            ? entity.usingTicks : -1, !hookOwners.isEmpty() && hookOwners.contains(entity.id));
         }
     }
 
@@ -2202,12 +2202,24 @@ final class EntityView implements AutoCloseable {
 
     /** EntitySheep.fleeceColorTable as ARGB. */
     private static int fleeceColor(int color) {
+        return FLEECE[color & 15];
+    }
+
+    /** EntitySheep's fleece colors by dye, as 0xFFRRGGBB. */
+    private static final int[] FLEECE = fleeceColors();
+
+    private static int[] fleeceColors() {
         float[][] table = {{1f, 1f, 1f}, {0.85f, 0.5f, 0.2f}, {0.7f, 0.3f, 0.85f}, {0.4f, 0.6f, 0.85f},
                 {0.9f, 0.9f, 0.2f}, {0.5f, 0.8f, 0.1f}, {0.95f, 0.5f, 0.65f}, {0.3f, 0.3f, 0.3f}, {0.6f, 0.6f, 0.6f},
                 {0.3f, 0.5f, 0.6f}, {0.5f, 0.25f, 0.7f}, {0.2f, 0.3f, 0.7f}, {0.4f, 0.3f, 0.2f}, {0.4f, 0.5f, 0.2f},
                 {0.6f, 0.2f, 0.2f}, {0.1f, 0.1f, 0.1f}};
-        float[] rgb = table[color & 15];
-        return 0xFF000000 | Math.round(rgb[0] * 255f) << 16 | Math.round(rgb[1] * 255f) << 8 | Math.round(rgb[2] * 255f);
+        int[] colors = new int[table.length];
+        for (int index = 0; index < table.length; index++) {
+            float[] rgb = table[index];
+            colors[index] = 0xFF000000 | Math.round(rgb[0] * 255f) << 16 | Math.round(rgb[1] * 255f) << 8
+                    | Math.round(rgb[2] * 255f);
+        }
+        return colors;
     }
 
     int dropped() {

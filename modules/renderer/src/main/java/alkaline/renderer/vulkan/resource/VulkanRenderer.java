@@ -283,13 +283,25 @@ public final class VulkanRenderer implements Renderer {
     private boolean closed;
     private java.util.function.Consumer<RgbaImage> pendingCapture;
     private VulkanBuffer captureBuffer;
-    /** Two timestamps per frame slot (command buffer start and end); 0 when the queue cannot time. */
+    /**
+     * Timestamps per frame slot: the command buffer's start and end, then up to {@link #MAX_GPU_SECTIONS} section
+     * marks ({@link #gpuMark}); 0 when the queue cannot time.
+     */
     private long timestampPool;
     private double timestampPeriodNanos;
     private long timestampMask;
     private final boolean[] slotTimed = new boolean[FRAMES_IN_FLIGHT];
     private LongBuffer timestampResults;
     private long lastGpuFrameNanos = -1;
+    private static final int MAX_GPU_SECTIONS = 14;
+    private static final int QUERIES_PER_SLOT = 2 + MAX_GPU_SECTIONS;
+    /** Opt-in section timing for diagnostics: labels by id, and each slot's marks in recording order. */
+    private boolean gpuProfiling;
+    private final java.util.List<String> gpuSectionLabels = new java.util.ArrayList<>();
+    private final int[][] slotMarks = new int[FRAMES_IN_FLIGHT][MAX_GPU_SECTIONS];
+    private final int[] slotMarkCount = new int[FRAMES_IN_FLIGHT];
+    private final long[] gpuSectionNanos = new long[MAX_GPU_SECTIONS + 1];
+    private long gpuSectionFrames;
 
     public VulkanRenderer(SdlWindow window) {
         this(window, PresentMode.MAILBOX, false);
@@ -311,7 +323,7 @@ public final class VulkanRenderer implements Renderer {
                 frames[index] = new FrameSlot(context.frames[index]);
             }
             uploader = new VulkanUploader(context.physicalDevice(), context.device(),
-                    context.graphicsQueue(), context.commandPool());
+                    context.graphicsQueue(), context.commandPool(), context.hostImageCopy());
             swapchain = new VulkanSwapchain(context.physicalDevice(), context.device(), context.surface(),
                     context.graphicsFamily(), context.presentFamily(), presentMode,
                     context.swapchainMutableFormat(), context.presentWait());
@@ -398,9 +410,12 @@ public final class VulkanRenderer implements Renderer {
         requireSuccess(vkResetCommandBuffer(slot.commandBuffer, 0), "vkResetCommandBuffer");
         requireSuccess(vkBeginCommandBuffer(slot.commandBuffer, slot.beginInfo), "vkBeginCommandBuffer");
         if (timestampPool != 0) {
-            org.lwjgl.vulkan.VK10.vkCmdResetQueryPool(slot.commandBuffer, timestampPool, currentFrame * 2, 2);
+            org.lwjgl.vulkan.VK10.vkCmdResetQueryPool(slot.commandBuffer, timestampPool,
+                    currentFrame * QUERIES_PER_SLOT, QUERIES_PER_SLOT);
             org.lwjgl.vulkan.VK10.vkCmdWriteTimestamp(slot.commandBuffer,
-                    org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampPool, currentFrame * 2);
+                    org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampPool,
+                    currentFrame * QUERIES_PER_SLOT);
+            slotMarkCount[currentFrame] = 0;
         }
         recording = true;
         frame.begin(slot.commandBuffer, currentFrame, swapchain.width(), swapchain.height());
@@ -593,8 +608,14 @@ public final class VulkanRenderer implements Renderer {
         requireOwnerAndOpen();
         Objects.requireNonNull(options, "options");
         requireOutsideFrame("Texture uploads");
+        long start = System.nanoTime();
         VulkanTexture texture = new VulkanTexture(this, context.physicalDevice(), context.device(), textureDescriptors,
                 graphicsPipeline.textureDescriptorSetLayout(), layers, array, options, uploader);
+        long took = System.nanoTime() - start;
+        int small = (long) texture.width() * texture.height() * 4 * layers.size() <= 1L << 20 ? 1 : 0;
+        textureCount[small]++;
+        textureNanos[small] += took;
+        textureMaxNanos[small] = Math.max(textureMaxNanos[small], took);
         sampledImages.add(texture);
         trackedResources.add(texture);
         return texture;
@@ -1202,7 +1223,7 @@ public final class VulkanRenderer implements Renderer {
         }
         if (timestampPool != 0) {
             org.lwjgl.vulkan.VK10.vkCmdWriteTimestamp(frame.commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    timestampPool, currentFrame * 2 + 1);
+                    timestampPool, currentFrame * QUERIES_PER_SLOT + 1);
             slotTimed[currentFrame] = true;
         }
         requireSuccess(vkEndCommandBuffer(frame.commandBuffer), "vkEndCommandBuffer");
@@ -1364,6 +1385,30 @@ public final class VulkanRenderer implements Renderer {
     private org.lwjgl.vulkan.VkPresentWait2InfoKHR presentWaitInfo = org.lwjgl.vulkan.VkPresentWait2InfoKHR.calloc()
             .sType(org.lwjgl.vulkan.KHRPresentWait2.VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR);
 
+    /** Static textures created, by size: [0] above 1 MiB (atlases, sky), [1] up to 1 MiB (made during play). */
+    private final long[] textureCount = new long[2];
+    private final long[] textureNanos = new long[2];
+    private final long[] textureMaxNanos = new long[2];
+
+    /** Static textures created so far and the render-thread time they took (each blocks the caller). */
+    public String textureReport() {
+        return String.format("Textures up to 1 MiB: %d, %.3f ms mean, %.3f ms worst; larger: %d, %.1f ms mean, "
+                        + "%.1f ms worst%s", textureCount[1], textureCount[1] == 0 ? 0.0
+                        : textureNanos[1] / 1e6 / textureCount[1], textureMaxNanos[1] / 1e6, textureCount[0],
+                textureCount[0] == 0 ? 0.0 : textureNanos[0] / 1e6 / textureCount[0], textureMaxNanos[0] / 1e6,
+                hostImageCopy() ? " (host image copy)" : " (staging copy)");
+    }
+
+    /** Whether pipelines may clamp depth ({@link PipelineSpec.Builder#depthClamp}). */
+    public boolean depthClamp() {
+        return context.depthClamp();
+    }
+
+    /** Whether static textures upload through Vulkan 1.4 host image copy (no staging submit, no queue wait). */
+    public boolean hostImageCopy() {
+        return context.hostImageCopy();
+    }
+
     /** Whether {@link #waitForPresent} works here (VK_KHR_present_wait2 on this device and surface). */
     public boolean presentWaitSupported() {
         return context.presentWait();
@@ -1442,11 +1487,11 @@ public final class VulkanRenderer implements Renderer {
             org.lwjgl.vulkan.VkQueryPoolCreateInfo info = org.lwjgl.vulkan.VkQueryPoolCreateInfo.calloc(stack)
                     .sType(org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO)
                     .queryType(org.lwjgl.vulkan.VK10.VK_QUERY_TYPE_TIMESTAMP)
-                    .queryCount(FRAMES_IN_FLIGHT * 2);
+                    .queryCount(FRAMES_IN_FLIGHT * QUERIES_PER_SLOT);
             LongBuffer handle = stack.mallocLong(1);
             requireSuccess(org.lwjgl.vulkan.VK10.vkCreateQueryPool(context.device(), info, null, handle),
                     "vkCreateQueryPool");
-            timestampResults = memAllocLong(2);
+            timestampResults = memAllocLong(QUERIES_PER_SLOT);
             timestampPool = handle.get(0);
             timestampPeriodNanos = period;
             timestampMask = validBits >= 64 ? -1L : (1L << validBits) - 1;
@@ -1459,12 +1504,80 @@ public final class VulkanRenderer implements Renderer {
             return;
         }
         slotTimed[slot] = false;
-        int result = org.lwjgl.vulkan.VK10.vkGetQueryPoolResults(context.device(), timestampPool, slot * 2, 2,
-                timestampResults, Long.BYTES, org.lwjgl.vulkan.VK10.VK_QUERY_RESULT_64_BIT);
+        int marks = slotMarkCount[slot];
+        timestampResults.clear();
+        int result = org.lwjgl.vulkan.VK10.vkGetQueryPoolResults(context.device(), timestampPool,
+                slot * QUERIES_PER_SLOT, 2 + marks, timestampResults, Long.BYTES,
+                org.lwjgl.vulkan.VK10.VK_QUERY_RESULT_64_BIT);
         if (result == VK_SUCCESS) {
-            long ticks = (timestampResults.get(1) - timestampResults.get(0)) & timestampMask;
+            long start = timestampResults.get(0);
+            long ticks = (timestampResults.get(1) - start) & timestampMask;
             lastGpuFrameNanos = Math.round(ticks * timestampPeriodNanos);
+            if (marks > 0) {
+                // Each mark closes its section; whatever follows the last mark is counted as "rest".
+                long previous = start;
+                for (int mark = 0; mark < marks; mark++) {
+                    long at = timestampResults.get(2 + mark);
+                    gpuSectionNanos[slotMarks[slot][mark]] += Math.round(((at - previous) & timestampMask)
+                            * timestampPeriodNanos);
+                    previous = at;
+                }
+                gpuSectionNanos[MAX_GPU_SECTIONS] += Math.round(((timestampResults.get(1) - previous)
+                        & timestampMask) * timestampPeriodNanos);
+                gpuSectionFrames++;
+            }
         }
+    }
+
+    /** Turns on {@link #gpuMark} section timing (diagnostics; a few timestamp queries per frame). */
+    public void gpuProfiling(boolean enabled) {
+        gpuProfiling = enabled && timestampPool != 0;
+    }
+
+    public boolean gpuProfiling() {
+        return gpuProfiling;
+    }
+
+    /** Registers a GPU section label once; returns its id for {@link #gpuMark}, or -1 when none are left. */
+    public int gpuSection(String label) {
+        int index = gpuSectionLabels.indexOf(label);
+        if (index >= 0) {
+            return index;
+        }
+        if (gpuSectionLabels.size() == MAX_GPU_SECTIONS) {
+            return -1;
+        }
+        gpuSectionLabels.add(label);
+        return gpuSectionLabels.size() - 1;
+    }
+
+    /**
+     * Ends GPU section {@code section} at this point of the frame being recorded: the time since the previous mark
+     * (or the frame's start) is counted to it. Does nothing unless {@link #gpuProfiling(boolean)} is on.
+     */
+    public void gpuMark(VulkanFrame target, int section) {
+        if (!gpuProfiling || section < 0 || !recording || slotMarkCount[currentFrame] == MAX_GPU_SECTIONS) {
+            return;
+        }
+        int mark = slotMarkCount[currentFrame]++;
+        slotMarks[currentFrame][mark] = section;
+        org.lwjgl.vulkan.VK10.vkCmdWriteTimestamp(target.commandBuffer(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                timestampPool, currentFrame * QUERIES_PER_SLOT + 2 + mark);
+    }
+
+    /** Mean GPU milliseconds per marked section over the frames timed so far, or null when none were. */
+    public String gpuSectionReport() {
+        if (gpuSectionFrames == 0) {
+            return null;
+        }
+        StringBuilder report = new StringBuilder("GPU sections (mean ms over ").append(gpuSectionFrames)
+                .append(" frames):");
+        for (int index = 0; index < gpuSectionLabels.size(); index++) {
+            report.append(String.format(" %s %.4f;", gpuSectionLabels.get(index),
+                    gpuSectionNanos[index] / 1e6 / gpuSectionFrames));
+        }
+        return report.append(String.format(" rest %.4f", gpuSectionNanos[MAX_GPU_SECTIONS] / 1e6 / gpuSectionFrames))
+                .toString();
     }
 
     private void trackResource(VulkanTrackedResource resource, int frameIndex) {

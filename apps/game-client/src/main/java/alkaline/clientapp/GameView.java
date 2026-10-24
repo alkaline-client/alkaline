@@ -64,6 +64,16 @@ final class GameView implements MenuBackground {
     private static final int PARTICLE_CAPACITY = 16_384;
 
     private final VulkanRenderer renderer;
+    /** GPU section ids for --stats ({@link VulkanRenderer#gpuMark}). */
+    private final int gpuSetup;
+    private final int gpuSky;
+    private final int gpuClouds;
+    private final int gpuTerrain;
+    private final int gpuEntities;
+    private final int gpuParticles;
+    private final int gpuTranslucent;
+    private final int gpuHand;
+    private final int gpuBlit;
     private final AssetSource assets;
     private final BlockPalette palette;
     private final ServerSession session;
@@ -108,7 +118,14 @@ final class GameView implements MenuBackground {
     private ClientWorld streamed;
     private Weather weather;
     private RainSource rainSource;
+    /**
+     * What the world draws into this frame: the compositor's scene when it has depth (the usual case), else
+     * {@link #ownTarget}, copied into the scene afterwards.
+     */
     private VulkanRenderTarget target;
+    private VulkanRenderTarget ownTarget;
+    /** Set when a frame found the scene without depth: the next {@link #beforeFrame} makes {@link #ownTarget}. */
+    private boolean needsOwnTarget;
     private long worldTime;
     private long ticks;
     private float rain;
@@ -152,6 +169,15 @@ final class GameView implements MenuBackground {
     GameView(VulkanRenderer renderer, AssetSource assets, BlockPalette palette, PlaySession play, Skins skins,
              ItemCatalog catalog, Supplier<ConfigSnapshot> config) throws IOException {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
+        gpuSetup = renderer.gpuSection("setup");
+        gpuSky = renderer.gpuSection("sky");
+        gpuClouds = renderer.gpuSection("clouds");
+        gpuTerrain = renderer.gpuSection("terrain");
+        gpuEntities = renderer.gpuSection("entities");
+        gpuParticles = renderer.gpuSection("damage+particles");
+        gpuTranslucent = renderer.gpuSection("weather+translucent");
+        gpuHand = renderer.gpuSection("border+hand");
+        gpuBlit = renderer.gpuSection("blit");
         this.assets = assets;
         this.palette = Objects.requireNonNull(palette, "palette");
         alkaline.ui.hud.HudTextColors.INSTANCE.use(palette.customColors());
@@ -473,12 +499,18 @@ final class GameView implements MenuBackground {
     }
 
     @Override
+    public boolean needsDepth() {
+        return true;
+    }
+
+    @Override
     public void beforeFrame(int width, int height) {
-        if (width > 0 && height > 0 && (target == null || target.width() != width || target.height() != height)) {
-            if (target != null) {
-                target.close();
+        if (needsOwnTarget && width > 0 && height > 0
+                && (ownTarget == null || ownTarget.width() != width || ownTarget.height() != height)) {
+            if (ownTarget != null) {
+                ownTarget.close();
             }
-            target = renderer.createRenderTarget(width, height, SCENE_FORMAT, true, false, true);
+            ownTarget = renderer.createRenderTarget(width, height, SCENE_FORMAT, true, false, true);
         }
         ClientWorld current = session.world();
         if (current != streamed) {
@@ -516,6 +548,10 @@ final class GameView implements MenuBackground {
     @Override
     public void render(VulkanFrame frame, VulkanRenderTarget scene, float partialTick) {
         world.animate(ticks);
+        boolean direct = scene.hasDepth();
+        needsOwnTarget = !direct;
+        target = direct ? scene : ownTarget != null && ownTarget.width() == scene.width()
+                && ownTarget.height() == scene.height() ? ownTarget : null;
         if (target == null) {
             frame.beginRendering(scene, true, 0.52f, 0.70f, 1f, 1f);
             frame.endRendering();
@@ -605,12 +641,26 @@ final class GameView implements MenuBackground {
         boolean belowClouds = eyeY < 128.0 + cloudHeight * 128.0;
         double cloudTicks = ticks + partialTick;
 
+        renderer.gpuMark(frame, gpuSetup);
         frame.beginRendering(target, true, 0f, 0f, 0f, 1f);
-        world.renderSky(frame);
-        if (belowClouds) {
+        // Clouds below the eye go between the sky and the terrain; otherwise the sky can follow the terrain and
+        // shade only what it leaves uncovered (the same picture: it draws at the far plane, depth-tested).
+        boolean cloudsBetween = belowClouds && cloudMode != CloudRenderer.Mode.OFF;
+        boolean skyLast = !cloudsBetween && world.skyAfterSolid();
+        if (!skyLast) {
+            world.renderSky(frame);
+            renderer.gpuMark(frame, gpuSky);
+        }
+        if (cloudsBetween) {
             drawClouds(frame, cloudMode, sky, cloudTicks, eyeX, eyeY, eyeZ, cloudHeight);
+            renderer.gpuMark(frame, gpuClouds);
         }
         world.renderSolid(frame, options.fog());
+        renderer.gpuMark(frame, gpuTerrain);
+        if (skyLast) {
+            world.renderSky(frame);
+            renderer.gpuMark(frame, gpuSky);
+        }
         world.fog(fog);
         play.animation().self(selfModel);
         entities.animation(play.animation());
@@ -621,6 +671,7 @@ final class GameView implements MenuBackground {
         entities.render(frame, play.entities().all(), play.players(), entityLight, lightmap,
                 fog, hitColor, partialTick, eyeX, eyeY, eyeZ, world.viewProjection(), cameraYaw, cameraPitch,
                 perspective > 0 ? selfModel : null);
+        renderer.gpuMark(frame, gpuEntities);
         drawDamage(frame, eyeX, eyeY, eyeZ);
         if (particleSheet != null) {
             world.cameraBasis(right, up);
@@ -630,25 +681,32 @@ final class GameView implements MenuBackground {
             particleRenderer.draw(frame, particles, particleSheet, explosionSheet, world.blockTextures(), lightmap,
                     partialTick, world.viewProjection(), cameraPosition, right, up);
         }
+        renderer.gpuMark(frame, gpuParticles);
         world.renderWeather(frame);
         world.renderTranslucent(frame);
+        renderer.gpuMark(frame, gpuTranslucent);
         border.drawWall(frame, world.viewProjection(), current.border(), distance, eyeX, eyeY, eyeZ,
                 player.previousX + (player.x - player.previousX) * partialTick,
                 player.previousZ + (player.z - player.previousZ) * partialTick, player.x, player.z,
                 System.currentTimeMillis());
         if (!belowClouds) {
             drawClouds(frame, cloudMode, sky, cloudTicks, eyeX, eyeY, eyeZ, cloudHeight);
+            renderer.gpuMark(frame, gpuClouds);
         }
         if (perspective == 0) {
             drawHand(frame, partialTick, current, eyeX, eyeY, eyeZ, medium != Sky.Medium.AIR, reach);
         }
         border.drawWarning(frame, current.border().warning(player.x, player.z));
         frame.endRendering();
-        frame.beginRendering(scene, false, 0f, 0f, 0f, 1f);
-        frame.bindPipeline(blit);
-        frame.bindImage(target);
-        frame.draw(3, 1, 0, 0);
-        frame.endRendering();
+        renderer.gpuMark(frame, gpuHand);
+        if (!direct) {
+            frame.beginRendering(scene, false, 0f, 0f, 0f, 1f);
+            frame.bindPipeline(blit);
+            frame.bindImage(target);
+            frame.draw(3, 1, 0, 0);
+            frame.endRendering();
+            renderer.gpuMark(frame, gpuBlit);
+        }
     }
 
     /** RenderGlobal.drawBlockDamageTexture: the cracks of every block being dug within 32 blocks. */
@@ -780,8 +838,8 @@ final class GameView implements MenuBackground {
         if (streamer != null) {
             streamer.close();
         }
-        if (target != null) {
-            target.close();
+        if (ownTarget != null) {
+            ownTarget.close();
         }
         entities.close();
         border.close();

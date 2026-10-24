@@ -179,6 +179,15 @@ public final class VulkanFrame {
 
     private java.nio.IntBuffer streamInts;
 
+    /**
+     * The CPU address of a stream offset from {@link #allocate}, for hot writers that store with
+     * {@code MemoryUtil.memPut*} instead of checked buffer calls. Write only, within the allocation.
+     */
+    public long streamPointer(long offset) {
+        requireOpen();
+        return org.lwjgl.system.MemoryUtil.memAddress(stream.bytes(), 0) + offset;
+    }
+
     /** GPU virtual address of a stream offset, for shaders using buffer references. */
     public long streamAddress(long offset) {
         requireOpen();
@@ -624,6 +633,11 @@ public final class VulkanFrame {
     }
 
     // ---- lifecycle (renderer-owned) -----------------------------------------------------------------------
+
+    VkCommandBuffer commandBuffer() {
+        requireOpen();
+        return command;
+    }
 
     void begin(VkCommandBuffer commandBuffer, int frameIndex, int frameWidth, int frameHeight) {
         command = commandBuffer;

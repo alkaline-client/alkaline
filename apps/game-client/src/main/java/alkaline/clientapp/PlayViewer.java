@@ -80,6 +80,6 @@ final class PlayViewer implements NameTags.Viewer {
 
     @Override
     public boolean ridden(Entity entity) {
-        return vehicles.contains(entity.id);
+        return !vehicles.isEmpty() && vehicles.contains(entity.id);
     }
 }

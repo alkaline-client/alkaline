@@ -37,7 +37,10 @@ public final class QuadRenderer implements AutoCloseable {
     private final VulkanPipeline[] pipelines = new VulkanPipeline[Mode.values().length];
     private final boolean linearOutput;
     private final ByteBuffer push = MemoryUtil.memCalloc(PUSH_BYTES);
-    private ByteBuffer vertices = MemoryUtil.memAlloc(64 * QUAD_VERTICES * VERTEX_BYTES);
+    /** Vertices since {@link #start}, written by address: name tags write tens of thousands of floats a frame. */
+    private long vertices = MemoryUtil.nmemAllocChecked(64 * QUAD_VERTICES * VERTEX_BYTES);
+    private long capacity = 64 * QUAD_VERTICES * VERTEX_BYTES;
+    private long written;
     private VulkanFrame frame;
     private Mode mode;
     private VulkanSampledImage image;
@@ -102,25 +105,35 @@ public final class QuadRenderer implements AutoCloseable {
     public void quad(float x0, float y0, float z0, float u0, float v0, float x1, float y1, float z1, float u1,
                      float v1, float x2, float y2, float z2, float u2, float v2, float x3, float y3, float z3,
                      float u3, float v3, int argb) {
-        if (vertices.remaining() < QUAD_VERTICES * VERTEX_BYTES) {
-            ByteBuffer grown = MemoryUtil.memAlloc(vertices.capacity() * 2);
-            vertices.flip();
-            grown.put(vertices);
-            MemoryUtil.memFree(vertices);
-            vertices = grown;
+        if (capacity - written < QUAD_VERTICES * VERTEX_BYTES) {
+            capacity *= 2;
+            vertices = MemoryUtil.nmemReallocChecked(vertices, capacity);
         }
-        put(x0, y0, z0, u0, v0, argb);
-        put(x1, y1, z1, u1, v1, argb);
-        put(x2, y2, z2, u2, v2, argb);
-        put(x0, y0, z0, u0, v0, argb);
-        put(x2, y2, z2, u2, v2, argb);
-        put(x3, y3, z3, u3, v3, argb);
+        // UNORM8X4 reads red, green, blue, alpha in memory order.
+        int rgba = (argb >> 16 & 0xFF) | (argb & 0xFF00) | (argb & 0xFF) << 16 | (argb & 0xFF000000);
+        if (BIG_ENDIAN) {
+            rgba = Integer.reverseBytes(rgba);
+        }
+        long at = vertices + written;
+        put(at, x0, y0, z0, u0, v0, rgba);
+        put(at + VERTEX_BYTES, x1, y1, z1, u1, v1, rgba);
+        put(at + 2 * VERTEX_BYTES, x2, y2, z2, u2, v2, rgba);
+        put(at + 3 * VERTEX_BYTES, x0, y0, z0, u0, v0, rgba);
+        put(at + 4 * VERTEX_BYTES, x2, y2, z2, u2, v2, rgba);
+        put(at + 5 * VERTEX_BYTES, x3, y3, z3, u3, v3, rgba);
+        written += QUAD_VERTICES * VERTEX_BYTES;
         count += QUAD_VERTICES;
     }
 
-    private void put(float x, float y, float z, float u, float v, int argb) {
-        vertices.putFloat(x).putFloat(y).putFloat(z).putFloat(u).putFloat(v);
-        vertices.put((byte) (argb >> 16)).put((byte) (argb >> 8)).put((byte) argb).put((byte) (argb >>> 24));
+    private static final boolean BIG_ENDIAN = java.nio.ByteOrder.nativeOrder() == java.nio.ByteOrder.BIG_ENDIAN;
+
+    private static void put(long at, float x, float y, float z, float u, float v, int rgba) {
+        MemoryUtil.memPutFloat(at, x);
+        MemoryUtil.memPutFloat(at + 4, y);
+        MemoryUtil.memPutFloat(at + 8, z);
+        MemoryUtil.memPutFloat(at + 12, u);
+        MemoryUtil.memPutFloat(at + 16, v);
+        MemoryUtil.memPutInt(at + 20, rgba);
     }
 
     /** Draws the quads written since {@link #start}. */
@@ -129,8 +142,7 @@ public final class QuadRenderer implements AutoCloseable {
             long bytes = (long) count * VERTEX_BYTES;
             long offset = frame.allocate(bytes, 16);
             if (offset >= 0) {
-                ByteBuffer stream = frame.stream();
-                stream.put((int) offset, vertices, 0, (int) bytes);
+                MemoryUtil.memCopy(vertices, frame.streamPointer(offset), bytes);
                 frame.bindPipeline(pipelines[mode.ordinal()]);
                 frame.bindImage(image);
                 frame.pushConstants(push);
@@ -138,7 +150,7 @@ public final class QuadRenderer implements AutoCloseable {
                 frame.draw(count, 1, 0, 0);
             }
         }
-        vertices.clear();
+        written = 0;
         count = 0;
     }
 
@@ -150,6 +162,7 @@ public final class QuadRenderer implements AutoCloseable {
             }
         }
         MemoryUtil.memFree(push);
-        MemoryUtil.memFree(vertices);
+        MemoryUtil.nmemFree(vertices);
+        vertices = 0L;
     }
 }

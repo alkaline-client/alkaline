@@ -51,6 +51,8 @@ public final class MenuCompositor implements AutoCloseable {
     private final VulkanRenderTarget[] downTargets = new VulkanRenderTarget[DOWN_LEVELS];
     private final VulkanRenderTarget[] upTargets = new VulkanRenderTarget[UP_LEVELS];
     private VulkanRenderTarget scene;
+    /** Rows of the uploaded Compose layer with content ({@code start, end} pairs), or null for all of them. */
+    private int[] uiContent;
     private VulkanDynamicTexture uiTexture;
     private ComposeLayerHost.Frame pendingUi;
     /** The current UI frame's glass regions, and those drawn (HUD ones only without Frosted surfaces). */
@@ -111,8 +113,14 @@ public final class MenuCompositor implements AutoCloseable {
      * Compose frame, recreating the UI texture if its size changed.
      */
     public void update(int width, int height) {
-        if (width > 0 && height > 0 && (scene == null || scene.width() != width || scene.height() != height)) {
-            recreateTargets(width, height);
+        update(width, height, false);
+    }
+
+    /** As {@link #update(int, int)}, with a depth attachment on the scene when the background asks for one. */
+    public void update(int width, int height, boolean depth) {
+        if (width > 0 && height > 0 && (scene == null || scene.width() != width || scene.height() != height
+                || scene.hasDepth() != depth)) {
+            recreateTargets(width, height, depth);
         }
         ComposeLayerHost.Frame next = host.poll();
         if (next == null) {
@@ -154,6 +162,7 @@ public final class MenuCompositor implements AutoCloseable {
             uploadedRows += pendingBands == null ? pendingUi.getHeight() : rows(pendingBands);
             setRegions(pendingUi.getGlass(), menuGlass);
             anchors = pendingUi.getAnchors();
+            uiContent = pendingUi.getContentBands();
             host.release(pendingUi);
             pendingUi = null;
             uiReady = true;
@@ -449,7 +458,10 @@ public final class MenuCompositor implements AutoCloseable {
         return uiReady;
     }
 
-    /** Composites the Compose layer over everything; call last in the main pass. */
+    /**
+     * Composites the Compose layer over everything; call last in the main pass. Only the rows the layer has
+     * content in are blended (the HUD leaves most of the screen clear), each band under a scissor.
+     */
     public void drawUi(VulkanFrame frame) {
         if (!uiReady || uiTexture == null) {
             return;
@@ -460,12 +472,27 @@ public final class MenuCompositor implements AutoCloseable {
         frame.bindPipeline(ui);
         frame.bindImage(uiTexture);
         frame.pushConstants(push);
-        frame.draw(3, 1, 0, 0);
+        int[] bands = uiContent;
+        if (bands == null) {
+            frame.draw(3, 1, 0, 0);
+            return;
+        }
+        int width = frame.width();
+        int height = frame.height();
+        float scale = height / (float) uiTexture.height();
+        for (int band = 0; band + 1 < bands.length; band += 2) {
+            // A row of margin either side: the layer is filtered when it is scaled to the framebuffer.
+            int top = Math.max(0, (int) Math.floor(bands[band] * scale) - 1);
+            int bottom = Math.min(height, (int) Math.ceil(bands[band + 1] * scale) + 1);
+            frame.setScissor(0, top, width, bottom - top);
+            frame.draw(3, 1, 0, 0);
+        }
+        frame.setScissor(0, 0, width, height);
     }
 
-    private void recreateTargets(int width, int height) {
+    private void recreateTargets(int width, int height, boolean depth) {
         closeTargets();
-        scene = renderer.createRenderTarget(width, height, MenuBackground.SCENE_FORMAT, true, false);
+        scene = renderer.createRenderTarget(width, height, MenuBackground.SCENE_FORMAT, true, false, depth);
         int levelWidth = width;
         int levelHeight = height;
         for (int level = 0; level < DOWN_LEVELS; level++) {

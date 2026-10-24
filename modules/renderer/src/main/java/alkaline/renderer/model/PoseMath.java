@@ -21,20 +21,33 @@ public final class PoseMath {
         if (out.length < parts * FLOATS_PER_PART || root.length != 16) {
             throw new IllegalArgumentException("Pose output needs 12 floats per part and a 16-float root.");
         }
+        // Parts whose matrix is zero: hidden, or under a hidden parent (models have at most 64 parts).
+        long zero = 0L;
         for (int part = 0; part < parts; part++) {
-            int parent = model.parts().get(part).parent();
+            int parent = model.parent(part);
             int target = part * FLOATS_PER_PART;
-            if (!pose.visible[part] || (parent >= 0 && isZero(out, parent * FLOATS_PER_PART))) {
+            if (!pose.visible[part] || (parent >= 0 && (zero >>> parent & 1L) != 0)) {
                 java.util.Arrays.fill(out, target, target + FLOATS_PER_PART, 0f);
+                zero |= 1L << part;
                 continue;
             }
-            // Local = T(pivot / 16) * Rz * Ry * Rx
+            // Local = T(pivot / 16) * Rz * Ry * Rx; most parts turn about one axis or none, so skip zero angles.
             float rx = pose.rotation[part * 3];
             float ry = pose.rotation[part * 3 + 1];
             float rz = pose.rotation[part * 3 + 2];
-            float cx = (float) Math.cos(rx), sx = (float) Math.sin(rx);
-            float cy = (float) Math.cos(ry), sy = (float) Math.sin(ry);
-            float cz = (float) Math.cos(rz), sz = (float) Math.sin(rz);
+            float cx = 1f, sx = 0f, cy = 1f, sy = 0f, cz = 1f, sz = 0f;
+            if (rx != 0f) {
+                cx = (float) Math.cos(rx);
+                sx = (float) Math.sin(rx);
+            }
+            if (ry != 0f) {
+                cy = (float) Math.cos(ry);
+                sy = (float) Math.sin(ry);
+            }
+            if (rz != 0f) {
+                cz = (float) Math.cos(rz);
+                sz = (float) Math.sin(rz);
+            }
             float l00 = cz * cy, l01 = cz * sy * sx - sz * cx, l02 = cz * sy * cx + sz * sx;
             float l10 = sz * cy, l11 = sz * sy * sx + cz * cx, l12 = sz * sy * cx - cz * sx;
             float l20 = -sy, l21 = cy * sx, l22 = cy * cx;
@@ -66,14 +79,5 @@ public final class PoseMath {
             out[target + 10] = p20 * l02 + p21 * l12 + p22 * l22;
             out[target + 11] = p20 * tx + p21 * ty + p22 * tz + p23;
         }
-    }
-
-    private static boolean isZero(float[] values, int offset) {
-        for (int index = offset; index < offset + FLOATS_PER_PART; index++) {
-            if (values[index] != 0f) {
-                return false;
-            }
-        }
-        return true;
     }
 }

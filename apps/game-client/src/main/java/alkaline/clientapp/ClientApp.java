@@ -97,6 +97,10 @@ final class ClientApp implements AutoCloseable {
     private float scaleY = 1f;
     private long frames;
     private final FrameStats stats = new FrameStats();
+    /** GPU section ids for --stats: the compositor's blur, the scene under the UI, and the UI layer. */
+    private int gpuBlur;
+    private int gpuBackdrop;
+    private int gpuUi;
     private final java.util.ArrayDeque<ScriptedClick> script = new java.util.ArrayDeque<>();
     private final long startNanos = System.nanoTime();
     private boolean captureRequested;
@@ -309,6 +313,10 @@ final class ClientApp implements AutoCloseable {
             return kotlin.Unit.INSTANCE;
         });
         audio.logging(options.stats());
+        renderer.gpuProfiling(options.stats());
+        gpuBlur = renderer.gpuSection("blur");
+        gpuBackdrop = renderer.gpuSection("backdrop");
+        gpuUi = renderer.gpuSection("ui");
         textInput(true);
         refreshDisplayRate();
     }
@@ -830,7 +838,7 @@ final class ClientApp implements AutoCloseable {
         applySettings();
         ui.checkHealthy();
         SdlWindow.PixelSize size = window.pixelSize();
-        compositor.update(size.width(), size.height());
+        compositor.update(size.width(), size.height(), background != null && background.needsDepth());
         if (hudGlint != null) {
             hudGlint.update(compositor);
         }
@@ -855,9 +863,12 @@ final class ClientApp implements AutoCloseable {
                 settings.get(ClientSettings.MENU_GLASS));
         // The theme surface, so the first frames match the loading screen.
         float[] surface = themeSurface(settings.get(ClientSettings.INTERFACE_THEME));
+        renderer.gpuMark(frame, gpuBlur);
         frame.beginMainPass(surface[0], surface[1], surface[2], 1f);
         compositor.drawBackdrop(frame);
+        renderer.gpuMark(frame, gpuBackdrop);
         compositor.drawUi(frame);
+        renderer.gpuMark(frame, gpuUi);
         if (hudGlint != null) {
             hudGlint.draw(frame, compositor, System.currentTimeMillis());
         }
@@ -1692,6 +1703,11 @@ final class ClientApp implements AutoCloseable {
                     + (pacer.paced() > 0 ? String.format(", V-Sync paced %d frames (%d queued), margin %.2f ms, %d missed refreshes",
                             pacer.paced(), pacer.lag(), pacer.marginNanos() / 1e6, pacer.misses()) : ""));
             System.out.println(stats.report());
+            System.out.println(renderer.textureReport());
+            String sections = renderer.gpuSectionReport();
+            if (sections != null) {
+                System.out.println(sections);
+            }
             System.out.println(audio.describe());
             System.out.printf("UI: %d Compose frames uploaded, %d rows%n", compositor.uiUploads(),
                     compositor.uploadedRows());

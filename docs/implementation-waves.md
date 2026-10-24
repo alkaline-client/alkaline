@@ -41,7 +41,7 @@ Other OptiFine features (net/optifine)
 Check
 - Tests for the parsing and tile rules
 - Screenshots with Xe Lite of a pane wall and a sunset; use a tiny test pack for features Xe Lite lacks
-- Summoned TNT: use a long fuse and kill it right after the screenshot
+- Do not summon, test or touch TNT
 ```
 
 ### B. World and gameplay (Sonnet High, port 25651)

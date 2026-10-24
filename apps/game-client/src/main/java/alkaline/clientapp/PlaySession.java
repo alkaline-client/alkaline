@@ -12,11 +12,14 @@ import alkaline.game.inventory.ItemStack;
 import alkaline.game.inventory.Window;
 import alkaline.game.inventory.WindowInput;
 import alkaline.game.net.ServerSession;
+import alkaline.game.player.BlockBreaking;
 import alkaline.game.player.BlockTarget;
+import alkaline.game.player.Digging;
 import alkaline.game.player.Interactions;
 import alkaline.game.player.LocalPlayer;
 import alkaline.game.state.PlayerList;
 import alkaline.game.state.Scoreboard;
+import alkaline.game.world.BlockDamage;
 import alkaline.game.world.ClientWorld;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -76,6 +79,12 @@ public final class PlaySession implements AutoCloseable {
     /** Sign text by packed block position, from Update Sign, for the editor to start from. */
     private final Map<Long, String[]> signs = new java.util.HashMap<>();
     private long editingSign = Long.MIN_VALUE;
+    /** The blocks being dug (RenderGlobal.damagedBlocks): ours, and others' from Block Break Animation packets. */
+    private final BlockDamage damage = new BlockDamage();
+    /** PlayerControllerMP's digging of the block under the crosshair. */
+    private final BlockBreaking breaking = new BlockBreaking(new Digger());
+    /** Minecraft.leftClickCounter: ticks before the attack key digs again after a miss. */
+    private int leftClickCounter;
     /** Minecraft.rightClickDelayTimer: ticks before a held use key acts again. */
     private int useDelay;
     private int useTicks;
@@ -240,6 +249,11 @@ public final class PlaySession implements AutoCloseable {
         this.sounds = sounds;
     }
 
+    /** The blocks being dug, for the renderer's crack stages. */
+    BlockDamage damage() {
+        return damage;
+    }
+
     void view(GameView view) {
         this.view = view;
         view.weather(rain, thunder);
@@ -260,7 +274,8 @@ public final class PlaySession implements AutoCloseable {
 
     /**
      * Minecraft.clickMouse: swing the arm (vanilla always does), then attack the entity under the crosshair
-     * within reach. Sprinting into a player slows the attacker and ends the sprint, as vanilla's client does.
+     * within reach, or start digging the block under it. Sprinting into a player slows the attacker and ends the
+     * sprint, as vanilla's client does.
      */
     void attack() {
         if (!spawned) {
@@ -274,6 +289,12 @@ public final class PlaySession implements AutoCloseable {
         Entity target = picker.pick(entities, world::state, player.x, player.eyeY(1f), player.z, player.yaw,
                 player.pitch, reach);
         if (target == null || gameMode == 3) {
+            BlockTarget block = crosshairBlock();
+            if (block != null && leftClickCounter <= 0) {
+                breaking.click(block.x(), block.y(), block.z(), block.face(), gameMode == 1);
+            } else if (block == null && gameMode != 1) {
+                leftClickCounter = 10;
+            }
             return;
         }
         session.sendAttack(target.id);
@@ -296,6 +317,121 @@ public final class PlaySession implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /**
+     * The block under the crosshair when it is what the crosshair hits (Minecraft.objectMouseOver of type BLOCK):
+     * within reach and not behind an entity. Null in adventure and spectator mode, where nothing is dug.
+     */
+    private BlockTarget crosshairBlock() {
+        if (gameMode > 1) {
+            return null;
+        }
+        ClientWorld world = session.world();
+        double eyeY = player.eyeY(1f);
+        BlockTarget block = BlockTarget.pick(world::state, player.x, eyeY, player.z, player.yaw, player.pitch,
+                gameMode == 1 ? 5.0 : 4.5);
+        if (block == null) {
+            return null;
+        }
+        Entity entity = picker.pick(entities, world::state, player.x, eyeY, player.z, player.yaw, player.pitch,
+                gameMode == 1 ? 6.0 : 3.0);
+        return entity != null && picker.distance() < block.distance() ? null : block;
+    }
+
+    /**
+     * Minecraft.sendClickBlockToController, every tick: with the attack key held on a block, another tick of
+     * digging (and the hit particles and swing that come with it); otherwise the dig is dropped.
+     */
+    private void dig(boolean attackHeld) {
+        if (!attackHeld) {
+            leftClickCounter = 0;
+        }
+        if (leftClickCounter > 0 || player.usingItem) {
+            return;
+        }
+        BlockTarget block = attackHeld ? crosshairBlock() : null;
+        if (block == null) {
+            breaking.reset();
+            return;
+        }
+        int state = session.world().state(block.x(), block.y(), block.z());
+        if (breaking.damage(block.x(), block.y(), block.z(), block.face(), gameMode == 1) && state >> 4 != 0) {
+            if (view != null) {
+                view.particles().blockHit(block.x(), block.y(), block.z(), state, block.face());
+            }
+            player.swing();
+            session.sendSwing();
+        }
+    }
+
+    /** What PlayerControllerMP needs around it. */
+    private final class Digger implements BlockBreaking.Host {
+        @Override
+        public int state(int x, int y, int z) {
+            return session.world().state(x, y, z);
+        }
+
+        @Override
+        public ItemStack held() {
+            return inventory.held();
+        }
+
+        @Override
+        public void send(int status, int x, int y, int z, int face) {
+            session.sendDigging(status, x, y, z, face);
+        }
+
+        @Override
+        public float progress(int state) {
+            int id = state >> 4;
+            ItemStack held = inventory.held();
+            ItemStack helmet = inventory.armor(3);
+            boolean swimming = eyesInWater() && (helmet == null || helmet.enchantment(6) == 0);
+            float speed = Digging.breakSpeed(held, id, player.haste, player.miningFatigue, swimming, player.onGround);
+            return Digging.progress(speed, id, Digging.canHarvest(held, id));
+        }
+
+        @Override
+        public void stage(int x, int y, int z, int stage) {
+            damage.set(entities.selfId(), x, y, z, stage);
+        }
+
+        @Override
+        public void destroyed(int x, int y, int z, int state) {
+            if (view != null) {
+                view.particles().blockDestroyed(x, y, z, state);
+            }
+            if (sounds != null) {
+                sounds.blockBroken(x, y, z, state);
+            }
+            session.world().setBlock(x, y, z, 0);
+        }
+
+        @Override
+        public void hit(int x, int y, int z, int state) {
+            if (sounds != null) {
+                sounds.blockHit(x, y, z, state);
+            }
+        }
+    }
+
+    /**
+     * Entity.isInsideOfMaterial(water): the eyes' block is water and the eyes are below the water's surface, which
+     * sits a ninth lower than the block's level suggests.
+     */
+    private boolean eyesInWater() {
+        double eyeY = player.eyeY(1f);
+        int x = (int) Math.floor(player.x);
+        int y = (int) Math.floor(eyeY);
+        int z = (int) Math.floor(player.z);
+        int state = session.world().state(x, y, z);
+        if ((state >> 4) != 8 && (state >> 4) != 9) {
+            return false;
+        }
+        int level = state & 15;
+        float height = ((level >= 8 ? 0 : level) + 1) / 9.0F;
+        return eyeY < y + 1 - (height - 0.11111111F);
     }
 
     /** Toggle sprint & sneak: whether each toggle is in use, and its state. */
@@ -534,7 +670,8 @@ public final class PlaySession implements AutoCloseable {
      * chest, place a block...), and otherwise use the held item (eat, drink, draw the bow, block with the sword).
      */
     void use() {
-        if (!spawned || player.usingItem) {
+        // Minecraft.rightClickMouse does nothing while a block is being dug.
+        if (!spawned || player.usingItem || breaking.hitting()) {
             return;
         }
         useDelay = 4;
@@ -651,6 +788,7 @@ public final class PlaySession implements AutoCloseable {
     /** One game tick; {@code controls} is false while the pause card or a menu has the input. */
     void tick(boolean controls, ConfigSnapshot settings, boolean[] keys, boolean[] buttons) {
         ticks++;
+        damage.tick();
         session.drainEvents(this::handle);
         entities.tick(session.world()::state);
         animation.tick(entities.all(), session.world()::state);
@@ -667,6 +805,9 @@ public final class PlaySession implements AutoCloseable {
         if (useDelay > 0) {
             useDelay--;
         }
+        if (leftClickCounter > 0) {
+            leftClickCounter--;
+        }
         boolean useHeld = controls && held(settings.get(ClientSettings.KEY_USE), keys, buttons);
         if (player.usingItem) {
             // Minecraft.runTick: letting go of the use key stops using; a finished use ends by itself.
@@ -679,6 +820,7 @@ public final class PlaySession implements AutoCloseable {
         } else if (useHeld && useDelay == 0) {
             use();
         }
+        dig(controls && held(settings.get(ClientSettings.KEY_ATTACK), keys, buttons));
         if (!player.usingItem) {
             player.itemInUse = -1;
             player.itemUseTicks = 0;
@@ -719,6 +861,10 @@ public final class PlaySession implements AutoCloseable {
         }
         if (event instanceof ServerSession.EntityVelocity velocity && velocity.entityId() == entities.selfId()) {
             player.velocity(velocity.motionX(), velocity.motionY(), velocity.motionZ());
+            return;
+        }
+        if (event instanceof ServerSession.BlockBreak crack) {
+            damage.apply(crack);
             return;
         }
         if (event instanceof ServerSession.BlockAction action) {
@@ -981,6 +1127,8 @@ public final class PlaySession implements AutoCloseable {
         signs.clear();
         vehicle = -1;
         player.usingItem = false;
+        damage.clear();
+        breaking.reset();
         if (view != null) {
             view.weather(rain, thunder);
         }

@@ -89,6 +89,43 @@ class ChunkMesherTest {
     }
 
     @Test
+    void meshBlockDrawsOnlyThatBlocksQuads() {
+        char stone = VanillaBlocks.state(1, 0);
+        set(5, 5, 5, stone);
+        set(5, 4, 5, stone);
+        set(6, 4, 5, stone);
+        ChunkMesh column = meshBlock(5, 5, 5);
+        // The top and four sides of the upper block; the stone below is a neighbor only, and its sides do not
+        // merge into this block's.
+        assertEquals(5, column.quadCount());
+        for (int quad = 0; quad < column.quadCount(); quad++) {
+            for (int vertex = 0; vertex < 4; vertex++) {
+                float[] at = position(column, quad, vertex);
+                assertTrue(at[0] >= 5 && at[0] <= 6 && at[1] >= 5 && at[1] <= 6 && at[2] >= 5 && at[2] <= 6,
+                        "vertex outside the block: " + Arrays.toString(at));
+            }
+        }
+        // Buried blocks have no faces to crack.
+        for (int x = 4; x <= 6; x++) {
+            for (int y = 4; y <= 6; y++) {
+                for (int z = 4; z <= 6; z++) {
+                    set(x, y, z, stone);
+                }
+            }
+        }
+        assertEquals(0, meshBlock(5, 5, 5).quadCount());
+        // The cube's top center shows its top face only.
+        assertEquals(1, meshBlock(5, 6, 5).quadCount());
+    }
+
+    private ChunkMesh meshBlock(int x, int y, int z) {
+        for (int cell = 0; cell < ids.length; cell++) {
+            light[cell] = Blocks189.opaqueCube(ids[cell] >> 4) ? 0 : SKY;
+        }
+        return mesher.meshBlock(0, 0, 0, x, y, z, ids, light, PALETTE, false);
+    }
+
+    @Test
     void emptySectionHasNoQuadsAndSeesThrough() {
         ChunkMesh mesh = mesh(true);
         assertTrue(mesh.isEmpty());

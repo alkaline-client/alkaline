@@ -79,6 +79,8 @@ public final class BlockPalette {
     final int waterTint;
     /** The active packs' custom colors, for the sky and items. */
     final CustomColors customColors;
+    /** The destroy_stage_0..9 layers of the block break overlay. */
+    private final int[] destroyLayers = new int[10];
     final int waterStill;
     final int waterFlow;
     final int lavaStill;
@@ -123,6 +125,9 @@ public final class BlockPalette {
         waterFlow = compiler.layer("blocks/water_flow");
         lavaStill = compiler.layer("blocks/lava_still");
         lavaFlow = compiler.layer("blocks/lava_flow");
+        for (int stage = 0; stage < destroyLayers.length; stage++) {
+            destroyLayers[stage] = compiler.layer("blocks/destroy_stage_" + stage);
+        }
     }
 
     /** Compiles every 1.8.9 block state from the game assets. */
@@ -177,6 +182,25 @@ public final class BlockPalette {
         }
         int model = choiceModel[choice];
         return modelQuadCount[model] > 0 ? quadLayer[modelQuadStart[model]] : -1;
+    }
+
+    /** The texture layer of crack stage 0..9 (RenderGlobal.destroyBlockIcons). */
+    public int destroyLayer(int stage) {
+        return destroyLayers[Math.max(0, Math.min(9, stage))];
+    }
+
+    /**
+     * The bounds of a state's model, as Block.getBlockBounds reports them: min x, y, z, max x, y, z in {@code
+     * out}. States without a model are whole cells.
+     */
+    public void bounds(int state, float[] out) {
+        int base = state < 0 || state >= STATES ? -1 : stateBase[state];
+        if (base < 0 || entryChoiceCount[base] == 0) {
+            out[0] = out[1] = out[2] = 0f;
+            out[3] = out[4] = out[5] = 1f;
+            return;
+        }
+        System.arraycopy(modelBounds, choiceModel[entryFirstChoice[base]] * 6, out, 0, 6);
     }
 
     /** EntityDiggingFX's color multiplier for a state (0xRRGGBB): the block tint, none for grass blocks. */
@@ -293,6 +317,9 @@ public final class BlockPalette {
             for (String liquid : new String[]{"blocks/water_still", "blocks/water_flow", "blocks/lava_still",
                     "blocks/lava_flow"}) {
                 layer(liquid);
+            }
+            for (int stage = 0; stage < 10; stage++) {
+                layer("blocks/destroy_stage_" + stage);
             }
         }
 

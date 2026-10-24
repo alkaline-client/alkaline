@@ -1178,6 +1178,20 @@ public final class WorldRenderer implements AutoCloseable {
         lastDraws += drawPass(frame, translucent, 2);
     }
 
+    /**
+     * The cracks of blocks being dug ({@link DamageOverlay}); after {@link #renderSolid} in the same pass, once the
+     * entities are drawn.
+     *
+     * @param count blocks to draw; {@code x}, {@code y}, {@code z} and {@code stage} (0..9) hold one each
+     */
+    public void renderDamage(VulkanFrame frame, DamageOverlay overlay, int count, int[] x, int[] y, int[] z,
+                             int[] stage, DamageOverlay.Blocks states) {
+        if (prepared && count > 0) {
+            overlay.draw(frame, scene, blocks, tiles, quadIndices, lastCameraX, lastCameraY, lastCameraZ,
+                    viewportWidth, viewportHeight, count, x, y, z, stage, states);
+        }
+    }
+
     /** Rain or snow set by {@link #setWeather}. */
     public void renderWeather(VulkanFrame frame) {
         if (prepared && weatherSource != null && weatherStrength > 0f) {

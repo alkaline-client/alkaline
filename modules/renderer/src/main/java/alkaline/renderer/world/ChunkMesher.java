@@ -149,6 +149,8 @@ public final class ChunkMesher {
     private int originX;
     private int originY;
     private int originZ;
+    /** The only section cell to mesh ({@code x | y << 4 | z << 8}), or -1 for all of them. */
+    private int onlyCell = -1;
 
     public ChunkMesher() {
         for (int range = 0; range < buckets.length; range++) {
@@ -163,6 +165,27 @@ public final class ChunkMesher {
      */
     public ChunkMesh mesh(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light, BlockPalette palette,
                           boolean smooth) {
+        return mesh(sectionX, sectionY, sectionZ, ids, light, palette, smooth, -1);
+    }
+
+    /**
+     * Meshes one block of a section as the section would draw it, for effects that redraw a single block (the
+     * destroy overlay). The other cells still count as neighbors for culling, connections and lighting. The mesh
+     * holds that block's quads only, in the section's coordinates.
+     *
+     * @param x section-local block position, 0..15 each
+     */
+    public ChunkMesh meshBlock(int sectionX, int sectionY, int sectionZ, int x, int y, int z, char[] ids,
+                               byte[] light, BlockPalette palette, boolean smooth) {
+        if ((x | y | z) < 0 || x >= SIZE || y >= SIZE || z >= SIZE) {
+            throw new IllegalArgumentException("Block position outside the section: " + x + ", " + y + ", " + z);
+        }
+        return mesh(sectionX, sectionY, sectionZ, ids, light, palette, smooth, x | y << 4 | z << 8);
+    }
+
+    private ChunkMesh mesh(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light, BlockPalette palette,
+                           boolean smooth, int only) {
+        this.onlyCell = only;
         this.palette = Objects.requireNonNull(palette, "palette");
         if (ids.length != BlockSource.VOLUME || light.length != BlockSource.VOLUME) {
             throw new IllegalArgumentException("Section ids and light must be 20^3 including the halo.");
@@ -258,7 +281,7 @@ public final class ChunkMesher {
                     int cell = x | y << 4 | z << 8;
                     int index = row + x;
                     int state = ids[index];
-                    int base = state == 0 ? -1 : palette.stateBase[state];
+                    int base = state == 0 || onlyCell >= 0 && cell != onlyCell ? -1 : palette.stateBase[state];
                     if (base < 0) {
                         cellEntry[cell] = -1;
                         cellChoice[cell] = -1;
@@ -747,6 +770,9 @@ public final class ChunkMesher {
                         continue;
                     }
                     int cell = x | y << 4 | z << 8;
+                    if (onlyCell >= 0 && cell != onlyCell) {
+                        continue;
+                    }
                     int choice = cellChoice[cell];
                     if (choice >= 0) {
                         int model = palette.choiceModel[choice];

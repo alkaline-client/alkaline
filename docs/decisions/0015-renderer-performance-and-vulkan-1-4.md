@@ -155,8 +155,8 @@ They would save little in the measured frames.
 - **Choosing the Overworld background in Settings** still prepares its textures on the render thread.
 - **End and respawn, found while testing:** on main since the wave 2 merge, sections in the End fail to mesh
   (`ArrayIndexOutOfBoundsException` in `Blocks189.neighborBrightness`, block ids above 255). After respawning from
-  the End, the Overworld draws wrongly. The pre-merge `wave2/world` build has no such failures. There is no death
-  screen yet; the client respawns at once.
+  the End, the Overworld draws wrongly. The pre-merge `wave2/world` build has no such failures. These tests ran
+  before the death screen existed (decision 0016), when the client respawned at once.
 - **Sky with clouds below the eye:** it still draws first. Drawing it after the terrain would change where fancy
   clouds hide terrain.
 - **Remaining GPU costs:** the scene-to-swapchain backdrop (0.21 ms at 4K) and full-screen custom sky layers

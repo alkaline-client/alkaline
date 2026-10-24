@@ -122,6 +122,13 @@ public final class PlaySession implements AutoCloseable {
     private float rain;
     private float thunder;
     private int gameMode;
+    /** Join Game's hardcore flag (game mode bit 8); respawns keep it. */
+    private boolean hardcore;
+    /** Whether the last health update was zero or less, until health comes back. */
+    private boolean dead;
+    /** The death screen's score (the player's metadata 18) and the hardcore flag, when health reaches zero. */
+    private java.util.function.BiConsumer<Integer, Boolean> died = (score, hardcoreWorld) -> { };
+    private Runnable alive = () -> { };
     private float experience;
     private int level;
     private long ticks;
@@ -560,6 +567,21 @@ public final class PlaySession implements AutoCloseable {
         signEditorOpened = action;
     }
 
+    /** Health reached zero: the handler shows the death screen with the score and whether the world is hardcore. */
+    void onDeath(java.util.function.BiConsumer<Integer, Boolean> action) {
+        died = action;
+    }
+
+    /** Health came back after a death (a respawn): the handler closes the death screen. */
+    void onAlive(Runnable action) {
+        alive = action;
+    }
+
+    /** EntityPlayerSP.respawnPlayer: Client Status "perform respawn"; the server answers with Respawn. */
+    void respawn() {
+        session.sendClientStatus(0);
+    }
+
     private Consumer<java.util.List<String>> tabCompleted = matches -> { };
 
     void onTabComplete(Consumer<java.util.List<String>> action) {
@@ -954,6 +976,7 @@ public final class PlaySession implements AutoCloseable {
                 flat = "flat".equalsIgnoreCase(join.levelType());
                 entities.selfId(join.entityId());
                 gameMode = join.gameMode() & 7;
+                hardcore = (join.gameMode() & 8) != 0;
                 player.allowFlying = gameMode == 1;
                 newWorld();
             }
@@ -992,7 +1015,11 @@ public final class PlaySession implements AutoCloseable {
                 player.food = health.food();
                 player.health(health.health());
                 if (health.health() <= 0) {
-                    session.sendClientStatus(0); // respawn at once; the death screen is not built yet
+                    dead = true;
+                    died.accept(entities.self().getInt(18, 0), hardcore);
+                } else if (dead) {
+                    dead = false;
+                    alive.run();
                 }
             }
             case ServerSession.Respawn respawn -> {

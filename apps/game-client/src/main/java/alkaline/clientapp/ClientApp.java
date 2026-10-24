@@ -249,6 +249,15 @@ final class ClientApp implements AutoCloseable {
             }
 
             @Override
+            public void respawn() {
+                mainThreadTasks.add(() -> {
+                    if (play != null) {
+                        play.respawn();
+                    }
+                });
+            }
+
+            @Override
             public void inventoryClosed() {
                 mainThreadTasks.add(() -> {
                     if (play != null) {
@@ -785,6 +794,14 @@ final class ClientApp implements AutoCloseable {
                 return kotlin.Unit.INSTANCE;
             }));
             created.onResourcePackOffered((url, hash) -> serverPackOffered(created, url, hash));
+            created.onDeath((score, hardcore) -> ui.post(() -> {
+                menu.died(score, hardcore);
+                return kotlin.Unit.INSTANCE;
+            }));
+            created.onAlive(() -> ui.post(() -> {
+                menu.alive();
+                return kotlin.Unit.INSTANCE;
+            }));
             session.sendClientSettings("en_US", config.snapshot().get(ClientSettings.WORLD_RENDER_DISTANCE));
             play = created;
             inGame = true;

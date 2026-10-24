@@ -26,7 +26,7 @@ enum class PlayPhase { MENU, CONNECTING, PLAYING, PAUSED }
  * What covers the game while playing: nothing, the ClickGUI, the HUD editor, a container screen (the inventory
  * or a window the server opened), the sign editor, the chat line being typed, or a server's resource pack offer.
  */
-enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN, CHAT, SERVER_PACK }
+enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN, CHAT, SERVER_PACK, DEATH }
 
 /**
  * A container screen's input: pointer events by window slot ({@code -999} outside the window, -1 inside it but
@@ -92,6 +92,9 @@ interface MenuActions {
 
     /** Disconnects from the server, or cancels a connection in progress. */
     fun leaveGame() {}
+
+    /** The player chose Respawn on the death screen (EntityPlayerSP.respawnPlayer). */
+    fun respawn() {}
 
     /** The player closed the container screen. */
     fun inventoryClosed() {}
@@ -174,7 +177,7 @@ class MenuController @JvmOverloads constructor(
     fun toggleClickGui() {
         when {
             overlay == Overlay.INVENTORY || overlay == Overlay.SIGN || overlay == Overlay.CHAT ||
-                overlay == Overlay.SERVER_PACK -> {}
+                overlay == Overlay.SERVER_PACK || overlay == Overlay.DEATH -> {}
             overlay != Overlay.NONE -> closeOverlay()
             profiles != null && (play == PlayPhase.PLAYING || play == PlayPhase.PAUSED) -> overlay = Overlay.CLICK_GUI
         }
@@ -201,10 +204,7 @@ class MenuController @JvmOverloads constructor(
 
     /** The server closed the window: leave the screen without reporting a close back. */
     fun inventoryClosedByServer() {
-        if (overlay == Overlay.INVENTORY) {
-            overlay = Overlay.NONE
-            if (play == PlayPhase.PLAYING) actions.resumeGame()
-        }
+        if (overlay == Overlay.INVENTORY) backToGame()
     }
 
     /** Where chat goes; set by the client. */
@@ -254,10 +254,7 @@ class MenuController @JvmOverloads constructor(
     fun answerServerPack(use: Boolean) {
         val offer = serverPackOffer ?: return
         serverPackOffer = null
-        if (overlay == Overlay.SERVER_PACK) {
-            overlay = Overlay.NONE
-            if (play == PlayPhase.PLAYING) actions.resumeGame()
-        }
+        if (overlay == Overlay.SERVER_PACK) backToGame()
         offer.answer(use)
     }
 
@@ -294,7 +291,7 @@ class MenuController @JvmOverloads constructor(
     }
 
     fun closeOverlay() {
-        if (overlay == Overlay.NONE) return
+        if (overlay == Overlay.NONE || overlay == Overlay.DEATH) return
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
         if (overlay == Overlay.SIGN) actions.signDone(signLines)
         if (overlay == Overlay.CHAT) chat.close()
@@ -303,8 +300,52 @@ class MenuController @JvmOverloads constructor(
             return
         }
         typing = false
+        backToGame()
+    }
+
+    /**
+     * Whatever covered the game closed. As vanilla's displayGuiScreen(null) does while the player is dead, the
+     * death screen comes back instead of the game.
+     */
+    private fun backToGame() {
+        if (death != null && (play == PlayPhase.PLAYING || play == PlayPhase.PAUSED)) {
+            overlay = Overlay.DEATH
+            return
+        }
         overlay = Overlay.NONE
         if (play == PlayPhase.PLAYING) actions.resumeGame()
+    }
+
+    /** The death screen's content while the player is dead: the score, and whether the world is hardcore. */
+    class Death(val score: Int, val hardcore: Boolean)
+
+    /** Set from the player's death until they respawn, come back to life or leave. */
+    var death by mutableStateOf<Death?>(null)
+        private set
+
+    /**
+     * The player's health reached zero (GuiGameOver). The screen opens over the game now, or once whatever else
+     * is open (chat, a window, the pause card) closes. Call on the UI thread.
+     */
+    fun died(score: Int, hardcore: Boolean) {
+        if (play != PlayPhase.PLAYING && play != PlayPhase.PAUSED) return
+        death = Death(score, hardcore)
+        if (play == PlayPhase.PLAYING && overlay == Overlay.NONE) overlay = Overlay.DEATH
+    }
+
+    /** Respawn on the death screen: the request goes to the server and the game takes over again. */
+    fun respawn() {
+        if (death == null) return
+        death = null
+        actions.respawn()
+        if (overlay == Overlay.DEATH) backToGame()
+    }
+
+    /** The player has health again (the server respawned them): the death screen closes. */
+    fun alive() {
+        if (death == null) return
+        death = null
+        if (overlay == Overlay.DEATH) backToGame()
     }
 
     /** Whether the client should hold the mouse for the game (playing, nothing open over it). */
@@ -369,7 +410,10 @@ class MenuController @JvmOverloads constructor(
 
     /** The host finished logging in; the world takes over the screen. Call on the UI thread. */
     fun joined() {
-        if (play == PlayPhase.CONNECTING) play = PlayPhase.PLAYING
+        if (play == PlayPhase.CONNECTING) {
+            death = null
+            play = PlayPhase.PLAYING
+        }
     }
 
     /** Opens the pause card (the host releases the mouse). Call on the UI thread. */
@@ -380,7 +424,7 @@ class MenuController @JvmOverloads constructor(
     fun resume() {
         if (play == PlayPhase.PAUSED) {
             play = PlayPhase.PLAYING
-            actions.resumeGame()
+            if (overlay == Overlay.NONE) backToGame()
         }
     }
 
@@ -395,6 +439,7 @@ class MenuController @JvmOverloads constructor(
         chat.forget()
         serverPackOffer = null
         serverPackProgress = null
+        death = null
         typing = false
         overlay = Overlay.NONE
         play = PlayPhase.MENU
@@ -451,6 +496,8 @@ class MenuController @JvmOverloads constructor(
                 closeOverlay()
                 return true
             }
+            // GuiGameOver.keyTyped does nothing: Escape neither pauses nor closes it.
+            Overlay.DEATH -> return true
             Overlay.NONE -> {}
         }
         when (play) {

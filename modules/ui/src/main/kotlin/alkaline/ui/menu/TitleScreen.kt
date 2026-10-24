@@ -122,6 +122,9 @@ fun AlkalineMenu(controller: MenuController) {
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.SERVER_PACK) {
                     ServerPackPrompt(controller)
                 }
+                if (controller.phase == MenuPhase.READY && overlay == Overlay.DEATH) {
+                    DeathScreen(controller)
+                }
                 if (controller.phase == MenuPhase.READY && controller.serverPackProgress != null
                     && (controller.play == PlayPhase.PLAYING || controller.play == PlayPhase.PAUSED)
                 ) {

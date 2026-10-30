@@ -1,7 +1,7 @@
 package alkaline.renderer.world;
 
 /**
- * Minecraft 1.8.9's sky, fog and celestial values for the overworld, computed the way World, WorldProvider,
+ * Minecraft 1.8.9's sky, fog and celestial values, computed the way World, WorldProvider (per {@link Dimension}),
  * BiomeGenBase and EntityRenderer compute them: sky color from the biome temperature and time of day, darkened
  * by rain and thunder; fog color with the sunrise tint toward the sun and its blend toward the sky color by render
  * distance; star brightness; the sunrise fan colors; sun brightness for the lightmap; and the moon phase. Colors
@@ -13,6 +13,8 @@ public final class Sky {
     /** What fills the view where the eye is: air (linear fog), water or lava (exponential fog). */
     public enum Medium { AIR, WATER, LAVA }
 
+    /** Which WorldProvider's angle, fog and sky apply; the resource packs' colormaps apply in the Overworld only. */
+    public Dimension dimension = Dimension.OVERWORLD;
     public float celestialAngle;
     /** The world's time of day in ticks and the eye's height, for custom sky layers. */
     public long worldTime;
@@ -132,7 +134,7 @@ public final class Sky {
      */
     public void update(long worldTime, float partialTicks, float rain, float thunder, float temperature,
                        float lookX, float lookY, float lookZ, double eyeY, int renderDistanceChunks, Medium inside) {
-        celestialAngle = Lightmap.celestialAngle(worldTime, partialTicks);
+        celestialAngle = dimension.celestialAngle(worldTime, partialTicks);
         this.worldTime = worldTime;
         this.eyeY = eyeY;
         entityY = Double.isNaN(feetY) ? eyeY - 1.62 : feetY;
@@ -161,7 +163,7 @@ public final class Sky {
             green = green * keep + gray * (1.0F - keep);
             blue = blue * keep + gray * (1.0F - keep);
         }
-        CustomColors.Colormap custom = customColors.sky();
+        CustomColors.Colormap custom = dimension.surface() ? customColors.sky() : null;
         if (custom != null) {
             // CustomColors.getSkyColor: the colormap's color scaled by the vanilla sky over plains' 0.5, 0.66275, 1.
             int color = colormap(custom, 0);
@@ -178,9 +180,9 @@ public final class Sky {
         skyColor[0] = red;
         skyColor[1] = green;
         skyColor[2] = blue;
-        // WorldProvider.calcSunriseSunsetColors.
+        // WorldProvider.calcSunriseSunsetColors; WorldProviderEnd has none.
         sunrise[3] = 0.0F;
-        if (cosine >= -0.4F && cosine <= 0.4F) {
+        if (dimension != Dimension.END && cosine >= -0.4F && cosine <= 0.4F) {
             float t = cosine / 0.4F * 0.5F + 0.5F;
             float alpha = 1.0F - (1.0F - VanillaMath.sin(t * (float) Math.PI)) * 0.99F;
             sunrise[0] = t * 0.3F + 0.7F;
@@ -207,10 +209,29 @@ public final class Sky {
         float blend = 1.0F - (float) Math.pow(0.25F + 0.75F * renderDistanceChunks / 32.0F, 0.25D);
         float cosine = VanillaMath.cos(celestialAngle * (float) Math.PI * 2.0F);
         float fog = clamp(cosine * 2.0F + 0.5F);
-        float red = 0.7529412F * (fog * 0.94F + 0.06F);
-        float green = 0.84705883F * (fog * 0.94F + 0.06F);
-        float blue = 1.0F * (fog * 0.91F + 0.09F);
-        CustomColors.Colormap customFog = customColors.fog();
+        // WorldProvider.getFogColor of each dimension.
+        float red;
+        float green;
+        float blue;
+        switch (dimension) {
+            case NETHER -> {
+                red = 0.2F;
+                green = 0.03F;
+                blue = 0.03F;
+            }
+            case END -> {
+                // 0xA080A0 at 0.15.
+                red = 160 / 255.0F * 0.15F;
+                green = 128 / 255.0F * 0.15F;
+                blue = 160 / 255.0F * 0.15F;
+            }
+            default -> {
+                red = 0.7529412F * (fog * 0.94F + 0.06F);
+                green = 0.84705883F * (fog * 0.94F + 0.06F);
+                blue = 1.0F * (fog * 0.91F + 0.09F);
+            }
+        }
+        CustomColors.Colormap customFog = dimension.surface() ? customColors.fog() : null;
         if (customFog != null) {
             // CustomColors.getFogColor: the colormap's color scaled by the vanilla fog over its 0.753, 0.8471, 1.
             int color = colormap(customFog, 1);
@@ -300,6 +321,11 @@ public final class Sky {
         float far = renderDistanceChunks * 16.0F;
         fogStart = far * fogStartShare;
         fogEnd = far;
+        if (inside == Medium.AIR && !dimension.surface()) {
+            // doesXZShowFog: the Nether and the End close their fog in around the eye.
+            fogStart = far * 0.05F;
+            fogEnd = Math.min(far, 192.0F) * 0.5F;
+        }
         fogDensity = inside == Medium.WATER ? 0.1F : inside == Medium.LAVA ? 2.0F : 0.0F;
         if (blindness >= 0) {
             // EntityRenderer.setupFog: Blindness wins over every other fog, linear to 5 blocks (fading in).

@@ -42,6 +42,23 @@ public interface MenuBackground extends AutoCloseable {
         return false;
     }
 
+    /**
+     * Whether {@link #renderToSwapchain} works: the background draws its whole scene in one pass with depth, with
+     * pipelines built for {@link #SCENE_FORMAT}.
+     */
+    default boolean rendersToSwapchain() {
+        return false;
+    }
+
+    /**
+     * Records the background straight into the swapchain image, through {@link VulkanFrame#beginSwapchainScene}
+     * and {@link VulkanFrame#endRendering}, so the main pass shows it without a copy. The compositor calls it
+     * instead of {@link #render}, before the main pass, on frames where nothing samples the scene.
+     */
+    default void renderToSwapchain(VulkanFrame frame, float partialTick) {
+        throw new UnsupportedOperationException(id() + " renders into a scene target only.");
+    }
+
     /** Advances fixed-rate state at the game's 20 Hz tick cadence. */
     default void tick() {
     }

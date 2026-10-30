@@ -22,6 +22,7 @@ public final class ClientWorld {
     /** One immutable section snapshot. Light arrays hold one nibble per cell, the even cell in the low nibble. */
     record Section(char[] states, byte[] blockLight, byte[] skyLight) {
         static final Section EMPTY_LIT = new Section(new char[SECTION_CELLS], new byte[2048], filled((byte) 0xFF));
+        static final Section EMPTY_DARK = new Section(new char[SECTION_CELLS], new byte[2048], new byte[2048]);
 
         private static byte[] filled(byte value) {
             byte[] light = new byte[2048];
@@ -36,6 +37,15 @@ public final class ClientWorld {
         volatile byte[] biomes = DEFAULT_BIOMES;
         /** Cached precipitation heights per (z << 4 | x); null after a change. */
         volatile short[] precipitation;
+        /** Cached light heights per (z << 4 | x): one above the top block with any opacity; null after a change. */
+        volatile short[] heights;
+    }
+
+    /** 1.8.9's light properties of a block id, for relighting: Block.getLightOpacity (0..255) and getLightValue. */
+    public interface LightRules {
+        int opacity(int id);
+
+        int emission(int id);
     }
 
     private static final byte[] DEFAULT_BIOMES = filledBiomes();
@@ -64,6 +74,8 @@ public final class ClientWorld {
     private final ConcurrentLinkedQueue<Long> changed = new ConcurrentLinkedQueue<>();
     private final boolean skyLight;
     private final WorldBorder border = new WorldBorder();
+    /** Relights after block changes once {@link #lightRules} are set; null until then. */
+    private volatile Relighter relighter;
 
     /** @param skyLight whether the dimension has sky light (the overworld; not the nether or end) */
     public ClientWorld(boolean skyLight) {
@@ -77,6 +89,11 @@ public final class ClientWorld {
 
     public boolean hasSkyLight() {
         return skyLight;
+    }
+
+    /** Relight around block changes with these rules from now on, as vanilla's client does; null stops it. */
+    public void lightRules(LightRules rules) {
+        relighter = rules == null ? null : new Relighter(this, rules);
     }
 
     /**
@@ -198,11 +215,11 @@ public final class ClientWorld {
         }
     }
 
-    private static int cell(int x, int y, int z) {
+    static int cell(int x, int y, int z) {
         return (y & 15) << 8 | (z & 15) << 4 | x & 15;
     }
 
-    private static int nibble(byte[] array, int cell) {
+    static int nibble(byte[] array, int cell) {
         int value = array[cell >> 1];
         return (cell & 1) == 0 ? value & 15 : value >> 4 & 15;
     }
@@ -251,14 +268,13 @@ public final class ClientWorld {
     /**
      * Applies one column of chunk data (protocol 47): for each section in {@code mask}, 4096 block states as
      * little-endian shorts, then each section's block light, then (with sky light) each section's sky light,
-     * then 256 biome bytes when {@code groundUp}. A ground-up column with an empty mask unloads the column.
+     * then 256 biome bytes when {@code groundUp}. A ground-up column with an empty mask loads an empty column (a
+     * void column in the End): as vanilla's handleMapChunkBulk does, its biomes are read, so the next column in a
+     * bulk packet starts where it should. A single Chunk Data packet with that shape is an unload instead, which
+     * the caller handles ({@link #unload}).
      */
     public void applyChunk(int chunkX, int chunkZ, boolean groundUp, int mask, PacketBuffer data) throws IOException {
         long key = columnKey(chunkX, chunkZ);
-        if (groundUp && mask == 0) {
-            unload(chunkX, chunkZ);
-            return;
-        }
         int count = Integer.bitCount(mask & 0xFFFF);
         char[][] states = new char[count][];
         byte[][] blockLight = new byte[count][];
@@ -333,17 +349,25 @@ public final class ClientWorld {
         if (column == null) {
             return;
         }
+        Relighter light = relighter;
+        int oldId = state(x, y, z) >> 4;
+        int oldHeight = light == null ? 0 : height(x, z, light.rules());
         synchronized (column) {
             Section section = column.sections[y >> 4];
             if (section == null) {
-                section = Section.EMPTY_LIT;
+                section = empty();
             }
             char[] states = section.states.clone();
             states[cell(x, y, z)] = (char) state;
             column.sections[y >> 4] = new Section(states, section.blockLight, section.skyLight);
             column.precipitation = null;
+            column.heights = null;
         }
         changedAt(x, y, z);
+        if (light != null) {
+            light.changed(x, y, z, oldId, state >> 4, oldHeight);
+            light.publish();
+        }
     }
 
     /** Several changes in one column, as Multi Block Change carries them: (x | z << 4 | y << 8, state) pairs. */
@@ -352,13 +376,22 @@ public final class ClientWorld {
         if (column == null) {
             return;
         }
+        Relighter light = relighter;
+        int[] oldIds = new int[count];
+        int[] oldHeights = new int[count];
+        for (int index = 0; light != null && index < count; index++) {
+            int x = chunkX * 16 + (positions[index] & 15);
+            int z = chunkZ * 16 + (positions[index] >> 4 & 15);
+            oldIds[index] = state(x, positions[index] >> 8 & 255, z) >> 4;
+            oldHeights[index] = height(x, z, light.rules());
+        }
         synchronized (column) {
             Section[] copies = new Section[SECTIONS];
             for (int index = 0; index < count; index++) {
                 int y = positions[index] >> 8 & 255;
                 int sectionY = y >> 4;
                 if (copies[sectionY] == null) {
-                    Section section = column.sections[sectionY] == null ? Section.EMPTY_LIT : column.sections[sectionY];
+                    Section section = column.sections[sectionY] == null ? empty() : column.sections[sectionY];
                     copies[sectionY] = new Section(section.states.clone(), section.blockLight, section.skyLight);
                 }
                 int x = positions[index] & 15;
@@ -371,11 +404,94 @@ public final class ClientWorld {
                 }
             }
             column.precipitation = null;
+            column.heights = null;
         }
         for (int index = 0; index < count; index++) {
             changedAt(chunkX * 16 + (positions[index] & 15), positions[index] >> 8 & 255,
                     chunkZ * 16 + (positions[index] >> 4 & 15));
         }
+        if (light != null) {
+            for (int index = 0; index < count; index++) {
+                light.changed(chunkX * 16 + (positions[index] & 15), positions[index] >> 8 & 255,
+                        chunkZ * 16 + (positions[index] >> 4 & 15), oldIds[index], states[index] >> 4,
+                        oldHeights[index]);
+            }
+            light.publish();
+        }
+    }
+
+    /** A section of air for a block set where none was: lit by the sky where the dimension has one. */
+    private Section empty() {
+        return skyLight ? Section.EMPTY_LIT : Section.EMPTY_DARK;
+    }
+
+    // ---- relighting (see Relighter) -----------------------------------------------------------------------------
+
+    /** Whether every column within {@code radius} blocks of (x, z) is loaded (World.isAreaLoaded). */
+    boolean isAreaLoaded(int x, int z, int radius) {
+        for (int cz = (z - radius) >> 4; cz <= (z + radius) >> 4; cz++) {
+            for (int cx = (x - radius) >> 4; cx <= (x + radius) >> 4; cx++) {
+                if (column(cx, cz) == null) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Chunk.getHeightValue: one above the column's top block whose light opacity is not 0, 0 in unloaded or empty
+     * columns. Sky light is full from there up. Cached per column until it changes.
+     */
+    int height(int x, int z, LightRules rules) {
+        Column column = column(x >> 4, z >> 4);
+        if (column == null) {
+            return 0;
+        }
+        short[] heights = column.heights;
+        if (heights == null) {
+            heights = new short[256];
+            for (int cell = 0; cell < 256; cell++) {
+                int height = 0;
+                for (int y = 255; y >= 0 && height == 0; y--) {
+                    Section section = column.sections[y >> 4];
+                    if (section == null) {
+                        y &= ~15;
+                        continue;
+                    }
+                    if (rules.opacity(section.states[(y & 15) << 8 | cell] >> 4) != 0) {
+                        height = y + 1;
+                    }
+                }
+                heights[cell] = (short) height;
+            }
+            column.heights = heights;
+        }
+        return heights[(z & 15) << 4 | x & 15];
+    }
+
+    /** The section light is written into, created as air where none is; null in unloaded columns. */
+    Section sectionForLight(int chunkX, int sectionY, int chunkZ) {
+        Column column = column(chunkX, chunkZ);
+        if (column == null) {
+            return null;
+        }
+        Section section = column.sections[sectionY];
+        return section != null ? section : empty();
+    }
+
+    /** Publishes relit light for a section, keeping its current states. */
+    void publishLight(int chunkX, int sectionY, int chunkZ, Section lit) {
+        Column column = column(chunkX, chunkZ);
+        if (column == null) {
+            return;
+        }
+        synchronized (column) {
+            Section current = column.sections[sectionY];
+            column.sections[sectionY] = new Section(current != null ? current.states : lit.states, lit.blockLight,
+                    lit.skyLight);
+        }
+        markAround(chunkX, sectionY, chunkZ);
     }
 
     public void clear() {

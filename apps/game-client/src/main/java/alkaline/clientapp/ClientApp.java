@@ -104,6 +104,9 @@ final class ClientApp implements AutoCloseable {
     private int gpuBlur;
     private int gpuBackdrop;
     private int gpuUi;
+    /** For --stats benchmarks: {@code -Dalkaline.stats.turnDegreesPerSecond} turns the player steadily, as mouse look does. */
+    private static final float BENCHMARK_TURN = Float.parseFloat(System.getProperty("alkaline.stats.turnDegreesPerSecond", "0"));
+    private long lastTurnNanos;
     private final java.util.ArrayDeque<ScriptedClick> script = new java.util.ArrayDeque<>();
     private final long startNanos = System.nanoTime();
     private boolean captureRequested;
@@ -592,7 +595,8 @@ final class ClientApp implements AutoCloseable {
         return new OverworldBackground.Settings(values.get(ClientSettings.WORLD_RENDER_DISTANCE),
                 values.get(ClientSettings.WORLD_AMBIENT_OCCLUSION), values.get(ClientSettings.WORLD_FOG),
                 values.get(ClientSettings.WORLD_FOG_START), values.get(ClientSettings.WORLD_SKY),
-                values.get(ClientSettings.WORLD_SUN_MOON), values.get(ClientSettings.WORLD_STARS));
+                values.get(ClientSettings.WORLD_SUN_MOON), values.get(ClientSettings.WORLD_STARS),
+                alkaline.renderer.world.LeafCulling.valueOf(values.get(ClientSettings.WORLD_LEAF_CULLING).name()));
     }
 
     /** Sleeps off the remainder of the frame budget when a frame limit is set; spins only the last 0.5 ms. */
@@ -737,6 +741,7 @@ final class ClientApp implements AutoCloseable {
                     : hash -> new alkaline.client.account.SessionService().join(account, hash);
             alkaline.game.net.ServerSession session = alkaline.game.net.ServerSession.connect(target.host(),
                     target.port(), address.host(), username, join);
+            session.lightRules(LIGHT_RULES);
             PreparedWorld prepared = textures.join();
             if (attempt != joinAttempt.get()) {
                 session.close();
@@ -754,6 +759,20 @@ final class ClientApp implements AutoCloseable {
             }
         }
     }
+
+    /** The client relights block changes as vanilla does, with the renderer's 1.8.9 block table. */
+    private static final alkaline.game.world.ClientWorld.LightRules LIGHT_RULES =
+            new alkaline.game.world.ClientWorld.LightRules() {
+                @Override
+                public int opacity(int id) {
+                    return id < 256 ? alkaline.renderer.world.vanilla.Blocks189.opacity(id) : 0;
+                }
+
+                @Override
+                public int emission(int id) {
+                    return id < 256 ? alkaline.renderer.world.vanilla.Blocks189.light(id) : 0;
+                }
+            };
 
     private void startGame(alkaline.game.net.ServerSession session, int attempt, PreparedWorld prepared) {
         BlockPalette palette = this.palette;
@@ -887,6 +906,11 @@ final class ClientApp implements AutoCloseable {
         if (play != null) {
             // SoundManager.setListener: the player's interpolated eyes and look, every frame.
             alkaline.game.player.LocalPlayer self = play.player();
+            if (BENCHMARK_TURN != 0f) {
+                long now = System.nanoTime();
+                self.yaw += lastTurnNanos == 0L ? 0f : BENCHMARK_TURN * (now - lastTurnNanos) * 1e-9f;
+                lastTurnNanos = now;
+            }
             audio.listener(self.eyeX(partialTick), self.eyeY(partialTick), self.eyeZ(partialTick), self.yaw, self.pitch);
         }
         VulkanFrame frame = renderer.acquireFrame();
@@ -1790,6 +1814,8 @@ final class ClientApp implements AutoCloseable {
             System.out.println(audio.describe());
             System.out.printf("UI: %d Compose frames uploaded, %d rows%n", compositor.uiUploads(),
                     compositor.uploadedRows());
+            System.out.printf("Scene: %d frames drawn into the swapchain image, without the backdrop copy%n",
+                    compositor.swapchainScenes());
             long refreshes = compositor.blurRefreshes();
             System.out.printf("Glass: blurred %d times in %d frames, %.1f%% of the full chain's pixels per refresh%n",
                     refreshes, frames, refreshes == 0 ? 0.0

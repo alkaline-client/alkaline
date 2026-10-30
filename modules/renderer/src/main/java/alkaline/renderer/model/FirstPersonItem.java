@@ -28,15 +28,14 @@ public final class FirstPersonItem {
     /** The legacy entry point: an item in normal use, vanilla's style. */
     public static float[] transform(ItemDefinition.Display display, float equipProgress, float swingProgress,
                                     float armPitchLag, float armYawLag, float[] out) {
-        return transform(display, false, equipProgress, swingProgress, armPitchLag, armYawLag, Use.NONE, false, 0f,
-                0, Style.VANILLA, out);
+        return transform(display, equipProgress, swingProgress, armPitchLag, armYawLag, Use.NONE, false, 0f, 0,
+                Style.VANILLA, out);
     }
 
     /**
      * ItemRenderer.renderItemInFirstPerson: one matrix from item model space (the 0..1 block an item model occupies)
      * to eye space.
      *
-     * @param block3d       a block item (ItemRenderer.renderItem doubles 3D models)
      * @param equipProgress 0 when fully raised, 1 when lowered out of view (vanilla's {@code 1 - equipped})
      * @param swingProgress 0..1 through an attack swing, 0 when idle
      * @param armPitchLag   view pitch minus the arm's lagging pitch, degrees (0 when the view is still)
@@ -45,9 +44,9 @@ public final class FirstPersonItem {
      * @param useLeft       getItemInUseCount() - partialTicks + 1: ticks of use left, interpolated
      * @param maxUse        the item's getMaxItemUseDuration (32 for food and drink, 72000 for bows and swords)
      */
-    public static float[] transform(ItemDefinition.Display display, boolean block3d, float equipProgress,
-                                    float swingProgress, float armPitchLag, float armYawLag, Use use, boolean using,
-                                    float useLeft, int maxUse, Style style, float[] out) {
+    public static float[] transform(ItemDefinition.Display display, float equipProgress, float swingProgress,
+                                    float armPitchLag, float armYawLag, Use use, boolean using, float useLeft,
+                                    int maxUse, Style style, float[] out) {
         Mat4.identity(out);
         // rotateWithPlayerRotations: the arm trails fast turns.
         Mat4.rotate(out, (float) Math.toRadians(armPitchLag * 0.1f), 1f, 0f, 0f, out);
@@ -83,9 +82,9 @@ public final class FirstPersonItem {
             place(equipProgress, swingProgress, out);
         }
         Mat4.scale(out, style.scale(), style.scale(), style.scale(), out);
-        if (block3d) {
-            Mat4.scale(out, 2f, 2f, 2f, out);
-        }
+        // Every held model is doubled once: ItemRenderer.renderItem doubles 3D (block) models, and
+        // RenderItem.preTransform doubles flat ones.
+        Mat4.scale(out, 2f, 2f, 2f, out);
         // The model's first-person display transform (ItemCameraTransforms.applyTransform).
         Mat4.translate(out, display.translationX(), display.translationY(), display.translationZ(), out);
         Mat4.rotate(out, (float) Math.toRadians(display.rotationY()), 0f, 1f, 0f, out);

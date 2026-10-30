@@ -337,6 +337,8 @@ public final class ServerSession implements AutoCloseable {
     private final ConcurrentLinkedQueue<Event> events = new ConcurrentLinkedQueue<>();
     private final Thread reader;
     private volatile ClientWorld world = new ClientWorld(true);
+    /** The block light rules every world of this session relights with; null: no relighting. */
+    private volatile ClientWorld.LightRules lightRules;
     private volatile boolean closed;
     private int entityId;
     private volatile String locale = "en_US";
@@ -614,6 +616,18 @@ public final class ServerSession implements AutoCloseable {
         }
     }
 
+    /** Relight block changes with these rules (the renderer's 1.8.9 block table), in this world and later ones. */
+    public void lightRules(ClientWorld.LightRules rules) {
+        lightRules = rules;
+        world.lightRules(rules);
+    }
+
+    private ClientWorld newWorld(boolean skyLight) {
+        ClientWorld created = new ClientWorld(skyLight);
+        created.lightRules(lightRules);
+        return created;
+    }
+
     /** Packets that change the connection or the world directly; everything else is {@link #decode decoded}. */
     private void handle(int id, PacketBuffer in) throws IOException {
         switch (id) {
@@ -626,7 +640,7 @@ public final class ServerSession implements AutoCloseable {
                 in.readUnsignedByte(); // max players
                 String levelType = in.readString();
                 in.readBoolean(); // reduced debug info
-                world = new ClientWorld(dimension == 0);
+                world = newWorld(dimension == 0);
                 // As vanilla's handleJoinGame does: the server decodes play packets only after sending this one.
                 writeClientSettings();
                 connection.send(0x17, new PacketBuffer().writeString("MC|Brand").writeString("vanilla"));
@@ -637,7 +651,7 @@ public final class ServerSession implements AutoCloseable {
                 int difficulty = in.readUnsignedByte();
                 int gameMode = in.readUnsignedByte();
                 String levelType = in.readString();
-                world = new ClientWorld(dimension == 0);
+                world = newWorld(dimension == 0);
                 events.add(new Respawn(dimension, difficulty, gameMode, levelType));
             }
             case 0x21 -> {
@@ -649,7 +663,12 @@ public final class ServerSession implements AutoCloseable {
                 if (size < 0 || size > in.remaining()) {
                     throw new IOException("Chunk data size " + size + " exceeds the packet.");
                 }
-                world.applyChunk(chunkX, chunkZ, groundUp, mask, in);
+                if (groundUp && mask == 0) {
+                    // NetHandlerPlayClient.handleChunkData: a full column with no sections unloads it.
+                    world.unload(chunkX, chunkZ);
+                } else {
+                    world.applyChunk(chunkX, chunkZ, groundUp, mask, in);
+                }
             }
             case 0x22 -> {
                 int chunkX = in.readInt();
@@ -683,7 +702,7 @@ public final class ServerSession implements AutoCloseable {
                     masks[index] = in.readUnsignedShort();
                 }
                 if (sky != world.hasSkyLight()) {
-                    world = new ClientWorld(sky);
+                    world = newWorld(sky);
                 }
                 for (int index = 0; index < count; index++) {
                     world.applyChunk(xs[index], zs[index], true, masks[index], in);

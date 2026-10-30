@@ -44,6 +44,7 @@ public final class EntityTypes {
     public static final int OBJECT_ITEM = 2;
     public static final int OBJECT_MINECART = 10;
     public static final int OBJECT_TNT = 50;
+    public static final int OBJECT_ENDER_CRYSTAL = 51;
     public static final int OBJECT_ARROW = 60;
     public static final int OBJECT_SNOWBALL = 61;
     public static final int OBJECT_EGG = 62;
@@ -127,6 +128,7 @@ public final class EntityTypes {
             case OBJECT_TNT, OBJECT_FALLING_BLOCK -> 0.98f;
             case OBJECT_ARROW, OBJECT_ITEM_FRAME -> 0.5f;
             case OBJECT_ARMOR_STAND -> height ? 1.975f : 0.5f;
+            case OBJECT_ENDER_CRYSTAL -> 2f;
             default -> 0.25f;
         };
     }

@@ -6,10 +6,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * EntityRenderer.getMouseOver for attacks: the nearest living entity whose hitbox, grown by vanilla's 0.1
- * collision border, the look ray enters within reach, unless a block is hit first. Blocks are tested against their
- * collision boxes, which match vanilla's selection boxes for full and partial solid blocks (plants and other
- * pass-through blocks do not stop the ray here).
+ * EntityRenderer.getMouseOver for attacks: the nearest living entity or ender crystal whose hitbox, grown by
+ * vanilla's 0.1 collision border, the look ray enters within reach, unless a block is hit first. Blocks are tested
+ * against their collision boxes, which match vanilla's selection boxes for full and partial solid blocks (plants and
+ * other pass-through blocks do not stop the ray here).
  */
 public final class EntityPicker {
     private final List<AxisAlignedBB> boxes = new ArrayList<>();
@@ -35,7 +35,7 @@ public final class EntityPicker {
         Entity best = null;
         double bestDistance = limit;
         for (Entity entity : entities.all()) {
-            if (!entity.living() || entity.dead) {
+            if (!pickable(entity) || entity.dead) {
                 continue;
             }
             double half = EntityTypes.width(entity) / 2.0 + 0.1;
@@ -49,6 +49,11 @@ public final class EntityPicker {
         }
         distance = bestDistance;
         return best;
+    }
+
+    /** Living entities, and the ender crystal (EntityEnderCrystal.canBeCollidedWith), which a hit detonates. */
+    private static boolean pickable(Entity entity) {
+        return entity.living() || entity.type == EntityTypes.OBJECT_ENDER_CRYSTAL;
     }
 
     /** Distance along the ray to the first block collision box, or {@code reach} when none is closer. */

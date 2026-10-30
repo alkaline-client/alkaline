@@ -106,6 +106,8 @@ predicted locally: the server's Block Change and Set Slot follow within a tick. 
 
 ## The launcher
 
+Superseded 2026-10-30: the prototype in `../launcher` was deleted; the Sulfur launcher replaces it.
+
 The launcher lives in `../launcher` (its own Gradle build and repository): Kotlin + Compose Desktop, Material 3
 Expressive and Google Sans Flex on the same pinned versions as this repository, so the two read as one product and
 the client's Java 25 runtime is already there. Its one screen is the mark, the name, Play and a status line. Play

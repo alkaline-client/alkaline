@@ -94,8 +94,12 @@ final class VulkanSwapchain implements AutoCloseable {
                 availableFormats.add(new SwapchainSelection.SurfaceFormat(
                         formats.get(index).format(), formats.get(index).colorSpace()));
             }
-            SwapchainSelection.SurfaceFormat preferred = new SwapchainSelection.SurfaceFormat(
-                    VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+            // RGBA first: it is the scene format (MenuBackground.SCENE_FORMAT), so a background can draw its scene
+            // into the swapchain image itself (VulkanFrame.beginSwapchainScene) instead of into a copy.
+            SwapchainSelection.SurfaceFormat rgba = new SwapchainSelection.SurfaceFormat(
+                    org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+            SwapchainSelection.SurfaceFormat preferred = availableFormats.contains(rgba) ? rgba
+                    : new SwapchainSelection.SurfaceFormat(VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
             SwapchainSelection.SurfaceFormat selected = availableFormats.size() == 1
                     && availableFormats.getFirst().format() == org.lwjgl.vulkan.VK10.VK_FORMAT_UNDEFINED
                     ? preferred : SwapchainSelection.chooseSurfaceFormat(availableFormats, preferred);

@@ -39,6 +39,8 @@ public final class MenuCompositor implements AutoCloseable {
     private static final float UP_REACH = 4f;
     /** Diagnostics: {@code -Dalkaline.glass.fullBlur=true} blurs whole targets, to check the padding against. */
     private static final boolean FULL_BLUR = Boolean.getBoolean("alkaline.glass.fullBlur");
+    /** Diagnostics: {@code -Dalkaline.scene.copy=true} keeps the scene image and backdrop copy on every frame. */
+    private static final boolean SCENE_COPY = Boolean.getBoolean("alkaline.scene.copy");
 
     private final VulkanRenderer renderer;
     private final ComposeLayerHost host;
@@ -71,6 +73,9 @@ public final class MenuCompositor implements AutoCloseable {
     private java.util.Map<String, SceneAnchor> anchors = java.util.Map.of();
     private boolean uiReady;
     private boolean glassReady;
+    /** Whether this frame's background went straight into the swapchain image, so no backdrop copy is drawn. */
+    private boolean swapchainScene;
+    private long swapchainScenes;
     private final float[] clear = {0.0044f, 0.0075f, 0.0070f};
 
     public MenuCompositor(VulkanRenderer renderer, ComposeLayerHost host) {
@@ -169,19 +174,27 @@ public final class MenuCompositor implements AutoCloseable {
         } else if (menuGlass != this.menuGlass) {
             setRegions(allRegions, menuGlass);
         }
+        swapchainScene = false;
         if (scene == null) {
             return;
         }
-        if (background != null) {
+        glassReady = !glassRegions.isEmpty() && uiTexture != null;
+        long now = System.nanoTime();
+        boolean blurDue = glassReady && (!blurValid || now - lastBlurNanos >= blurIntervalNanos);
+        // Only the blur samples the scene: on other frames a background that can draws into the swapchain image.
+        if (background != null && !blurDue && !SCENE_COPY && background.rendersToSwapchain()
+                && renderer.swapchainScene(MenuBackground.SCENE_FORMAT)) {
+            background.renderToSwapchain(frame, partialTick);
+            swapchainScene = true;
+            swapchainScenes++;
+        } else if (background != null) {
             background.render(frame, scene, partialTick);
         } else {
             // The theme surface: matches the loading screen and the main-pass clear.
             frame.beginRendering(scene, true, clear[0], clear[1], clear[2], 1f);
             frame.endRendering();
         }
-        glassReady = !glassRegions.isEmpty() && uiTexture != null;
-        long now = System.nanoTime();
-        if (glassReady && (!blurValid || now - lastBlurNanos >= blurIntervalNanos)) {
+        if (blurDue) {
             blur(frame);
             // Keep the cadence (frames rarely land on the interval) but never bank time across a pause.
             lastBlurNanos = blurValid ? Math.max(lastBlurNanos + blurIntervalNanos, now - blurIntervalNanos) : now;
@@ -317,9 +330,11 @@ public final class MenuCompositor implements AutoCloseable {
         if (scene == null) {
             return;
         }
-        frame.bindPipeline(blit);
-        frame.bindImage(scene);
-        frame.draw(3, 1, 0, 0);
+        if (!swapchainScene) {
+            frame.bindPipeline(blit);
+            frame.bindImage(scene);
+            frame.draw(3, 1, 0, 0);
+        }
         if (!glassReady || !blurValid) {
             return;
         }
@@ -446,6 +461,11 @@ public final class MenuCompositor implements AutoCloseable {
             total += target == null ? 0 : (long) target.width() * target.height();
         }
         return total;
+    }
+
+    /** Frames whose background drew straight into the swapchain image, with no backdrop copy. */
+    public long swapchainScenes() {
+        return swapchainScenes;
     }
 
     /** Compose frames uploaded so far (diagnostics: each is a full-surface texture upload). */

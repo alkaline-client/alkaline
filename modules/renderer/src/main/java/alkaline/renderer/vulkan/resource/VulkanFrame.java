@@ -44,7 +44,8 @@ import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
  * {@link #beginMainPass}. All calls are confined to the renderer's owner thread and allocate no Java objects.
  */
 public final class VulkanFrame {
-    private enum Pass { NONE, MAIN, TARGET }
+    /** SCENE: a scene pass on the swapchain image ({@link #beginSwapchainScene}), before the main pass. */
+    private enum Pass { NONE, MAIN, TARGET, SCENE }
 
     private static final int MAX_COPY_MIPS = 16;
 
@@ -76,6 +77,10 @@ public final class VulkanFrame {
     private boolean gammaSpace;
     private boolean gammaSwitched;
     private VulkanRenderTarget target;
+    /** The offscreen format the swapchain scene pass stands in for, while it is open. */
+    private RenderTargetFormat sceneFormat;
+    /** Whether this frame drew a scene into the swapchain image, which the main pass then loads. */
+    private boolean sceneRecorded;
     private VulkanPipeline pipeline;
 
     VulkanFrame(VulkanRenderer renderer, VulkanStreamBuffer stream) {
@@ -382,13 +387,19 @@ public final class VulkanFrame {
 
     public void endRendering() {
         requireOpen();
-        if (pass != Pass.TARGET) {
+        if (pass != Pass.TARGET && pass != Pass.SCENE) {
             throw new IllegalStateException("No offscreen pass is recording.");
         }
         if (gammaSpace) {
             throw new IllegalStateException("End the gamma-space segment before the pass.");
         }
         vkCmdEndRendering(command);
+        if (pass == Pass.SCENE) {
+            sceneFormat = null;
+            pipeline = null;
+            pass = Pass.NONE;
+            return;
+        }
         target.image().transition(command, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -409,8 +420,8 @@ public final class VulkanFrame {
             org.lwjgl.vulkan.VkClearAttachment.Buffer attachment = org.lwjgl.vulkan.VkClearAttachment.calloc(1, stack)
                     .aspectMask(renderer.depthAspect());
             attachment.get(0).clearValue().depthStencil().depth(1.0f).stencil(0);
-            int clearWidth = pass == Pass.MAIN ? width : target.width();
-            int clearHeight = pass == Pass.MAIN ? height : target.height();
+            int clearWidth = pass != Pass.TARGET ? width : target.width();
+            int clearHeight = pass != Pass.TARGET ? height : target.height();
             org.lwjgl.vulkan.VkClearRect.Buffer rect = org.lwjgl.vulkan.VkClearRect.calloc(1, stack)
                     .baseArrayLayer(0).layerCount(1);
             rect.get(0).rect().offset().set(0, 0);
@@ -419,14 +430,53 @@ public final class VulkanFrame {
         }
     }
 
-    /** Begins the swapchain pass with a cleared color and depth attachment. */
+    /**
+     * Starts a scene pass on the swapchain image itself, cleared, with the shared depth attachment: pipelines built
+     * for {@code format} with depth draw where the main pass will show them, so the scene needs no image of its own
+     * and no full-screen copy. Requires {@link VulkanRenderer#swapchainScene}; at most once per frame, before the
+     * main pass. End it with {@link #endRendering}; offscreen passes may follow it.
+     */
+    public void beginSwapchainScene(RenderTargetFormat format, float red, float green, float blue, float alpha) {
+        requireOpen();
+        Objects.requireNonNull(format, "format");
+        if (pass != Pass.NONE || mainPassRecorded || sceneRecorded) {
+            throw new IllegalStateException("A swapchain scene begins once per frame, before the main pass.");
+        }
+        if (!renderer.swapchainScene(format)) {
+            throw new IllegalStateException("The swapchain cannot stand in for a " + format + " target.");
+        }
+        flushTransfers();
+        renderer.beginMainRendering(command, red, green, blue, alpha);
+        pass = Pass.SCENE;
+        sceneFormat = format;
+        sceneRecorded = true;
+        pipeline = null;
+        setViewport(0, 0, width, height, false);
+        setScissor(0, 0, width, height);
+    }
+
+    /**
+     * Begins the swapchain pass with a cleared color and depth attachment. After a {@linkplain #beginSwapchainScene
+     * swapchain scene} it keeps that scene instead of clearing color; depth is still cleared.
+     */
     public void beginMainPass(float red, float green, float blue, float alpha) {
         requireOpen();
         if (pass != Pass.NONE || mainPassRecorded) {
             throw new IllegalStateException("The main pass can begin once, outside other passes.");
         }
         flushTransfers();
-        renderer.beginMainRendering(command, red, green, blue, alpha);
+        if (sceneRecorded) {
+            org.lwjgl.vulkan.VK10.vkCmdPipelineBarrier(command,
+                    org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            | org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            | org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                            | org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    0, attachmentBarrier, null, null);
+            renderer.resumeMainRendering(command, renderer.mainColorView(), false);
+        } else {
+            renderer.beginMainRendering(command, red, green, blue, alpha);
+        }
         pass = Pass.MAIN;
         mainPassRecorded = true;
         pipeline = null;
@@ -445,13 +495,14 @@ public final class VulkanFrame {
         if (gammaSpace) {
             throw new IllegalStateException("Already in a gamma-space segment.");
         }
-        int format = pass == Pass.MAIN ? renderer.mainColorFormat() : target.format().vulkanFormat();
+        boolean swapchain = pass != Pass.TARGET;
+        int format = swapchain ? renderer.mainColorFormat() : target.format().vulkanFormat();
         if (GammaSpace.unormAlias(format) == 0) {
             gammaSpace = true;
             gammaSwitched = false;
             return true;
         }
-        long alias = pass == Pass.MAIN ? renderer.mainGammaView() : target.image().aliasView();
+        long alias = swapchain ? renderer.mainGammaView() : target.image().aliasView();
         if (alias == 0) {
             return false;
         }
@@ -468,7 +519,7 @@ public final class VulkanFrame {
             throw new IllegalStateException("No gamma-space segment is open.");
         }
         if (gammaSwitched) {
-            resume(pass == Pass.MAIN ? renderer.mainColorView() : target.image().view());
+            resume(pass != Pass.TARGET ? renderer.mainColorView() : target.image().view());
         }
         gammaSpace = false;
         gammaSwitched = false;
@@ -484,7 +535,7 @@ public final class VulkanFrame {
                         | org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
                         | org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                 0, attachmentBarrier, null, null);
-        if (pass == Pass.MAIN) {
+        if (pass != Pass.TARGET) {
             renderer.resumeMainRendering(command, colorView);
         } else {
             targetAttachment.get(0).imageView(colorView).loadOp(VK_ATTACHMENT_LOAD_OP_LOAD);
@@ -525,9 +576,10 @@ public final class VulkanFrame {
         Objects.requireNonNull(value, "pipeline");
         requireOwned(value.belongsTo(renderer));
         boolean main = value.targetsMainPass();
+        RenderTargetFormat format = pass == Pass.SCENE ? sceneFormat : pass == Pass.TARGET ? target.format() : null;
+        boolean depth = pass == Pass.SCENE || pass == Pass.TARGET && target.hasDepth();
         if (main != (pass == Pass.MAIN)
-                || (!main && (value.spec().offscreenFormat() != target.format()
-                        || value.spec().offscreenDepth() != target.hasDepth()))) {
+                || (!main && (value.spec().offscreenFormat() != format || value.spec().offscreenDepth() != depth))) {
             throw new IllegalArgumentException("Pipeline attachment formats do not match the current pass.");
         }
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, value.handle());
@@ -646,6 +698,8 @@ public final class VulkanFrame {
         height = frameHeight;
         open = true;
         mainPassRecorded = false;
+        sceneRecorded = false;
+        sceneFormat = null;
         pass = Pass.NONE;
         target = null;
         pipeline = null;
@@ -655,7 +709,7 @@ public final class VulkanFrame {
 
     /** Ends any open offscreen pass and reports whether the main pass was recorded. */
     boolean finishPasses() {
-        if (pass == Pass.TARGET) {
+        if (pass == Pass.TARGET || pass == Pass.SCENE) {
             endRendering();
         }
         return mainPassRecorded;

@@ -13,8 +13,8 @@ import org.lwjgl.system.MemoryUtil;
 
 /**
  * Textured quads written straight into the frame's stream memory, one draw per {@link #flush}: name tags, whose
- * text and backgrounds vanilla draws as immediate-mode quads, and the world border wall. Positions are
- * camera-relative world coordinates. Texels with alpha at or below 0.1 are discarded (vanilla's alpha test).
+ * text and backgrounds vanilla draws as immediate-mode quads, the world border wall and the dragon's crystal beam.
+ * Positions are camera-relative world coordinates. Texels with alpha at or below 0.1 are discarded (vanilla's alpha test).
  *
  * <p>Usage inside a pass with the scene viewport set: {@link #begin}, then per draw {@link #start}, any number of
  * {@link #quad}, and {@link #flush}.
@@ -24,6 +24,11 @@ public final class QuadRenderer implements AutoCloseable {
     public enum Mode {
         /** Straight alpha, depth-tested, no depth writes. */
         ALPHA,
+        /**
+         * {@link #ALPHA} blended on sRGB-encoded values, as in vanilla's framebuffer (entity shadows); only
+         * between {@link VulkanFrame#beginGammaSpace} and {@link VulkanFrame#endGammaSpace}.
+         */
+        GAMMA_ALPHA,
         /** Straight alpha over everything (vanilla's disabled depth test). */
         OVERLAY,
         /** Source alpha added to the scene, depth-tested (the world border). */
@@ -69,6 +74,9 @@ public final class QuadRenderer implements AutoCloseable {
                 .depth(mode != Mode.OVERLAY, false)
                 .sampledImage(true)
                 .pushConstants(PUSH_BYTES);
+        if (mode == Mode.GAMMA_ALPHA) {
+            builder.gammaSpace();
+        }
         if (target != null) {
             builder.offscreen(target, true);
         }
@@ -98,6 +106,8 @@ public final class QuadRenderer implements AutoCloseable {
         flush();
         mode = Objects.requireNonNull(drawMode, "mode");
         image = Objects.requireNonNull(texture, "texture");
+        // A gamma-space draw writes encoded colors straight to the UNORM alias.
+        push.putFloat(64, linearOutput && drawMode != Mode.GAMMA_ALPHA ? 1f : 0f);
         push.putFloat(68, cutoff);
     }
 
@@ -105,27 +115,38 @@ public final class QuadRenderer implements AutoCloseable {
     public void quad(float x0, float y0, float z0, float u0, float v0, float x1, float y1, float z1, float u1,
                      float v1, float x2, float y2, float z2, float u2, float v2, float x3, float y3, float z3,
                      float u3, float v3, int argb) {
+        quad(x0, y0, z0, u0, v0, argb, x1, y1, z1, u1, v1, argb, x2, y2, z2, u2, v2, argb, x3, y3, z3, u3, v3,
+                argb);
+    }
+
+    /** One quad with a color per corner, blended across it (vanilla's smooth shading: the crystal beam). */
+    public void quad(float x0, float y0, float z0, float u0, float v0, int argb0, float x1, float y1, float z1,
+                     float u1, float v1, int argb1, float x2, float y2, float z2, float u2, float v2, int argb2,
+                     float x3, float y3, float z3, float u3, float v3, int argb3) {
         if (capacity - written < QUAD_VERTICES * VERTEX_BYTES) {
             capacity *= 2;
             vertices = MemoryUtil.nmemReallocChecked(vertices, capacity);
         }
-        // UNORM8X4 reads red, green, blue, alpha in memory order.
-        int rgba = (argb >> 16 & 0xFF) | (argb & 0xFF00) | (argb & 0xFF) << 16 | (argb & 0xFF000000);
-        if (BIG_ENDIAN) {
-            rgba = Integer.reverseBytes(rgba);
-        }
+        int rgba0 = rgba(argb0);
+        int rgba2 = rgba(argb2);
         long at = vertices + written;
-        put(at, x0, y0, z0, u0, v0, rgba);
-        put(at + VERTEX_BYTES, x1, y1, z1, u1, v1, rgba);
-        put(at + 2 * VERTEX_BYTES, x2, y2, z2, u2, v2, rgba);
-        put(at + 3 * VERTEX_BYTES, x0, y0, z0, u0, v0, rgba);
-        put(at + 4 * VERTEX_BYTES, x2, y2, z2, u2, v2, rgba);
-        put(at + 5 * VERTEX_BYTES, x3, y3, z3, u3, v3, rgba);
+        put(at, x0, y0, z0, u0, v0, rgba0);
+        put(at + VERTEX_BYTES, x1, y1, z1, u1, v1, rgba(argb1));
+        put(at + 2 * VERTEX_BYTES, x2, y2, z2, u2, v2, rgba2);
+        put(at + 3 * VERTEX_BYTES, x0, y0, z0, u0, v0, rgba0);
+        put(at + 4 * VERTEX_BYTES, x2, y2, z2, u2, v2, rgba2);
+        put(at + 5 * VERTEX_BYTES, x3, y3, z3, u3, v3, rgba(argb3));
         written += QUAD_VERTICES * VERTEX_BYTES;
         count += QUAD_VERTICES;
     }
 
     private static final boolean BIG_ENDIAN = java.nio.ByteOrder.nativeOrder() == java.nio.ByteOrder.BIG_ENDIAN;
+
+    /** UNORM8X4 reads red, green, blue, alpha in memory order. */
+    private static int rgba(int argb) {
+        int rgba = (argb >> 16 & 0xFF) | (argb & 0xFF00) | (argb & 0xFF) << 16 | (argb & 0xFF000000);
+        return BIG_ENDIAN ? Integer.reverseBytes(rgba) : rgba;
+    }
 
     private static void put(long at, float x, float y, float z, float u, float v, int rgba) {
         MemoryUtil.memPutFloat(at, x);

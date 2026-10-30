@@ -9,7 +9,7 @@ import java.util.Collection;
 
 /**
  * The client-side animation state vanilla keeps on a few mob classes between ticks, keyed by entity id: the ender
- * dragon's yaw and height history and wing beat, the rabbit's hop, the horse's rearing, grazing, mouth and tail,
+ * dragon's yaw and height history, wing beat and healing crystal, the rabbit's hop, the horse's rearing, grazing, mouth and tail,
  * the slime's squish, the wither's side-head aim and the guardian's spikes, tail and beam charge. It ticks once per
  * game tick (after {@link EntityTracker#tick}), drops the state of entities that left the tracker, and answers the
  * renderer without allocating: states are created when a mob first appears, and every lookup is an int-keyed probe.
@@ -29,6 +29,8 @@ final class MobAnimator {
         int ringIndex = -1;
         float animTime;
         float previousAnimTime;
+        // EntityDragon.healingEnderCrystal, by entity id (-1 for none).
+        int healingCrystal = -1;
         // Rabbit: EntityRabbit.field_175540_bm / field_175535_bn.
         int jumpTicks;
         int jumpDuration;
@@ -242,7 +244,12 @@ final class MobAnimator {
             State state = create(entity);
             state.seen = tickCount;
             switch (entity.type) {
-                case EntityTypes.ENDER_DRAGON -> tickDragon(state, entity);
+                case EntityTypes.ENDER_DRAGON -> {
+                    if (entity.health() > 0f) {
+                        tickHealing(state, entity, entities);
+                    }
+                    tickDragon(state, entity);
+                }
                 case EntityTypes.RABBIT -> tickRabbit(state);
                 case EntityTypes.HORSE -> tickHorse(state, entity);
                 case EntityTypes.SLIME -> tickSlime(state, entity, 0.6f);
@@ -286,6 +293,52 @@ final class MobAnimator {
         state.ringIndex = state.ringIndex + 1 & RING - 1;
         state.ringYaw[state.ringIndex] = yaw;
         state.ringHeight[state.ringIndex] = (float) entity.y;
+    }
+
+    /**
+     * EntityDragon.updateDragonEnderCrystal on the client: a healing crystal that is gone is let go, and one tick in
+     * ten the nearest crystal touching the dragon's box grown by 32 blocks becomes the one healing it (or none).
+     */
+    void tickHealing(State state, Entity dragon, Collection<Entity> entities) {
+        if (state.healingCrystal >= 0 && byId.get(state.healingCrystal) == null) {
+            state.healingCrystal = -1;
+        }
+        state.random = state.random * 1103515245 + 12345;
+        if ((state.random >>> 8) % 10 != 0) {
+            return;
+        }
+        double reachX = EntityTypes.width(dragon) / 2.0 + 32.0;
+        double top = dragon.y + EntityTypes.height(dragon) + 32.0;
+        double nearest = Double.MAX_VALUE;
+        int found = -1;
+        for (Entity crystal : entities) {
+            if (crystal.category != Entity.Category.OBJECT || crystal.type != EntityTypes.OBJECT_ENDER_CRYSTAL) {
+                continue;
+            }
+            double half = EntityTypes.width(crystal) / 2.0;
+            if (crystal.x + half <= dragon.x - reachX || crystal.x - half >= dragon.x + reachX
+                    || crystal.z + half <= dragon.z - reachX || crystal.z - half >= dragon.z + reachX
+                    || crystal.y + EntityTypes.height(crystal) <= dragon.y - 32.0 || crystal.y >= top) {
+                continue;
+            }
+            double dx = crystal.x - dragon.x;
+            double dy = crystal.y - dragon.y;
+            double dz = crystal.z - dragon.z;
+            double distance = dx * dx + dy * dy + dz * dz;
+            if (distance < nearest) {
+                nearest = distance;
+                found = crystal.id;
+            }
+        }
+        state.healingCrystal = found;
+    }
+
+    /**
+     * EntityEnderCrystal.innerRotation: a random start below 100000 (here from the entity id, so it holds steady
+     * without a state of its own) plus one per tick.
+     */
+    static int crystalRotation(Entity crystal) {
+        return Math.floorMod(crystal.id * 0x9E3779B9, 100000) + crystal.ticksExisted;
     }
 
     /** EntityRabbit.onLivingUpdate: the hop counter runs to its duration, then resets. */

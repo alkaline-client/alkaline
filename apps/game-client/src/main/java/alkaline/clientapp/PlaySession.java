@@ -142,6 +142,7 @@ public final class PlaySession implements AutoCloseable {
     private int titleTicks;
     private int chatVersion;
     private boolean flat;
+    private alkaline.renderer.world.Dimension dimension = alkaline.renderer.world.Dimension.OVERWORLD;
     /** Plays what the client hears itself; null without audio. */
     private GameSounds sounds;
 
@@ -974,6 +975,7 @@ public final class PlaySession implements AutoCloseable {
         switch (event) {
             case ServerSession.JoinGame join -> {
                 flat = "flat".equalsIgnoreCase(join.levelType());
+                dimension = alkaline.renderer.world.Dimension.of(join.dimension());
                 entities.selfId(join.entityId());
                 gameMode = join.gameMode() & 7;
                 hardcore = (join.gameMode() & 8) != 0;
@@ -1024,6 +1026,7 @@ public final class PlaySession implements AutoCloseable {
             }
             case ServerSession.Respawn respawn -> {
                 flat = "flat".equalsIgnoreCase(respawn.levelType());
+                dimension = alkaline.renderer.world.Dimension.of(respawn.dimension());
                 gameMode = respawn.gameMode() & 7;
                 player.allowFlying = gameMode == 1;
                 newWorld();
@@ -1032,6 +1035,10 @@ public final class PlaySession implements AutoCloseable {
                 if (state.reason() == 3) {
                     gameMode = (int) state.value() & 7;
                     player.allowFlying = gameMode == 1;
+                } else if (state.reason() == 4) {
+                    // Leaving the End: vanilla rolls the credits, then asks to respawn. There are no credits here,
+                    // so ask at once, as skipping them does; the server holds the player in the End until then.
+                    session.sendClientStatus(0);
                 } else {
                     weather(state);
                 }
@@ -1275,6 +1282,11 @@ public final class PlaySession implements AutoCloseable {
     /** Whether the world is superflat (vanilla's horizon and void fog differ there). */
     boolean flat() {
         return flat;
+    }
+
+    /** The dimension the player is in, from the last JoinGame or Respawn. */
+    alkaline.renderer.world.Dimension dimension() {
+        return dimension;
     }
 
     float rain() {

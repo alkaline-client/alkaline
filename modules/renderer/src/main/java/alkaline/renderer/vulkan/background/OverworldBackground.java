@@ -29,9 +29,10 @@ public final class OverworldBackground implements MenuBackground {
      *
      * @param fogStart share of the render distance where fog begins
      * @param sky      upper sky, sun and moon, and stars toggles
+     * @param leaves   faces between leaf blocks left out of the meshes
      */
     public record Settings(int renderDistanceChunks, boolean ambientOcclusion, boolean fog, float fogStart,
-                           boolean sky, boolean sunMoon, boolean stars) {
+                           boolean sky, boolean sunMoon, boolean stars, alkaline.renderer.world.LeafCulling leaves) {
         /** Copies the sky and fog options into the sky state the next frame draws. */
         public void applyTo(Sky state) {
             state.fogStartShare = fogStart;
@@ -106,7 +107,7 @@ public final class OverworldBackground implements MenuBackground {
         Settings current = settings.get();
         eye(ticks / 20.0);
         streamer.update(Math.floorDiv((int) Math.floor(eye[0]), 16), Math.floorDiv((int) Math.floor(eye[2]), 16),
-                current.renderDistanceChunks(), current.ambientOcclusion());
+                current.renderDistanceChunks(), current.ambientOcclusion(), current.leaves());
         world.prepareUploads();
         if (!ready && streamer.pending() == 0 && world.loadedSections() > 0) {
             ready = true;

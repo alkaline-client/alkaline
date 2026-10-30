@@ -27,10 +27,10 @@ import java.util.Random;
 import org.lwjgl.system.MemoryUtil;
 
 /**
- * Minecraft 1.8.9's overworld sky and weather: the clear to the fog color, the sky plane and the sea-level plane
- * (traced per pixel), the sunrise fan, sun, moon (with its phase) and stars (vanilla's 1500 seeded quads), all
- * in gamma space so the blending matches vanilla's framebuffer; and rain and snow around the eye, built per
- * column as EntityRenderer.renderRainSnow builds them.
+ * Minecraft 1.8.9's sky and weather: in the Overworld the clear to the fog color, the sky plane and the sea-level
+ * plane (traced per pixel), the sunrise fan, sun, moon (with its phase) and stars (vanilla's 1500 seeded quads); in
+ * the End the end sky box; in the Nether the fog color alone. All in gamma space so the blending matches vanilla's
+ * framebuffer; and rain and snow around the eye, built per column as EntityRenderer.renderRainSnow builds them.
  */
 public final class SkyRenderer implements AutoCloseable {
     /** The world around the eye, as rain and snow read it. */
@@ -67,6 +67,7 @@ public final class SkyRenderer implements AutoCloseable {
     private final VulkanTexture moon;
     private final VulkanTexture rain;
     private final VulkanTexture snow;
+    private final VulkanTexture endSky;
     /** Vanilla's 1500 stars as static triangles, turned by the celestial angle in the vertex shader. */
     private final alkaline.renderer.vulkan.resource.VulkanStaticBuffer stars;
     private final int starVertices;
@@ -91,11 +92,12 @@ public final class SkyRenderer implements AutoCloseable {
     private final long[] layerPositionNanos;
 
     /**
-     * The sky's pixels, decoded off the render thread by {@link #loadImages}: vanilla's sun, moon, rain and snow, the
+     * The sky's pixels, decoded off the render thread by {@link #loadImages}: vanilla's sun, moon, rain, snow and end
+     * sky, the
      * resource packs' custom sky and its layer textures (null where missing) with each one's lowest alpha.
      */
     public record Images(TextureData white, TextureData sun, TextureData moon, TextureData rain, TextureData snow,
-                         CustomSky custom, TextureData[] layers, int[] layerMinAlpha) {
+                         TextureData endSky, CustomSky custom, TextureData[] layers, int[] layerMinAlpha) {
     }
 
     /** Reads and decodes every texture the sky draws from {@code assets} (null: none); any thread. */
@@ -113,7 +115,7 @@ public final class SkyRenderer implements AutoCloseable {
         });
         return new Images(image(null, null), image(assets, "environment/sun"),
                 image(assets, "environment/moon_phases"), image(assets, "environment/rain"),
-                image(assets, "environment/snow"), custom, layers, minAlpha);
+                image(assets, "environment/snow"), image(assets, "environment/end_sky"), custom, layers, minAlpha);
     }
 
     /** @param target offscreen color format the world renders into, or null for the main pass */
@@ -133,6 +135,7 @@ public final class SkyRenderer implements AutoCloseable {
             moon = track(created, renderer.createTexture(images.moon()));
             rain = track(created, renderer.createTexture(images.rain()));
             snow = track(created, renderer.createTexture(images.snow()));
+            endSky = track(created, renderer.createTexture(images.endSky()));
             custom = images.custom();
             layerTextures = new VulkanTexture[custom.layers().size()];
             layerPosition = new float[layerTextures.length];
@@ -177,6 +180,7 @@ public final class SkyRenderer implements AutoCloseable {
         try {
             createdStars = renderer.createStaticBuffer(starData);
         } catch (RuntimeException | Error failure) {
+            endSky.close();
             snow.close();
             rain.close();
             moon.close();
@@ -221,7 +225,7 @@ public final class SkyRenderer implements AutoCloseable {
 
     /** {@code far}: at the far plane, depth-tested ({@link #drawsAtFarPlane}). */
     private static PipelineSpec.Builder fullscreen(RenderTargetFormat target, boolean far) {
-        PipelineSpec.Builder builder = PipelineSpec.builder(far ? "sky_planes_far.vert" : "fullscreen.vert",
+        PipelineSpec.Builder builder = PipelineSpec.builder(far ? "sky_planes_far.vert" : "sky_planes.vert",
                         "sky_planes.frag")
                 .pushConstants(PLANES_PUSH)
                 .depth(far, false)
@@ -352,6 +356,10 @@ public final class SkyRenderer implements AutoCloseable {
         planesPush.putFloat(96, sky.fogDensity).putFloat(100, renderDistanceChunks >= 4 ? 1f : 0f)
                 .putFloat(104, 0f).putFloat(108, 0f);
         planesPush.limit(PLANES_PUSH);
+        if (!sky.dimension.surface()) {
+            drawWithoutSurface(frame, sky, viewProjection, gamma, viewportWidth, viewportHeight);
+            return;
+        }
         boolean layers = gamma && renderDistanceChunks >= 4;
         int covering = layers ? updateLayers(sky) : -1;
         if (covering < 0) {
@@ -372,11 +380,52 @@ public final class SkyRenderer implements AutoCloseable {
             drawCelestial(frame, sky, viewProjection, covering);
             frame.setViewport(0, 0, viewportWidth, viewportHeight, false);
         }
-        // The sea-level plane and void box cover what lies below them, sun and moon included.
+        // The sea-level plane and void box cover what lies below them, sun and moon included. Nine vertices: from
+        // above sea level the shader clips the pass to below the horizon (sky_planes_common.glsl).
         planesPush.putFloat(44, 1f);
         frame.bindPipeline(gamma ? planes : planesLinear);
         frame.pushConstants(planesPush);
+        frame.draw(9, 1, 0, 0);
+        if (gamma) {
+            frame.endGammaSpace();
+        }
+    }
+
+    /**
+     * Below no surface sky (RenderGlobal.renderSky outside the Overworld): the view clears to the fog color, and in the
+     * End the end sky box goes over it, unfogged: six faces of the plane y = -100, each tiling the texture 16 times
+     * across, colored 40/255 and alpha-blended.
+     */
+    private void drawWithoutSurface(VulkanFrame frame, Sky sky, float[] viewProjection, boolean gamma,
+                                    int viewportWidth, int viewportHeight) {
+        planesPush.putFloat(48, sky.fogColor[0]).putFloat(52, sky.fogColor[1]).putFloat(56, sky.fogColor[2]);
+        frame.bindPipeline(gamma ? planes : planesLinear);
+        frame.pushConstants(planesPush);
         frame.draw(3, 1, 0, 0);
+        long offset = gamma && sky.dimension == alkaline.renderer.world.Dimension.END
+                ? frame.allocate(36L * VERTEX_BYTES, 16) : -1;
+        if (offset >= 0) {
+            geometryPush.clear();
+            for (int index = 0; index < 16; index++) {
+                geometryPush.putFloat(index * 4, viewProjection[index]);
+            }
+            tint(1f);
+            geometryPush.limit(GEOMETRY_PUSH);
+            ByteBuffer stream = frame.stream();
+            int position = (int) offset;
+            int color = color(40 / 255f, 40 / 255f, 40 / 255f, 1f);
+            for (float[] c : END_CORNERS) {
+                position = quad(stream, position, null, c[0], c[1], c[2], 0, 0, c[3], c[4], c[5], 0, 16,
+                        c[6], c[7], c[8], 16, 16, c[9], c[10], c[11], 16, 0, color);
+            }
+            frame.setViewport(0, 0, viewportWidth, viewportHeight, true);
+            frame.bindPipeline(blended);
+            frame.bindImage(endSky);
+            frame.pushConstants(geometryPush);
+            frame.bindStreamVertices(0, offset);
+            frame.draw(36, 1, 0, 0);
+            frame.setViewport(0, 0, viewportWidth, viewportHeight, false);
+        }
         if (gamma) {
             frame.endGammaSpace();
         }
@@ -397,7 +446,9 @@ public final class SkyRenderer implements AutoCloseable {
      * quarter turns. Shared corners are bit-identical, so the cube has no cracks once the layer's matrix is applied
      * the same way to each, and a layer that draws every pixel really covers the sky.
      */
-    private static final float[][] SIDE_CORNERS = sideCorners();
+    private static final float[][] SIDE_CORNERS = sideCorners(false);
+    /** RenderGlobal.renderSkyEnd's faces, in its order of turns (its fourth is half a turn about x). */
+    private static final float[][] END_CORNERS = sideCorners(true);
     private final float[] axisMatrix = new float[9];
 
     /**
@@ -503,13 +554,16 @@ public final class SkyRenderer implements AutoCloseable {
                 c[6], c[7], c[8], u + w, v + 0.5F, c[9], c[10], c[11], u + w, v, color);
     }
 
-    private static float[][] sideCorners() {
+    private static float[][] sideCorners(boolean end) {
         float[] identity = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         float[] half = new float[9];
         float[] threeQuarters = new float[9];
         multiply(Z_PLUS_90, Z_PLUS_90, half);
         multiply(half, Z_PLUS_90, threeQuarters);
-        float[][] turns = {identity, X_PLUS_90, X_MINUS_90, Z_PLUS_90, half, threeQuarters};
+        float[] halfX = new float[9];
+        multiply(X_PLUS_90, X_PLUS_90, halfX);
+        float[][] turns = end ? new float[][]{identity, X_PLUS_90, X_MINUS_90, halfX, Z_PLUS_90, Z_MINUS_90}
+                : new float[][]{identity, X_PLUS_90, X_MINUS_90, Z_PLUS_90, half, threeQuarters};
         float[] plane = {-100, -100, -100, -100, -100, 100, 100, -100, 100, 100, -100, -100};
         float[][] corners = new float[turns.length][12];
         for (int side = 0; side < turns.length; side++) {
@@ -903,6 +957,7 @@ public final class SkyRenderer implements AutoCloseable {
             pipeline.close();
         }
         stars.close();
+        endSky.close();
         snow.close();
         rain.close();
         moon.close();

@@ -26,12 +26,21 @@ vec3 toLinear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), greaterThan(c, vec3(0.04045)));
 }
 
+vec3 toGamma(vec3 c) {
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308)));
+}
+
 void main() {
     vec4 color = texture(skin, uv) * tint;
     if (color.a <= 0.1) {
         discard;
     }
     color.rgb = mix(color.rgb, overlay.rgb, overlay.a) * shade;
-    vec3 linear = scene.light0.w != 0.0 ? toLinear(color.rgb) : color.rgb;
-    outColor = vec4(mix(linear, scene.fog.color.rgb, fog), color.a);
+    if (scene.light0.w != 0.0) {
+        // In the world: fogged in gamma space as vanilla's fixed-function fog does (see world_common.glsl).
+        vec3 fogged = fog > 0.0 ? mix(color.rgb, toGamma(scene.fog.color.rgb), fog) : color.rgb;
+        outColor = vec4(toLinear(fogged), color.a);
+    } else {
+        outColor = vec4(mix(color.rgb, scene.fog.color.rgb, fog), color.a);
+    }
 }

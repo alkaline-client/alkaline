@@ -4,6 +4,7 @@ import alkaline.renderer.world.BlockPalette;
 import alkaline.renderer.world.BlockSource;
 import alkaline.renderer.world.ChunkMesh;
 import alkaline.renderer.world.ChunkMesher;
+import alkaline.renderer.world.LeafCulling;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -50,6 +51,7 @@ public final class SectionStreamer implements AutoCloseable {
     private int centerZ = Integer.MIN_VALUE;
     private int radius = -1;
     private volatile boolean ambientOcclusion;
+    private volatile LeafCulling leaves = LeafCulling.OFF;
     private volatile boolean closed;
 
     public SectionStreamer(BlockSource source, BlockPalette palette, WorldRenderer renderer) {
@@ -72,13 +74,19 @@ public final class SectionStreamer implements AutoCloseable {
      * nothing changed; call once per frame on the render thread.
      */
     public void update(int sectionX, int sectionZ, int radiusChunks, boolean ambientOcclusion) {
-        boolean remesh = ambientOcclusion != this.ambientOcclusion;
+        update(sectionX, sectionZ, radiusChunks, ambientOcclusion, LeafCulling.OFF);
+    }
+
+    /** As {@link #update(int, int, int, boolean)}, with the faces between leaves to leave out. */
+    public void update(int sectionX, int sectionZ, int radiusChunks, boolean ambientOcclusion, LeafCulling leaves) {
+        boolean remesh = ambientOcclusion != this.ambientOcclusion || leaves != this.leaves;
         if (sectionX != centerX || sectionZ != centerZ || radiusChunks != radius || remesh) {
             renderer.configure(source.minSectionY(), source.maxSectionY(), radiusChunks + 1);
             centerX = sectionX;
             centerZ = sectionZ;
             radius = radiusChunks;
             this.ambientOcclusion = ambientOcclusion;
+            this.leaves = leaves;
             reschedule(remesh);
         }
         drain();
@@ -218,7 +226,7 @@ public final class SectionStreamer implements AutoCloseable {
                     biomes = biomeBuffers.get();
                     source.fillBiomes(x, z, biomes);
                 }
-                ChunkMesh mesh = meshers.get().mesh(x, y, z, ids, light, biomes, palette, ambientOcclusion);
+                ChunkMesh mesh = meshers.get().mesh(x, y, z, ids, light, biomes, palette, ambientOcclusion, leaves);
                 meshNanos.addAndGet(System.nanoTime() - start);
                 meshed.incrementAndGet();
                 results.add(new Result(jobGeneration, version, mesh));

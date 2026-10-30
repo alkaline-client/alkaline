@@ -463,9 +463,24 @@ public final class VulkanRenderer implements Renderer {
 
     /** Begins the main pass again after a suspension, on {@code colorView}, loading color and depth. */
     void resumeMainRendering(VkCommandBuffer command, long colorView) {
+        resumeMainRendering(command, colorView, true);
+    }
+
+    /** Begins the main pass again on {@code colorView}, loading color; depth is loaded or cleared to 1. */
+    void resumeMainRendering(VkCommandBuffer command, long colorView, boolean loadDepth) {
         colorAttachment.get(0).imageView(colorView).loadOp(org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_LOAD);
-        depthAttachment.loadOp(org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_LOAD);
+        depthAttachment.loadOp(loadDepth ? org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_LOAD
+                : org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR);
         vkCmdBeginRendering(command, renderingInfo);
+    }
+
+    /**
+     * Whether pipelines built for an offscreen {@code format} with depth can draw into the swapchain image
+     * ({@link VulkanFrame#beginSwapchainScene}): the swapchain has that format, the shared depth format, and a
+     * UNORM alias for gamma-space segments.
+     */
+    public boolean swapchainScene(RenderTargetFormat format) {
+        return swapchain != null && swapchain.format() == format.vulkanFormat() && swapchain.gammaView(0) != 0;
     }
 
     int mainColorFormat() {

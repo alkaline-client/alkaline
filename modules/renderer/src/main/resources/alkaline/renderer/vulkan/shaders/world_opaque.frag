@@ -22,5 +22,5 @@ vec3 lit(vec3 albedo) {
 
 void main() {
     vec4 texel = (tileArray == 0u ? texture(blocks, texcoord) : texture(tiles, texcoord));
-    outColor = vec4(mix(lit(texel.rgb), pc.fogColor.rgb, fog), 1.0);
+    outColor = vec4(fogMix(lit(texel.rgb), fog), 1.0);
 }

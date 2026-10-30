@@ -11,12 +11,14 @@ import alkaline.renderer.vulkan.resource.RenderTargetFormat;
 import alkaline.renderer.vulkan.resource.TextureData;
 import alkaline.renderer.vulkan.resource.TextureOptions;
 import alkaline.renderer.vulkan.resource.VertexFormat;
+import alkaline.renderer.vulkan.resource.VulkanDynamicTexture;
 import alkaline.renderer.vulkan.resource.VulkanFrame;
 import alkaline.renderer.vulkan.resource.VulkanPipeline;
 import alkaline.renderer.vulkan.resource.VulkanRenderer;
 import alkaline.renderer.vulkan.resource.VulkanStaticBuffer;
 import alkaline.renderer.vulkan.resource.VulkanTexture;
 import alkaline.renderer.world.ChunkMesh;
+import alkaline.renderer.world.Dimension;
 import alkaline.renderer.world.Lightmap;
 import alkaline.renderer.world.MaterialPass;
 import alkaline.renderer.world.Sky;
@@ -116,6 +118,13 @@ public final class WorldRenderer implements AutoCloseable {
     private final int[] frameTable;
     /** The same lightmap as 0xRRGGBB, for CPU-side lighting (rain and snow, particles, models). */
     private final int[] lightmapRgb = new int[256];
+    /**
+     * Vanilla's 16x16 lightmap texture (block light across, sky light down), sampled with linear filtering at texel
+     * centers as vanilla samples its own. One filtered fetch costs the terrain shader far less than four reads of the
+     * frame table and a filter in the shader: a third of the terrain pass at 1080p.
+     */
+    private final VulkanDynamicTexture lightmapTexture;
+    private final ByteBuffer lightmapPixels = MemoryUtil.memAlloc(256 * 4);
     private final int tableBytes;
     private boolean lightmapDirty = true;
     private final boolean indirect;
@@ -187,6 +196,7 @@ public final class WorldRenderer implements AutoCloseable {
     private long lastQuads;
     private int lastSorts;
 
+    private Dimension dimension = Dimension.OVERWORLD;
     private float sunBrightness = 1f;
     private float torchFlicker;
     private float gamma;
@@ -372,6 +382,7 @@ public final class WorldRenderer implements AutoCloseable {
         try {
             blocks = track(created, renderer.createTexture(textures.blocks));
             tiles = track(created, renderer.createTexture(textures.tiles));
+            lightmapTexture = track(created, renderer.createDynamicTexture(16, 16, false, true));
             quadIndices = track(created, renderer.createStaticBuffer(quadIndexData()));
             opaque = track(created, renderer.createPipeline(terrainSpec("world_opaque.frag", target)
                     .depth(true, true).build()));
@@ -392,6 +403,7 @@ public final class WorldRenderer implements AutoCloseable {
                 }
             }
             MemoryUtil.memFree(scene);
+            MemoryUtil.memFree(lightmapPixels);
             throw failure;
         }
         skyState.update(6000L, 0f, 0f, 0f, 0.8f, 0f, 0f, 1f, 80.0, 8, Sky.Medium.AIR);
@@ -407,7 +419,7 @@ public final class WorldRenderer implements AutoCloseable {
                 .binding(0, ChunkMesh.INTS_PER_VERTEX * Integer.BYTES, false)
                 .attribute(0, 0, VertexFormat.UINT4, 0)
                 .cullBackFaces(true)
-                .sampledImages(2)
+                .sampledImages(3)
                 .pushConstants(PUSH_BYTES);
         if (target != null) {
             builder.offscreen(target, true);
@@ -572,12 +584,15 @@ public final class WorldRenderer implements AutoCloseable {
     // ---- lighting -----------------------------------------------------------------------------------------
 
     /**
-     * Lightmap inputs (see {@link alkaline.renderer.world.Lightmap}): sun brightness 0.2 (night) .. 1 (day),
-     * vanilla's torch flicker, the gamma setting 0 (moody) .. 1 (bright), and night vision 0 .. 1.
+     * Lightmap inputs (see {@link alkaline.renderer.world.Lightmap}): the dimension, sun brightness 0.2 (night) ..
+     * 1 (day), vanilla's torch flicker, the gamma setting 0 (moody) .. 1 (bright), and night vision 0 .. 1.
      */
-    public void setLighting(float sunBrightness, float torchFlicker, float gamma, float nightVision) {
-        lightmapDirty |= sunBrightness != this.sunBrightness || torchFlicker != this.torchFlicker
+    public void setLighting(Dimension dimension, float sunBrightness, float torchFlicker, float gamma,
+                            float nightVision) {
+        lightmapDirty |= dimension != this.dimension || sunBrightness != this.sunBrightness
+                || torchFlicker != this.torchFlicker
                 || gamma != this.gamma || nightVision != this.nightVision;
+        this.dimension = dimension;
         this.sunBrightness = sunBrightness;
         this.torchFlicker = torchFlicker;
         this.gamma = gamma;
@@ -848,11 +863,14 @@ public final class WorldRenderer implements AutoCloseable {
         if (lightmapDirty) {
             for (int sky = 0; sky < 16; sky++) {
                 for (int block = 0; block < 16; block++) {
-                    int rgb = Lightmap.color(sky, block, sunBrightness, torchFlicker, gamma, nightVision);
+                    int rgb = Lightmap.color(dimension, sky, block, sunBrightness, torchFlicker, gamma, nightVision);
                     frameTable[sky * 16 + block] = (rgb >> 16 & 0xFF) | (rgb & 0xFF00) | (rgb & 0xFF) << 16;
                     lightmapRgb[sky * 16 + block] = rgb;
+                    // BGRA texel at (block, sky).
+                    lightmapPixels.putInt((sky * 16 + block) * 4, 0xFF000000 | rgb);
                 }
             }
+            frame.upload(lightmapTexture, lightmapPixels);
             lightmapDirty = false;
         }
         long bytes = (long) frameTable.length * Integer.BYTES;
@@ -1316,6 +1334,7 @@ public final class WorldRenderer implements AutoCloseable {
         frame.bindPipeline(pipeline);
         frame.bindImage(0, blocks);
         frame.bindImage(1, tiles);
+        frame.bindImage(2, lightmapTexture);
         frame.pushConstants(scene);
         if (pass != 2) {
             frame.bindIndices(quadIndices, 0);
@@ -1456,6 +1475,8 @@ public final class WorldRenderer implements AutoCloseable {
         quadIndices.close();
         blocks.close();
         tiles.close();
+        lightmapTexture.close();
         MemoryUtil.memFree(scene);
+        MemoryUtil.memFree(lightmapPixels);
     }
 }

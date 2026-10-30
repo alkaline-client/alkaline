@@ -27,5 +27,5 @@ void main() {
     if (texel.a * (1.0 + max(level, 0.0) * 0.3) < 0.5) {
         discard;
     }
-    outColor = vec4(mix(lit(texel.rgb), pc.fogColor.rgb, fog), 1.0);
+    outColor = vec4(fogMix(lit(texel.rgb), fog), 1.0);
 }

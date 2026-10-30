@@ -159,6 +159,7 @@ public final class ChunkMesher {
     /** Biome ids per padded column ({@link BlockSource#biomeIndex}), or null for plains. */
     private byte[] biomes;
     private boolean smooth;
+    private LeafCulling leaves = LeafCulling.OFF;
     private int originX;
     private int originY;
     private int originZ;
@@ -187,7 +188,18 @@ public final class ChunkMesher {
      */
     public ChunkMesh mesh(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light, byte[] biomes,
                           BlockPalette palette, boolean smooth) {
-        return mesh(sectionX, sectionY, sectionZ, ids, light, biomes, palette, smooth, -1);
+        return mesh(sectionX, sectionY, sectionZ, ids, light, biomes, palette, smooth, LeafCulling.OFF);
+    }
+
+    /** @param leaves which faces between leaf blocks to leave out ({@link LeafCulling}) */
+    public ChunkMesh mesh(int sectionX, int sectionY, int sectionZ, char[] ids, byte[] light, byte[] biomes,
+                          BlockPalette palette, boolean smooth, LeafCulling leaves) {
+        this.leaves = Objects.requireNonNull(leaves, "leaves");
+        try {
+            return mesh(sectionX, sectionY, sectionZ, ids, light, biomes, palette, smooth, -1);
+        } finally {
+            this.leaves = LeafCulling.OFF;
+        }
     }
 
     /**
@@ -489,12 +501,12 @@ public final class ChunkMesher {
         while (palette.quadFace[faceQuad] != face) {
             faceQuad++;
         }
-        boolean visible = palette.quadCullFace[faceQuad] >= 0 ? sideVisible(index, face, model)
-                : !Blocks189.opaqueCube(ids[index + offsetOf(face)] >> 4);
+        int id = ids[index] >> 4;
+        boolean visible = (palette.quadCullFace[faceQuad] >= 0 ? sideVisible(index, face, model)
+                : !Blocks189.opaqueCube(ids[index + offsetOf(face)] >> 4)) && !leafHidden(id, index, face);
         if (!visible) {
             return 0;
         }
-        int id = ids[index] >> 4;
         int appearance = palette.choiceAppearance[choice * 6 + face];
         boolean translucent = Blocks189.pass(id) == MaterialPass.TRANSLUCENT;
         long base = PRESENT | (translucent ? 0 : MERGEABLE) | (long) appearance << 36;
@@ -1321,6 +1333,23 @@ public final class ChunkMesher {
     private static boolean planar(float[] positions, int p, int axis) {
         float value = positions[p + axis];
         return positions[p + 3 + axis] == value && positions[p + 6 + axis] == value && positions[p + 9 + axis] == value;
+    }
+
+    /** Whether {@link #leaves} drops the face of a leaf block at {@code index} toward its neighbor. */
+    private boolean leafHidden(int id, int index, int face) {
+        if (leaves == LeafCulling.OFF || !leaf(id)) {
+            return false;
+        }
+        int neighbor = index + offsetOf(face);
+        if (!leaf(ids[neighbor] >> 4)) {
+            return false;
+        }
+        // Cells of the section lie two blocks inside the halo, so the block beyond the neighbor is always present.
+        return leaves == LeafCulling.ALL || ids[neighbor + offsetOf(face)] >> 4 != 0;
+    }
+
+    private static boolean leaf(int id) {
+        return id == 18 || id == 161;
     }
 
     private static int offsetOf(int face) {

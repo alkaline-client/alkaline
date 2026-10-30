@@ -101,4 +101,22 @@ class EntityTest {
         // A stone wall at z = 1 blocks the swing.
         assertNull(picker.pick(tracker, (x, y, z) -> z == 1 ? 1 << 4 : 0, 0, 65.62, 0, 0f, 0f, 3.0));
     }
+
+    @Test
+    void enderCrystalsArePickableTwoBlockCubes() {
+        EntityTracker tracker = new EntityTracker();
+        tracker.apply(new ServerSession.SpawnObject(3, EntityTypes.OBJECT_ENDER_CRYSTAL, 0.5, 64, 2.5, 0f, 0f, 0, 0,
+                0, 0));
+        Entity crystal = tracker.get(3);
+        assertEquals(2f, EntityTypes.width(crystal), 0f);
+        assertEquals(2f, EntityTypes.height(crystal), 0f);
+        // The look ray from (0.5, 65.62, 0) toward +z meets the crystal's near face at z = 1.5 - 0.1.
+        EntityPicker picker = new EntityPicker();
+        assertSame(crystal, picker.pick(tracker, (x, y, z) -> 0, 0.5, 65.62, 0, 0f, 0f, 3.0));
+        assertEquals(1.4, picker.distance(), 1e-9);
+        // Other objects stay out of reach of the crosshair.
+        tracker.apply(new ServerSession.DestroyEntities(new int[]{3}));
+        tracker.apply(new ServerSession.SpawnObject(4, EntityTypes.OBJECT_BOAT, 0.5, 64, 2.5, 0f, 0f, 0, 0, 0, 0));
+        assertNull(picker.pick(tracker, (x, y, z) -> 0, 0.5, 65.62, 0, 0f, 0f, 3.0));
+    }
 }

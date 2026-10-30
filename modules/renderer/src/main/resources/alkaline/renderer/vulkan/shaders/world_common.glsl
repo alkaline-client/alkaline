@@ -18,21 +18,26 @@ vec3 srgbToLinear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), greaterThan(c, vec3(0.04045)));
 }
 
-vec3 lightmapTexel(float sky, float block) {
-    return unpackUnorm4x8(pc.table.values[int(sky) * 16 + int(block)]).rgb;
+vec3 linearToSrgb(vec3 c) {
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308)));
 }
 
-// levels.x = block light, levels.y = sky light, both 0..15 and fractional from smooth lighting. Vanilla samples
-// its 16x16 lightmap texture with linear filtering, which blends the four nearest whole levels; so does this.
-// The table is computed once per frame on the CPU (Lightmap.java).
+// Vanilla's fixed-function fog blends the gamma-encoded color toward the fog color. Blending linear values instead
+// lets a bright surface (lava, a torch-lit wall) shine through dark fog, two or three times too bright in the Nether.
+vec3 fogMix(vec3 linear, float fog) {
+    if (fog <= 0.0) {
+        return linear;
+    }
+    return srgbToLinear(mix(linearToSrgb(linear), linearToSrgb(pc.fogColor.rgb), fog));
+}
+
+// Vanilla's 16x16 lightmap (x: block light, y: sky light), gamma-encoded, computed on the CPU when its inputs change
+// (Lightmap.java), linearly filtered and clamped at the edges.
+layout(set = 2, binding = 0) uniform sampler2D lightmapImage;
+
+// levels.x = block light, levels.y = sky light, both 0..15 and fractional from smooth lighting. Vanilla samples its
+// lightmap texture with linear filtering at (level * 16 + 8) / 256, the texel centers, which blends the four nearest
+// whole levels; so does this, with the same fixed-point filter weights.
 vec3 lightmap(vec2 levels) {
-    // Helper invocations (the unused pixels of a 2x2 quad) extrapolate varyings past the triangle, so levels
-    // can leave 0..15 slightly; clamp like the texture sampler's edge mode before indexing the table.
-    levels = clamp(levels, vec2(0.0), vec2(15.0));
-    vec2 low = floor(levels);
-    vec2 high = min(low + 1.0, vec2(15.0));
-    vec2 t = levels - low;
-    vec3 bottom = mix(lightmapTexel(low.y, low.x), lightmapTexel(low.y, high.x), t.x);
-    vec3 top = mix(lightmapTexel(high.y, low.x), lightmapTexel(high.y, high.x), t.x);
-    return mix(bottom, top, t.y);
+    return texture(lightmapImage, (levels + 0.5) / 16.0).rgb;
 }

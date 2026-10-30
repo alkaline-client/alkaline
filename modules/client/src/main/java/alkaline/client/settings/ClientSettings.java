@@ -47,6 +47,9 @@ public final class ClientSettings {
     /** Vanilla's cloud modes: flat (Fast) or volumetric (Fancy) clouds. */
     public enum Clouds { OFF, FAST, FANCY }
 
+    /** Faces between leaf blocks left out: none (vanilla), those two leaf layers deep, or all of them. */
+    public enum LeafCulling { OFF, DEEP, ALL }
+
     /** Vanilla's particle levels: Decreased skips a third of spawns, Minimal keeps only some. */
     public enum Particles { ALL, DECREASED, MINIMAL }
 
@@ -93,6 +96,10 @@ public final class ClientSettings {
             "world.brightness", "Video", "Brightness", "Lifts dark areas of the world.", 0f, 0f, 1f));
     public static final Setting.BooleanSetting WORLD_AMBIENT_OCCLUSION = BUILDER.add(Setting.bool(
             "world.ambient_occlusion", "Video", "Smooth lighting", "Ambient occlusion in block corners.", true));
+    public static final Setting.EnumSetting<LeafCulling> WORLD_LEAF_CULLING = BUILDER.add(Setting.choice(
+            "world.leaf_culling", "Video", "Leaf culling",
+            "Leaves out faces between leaf blocks. Deep hides those behind two leaf layers; All hides every one.",
+            LeafCulling.class, LeafCulling.OFF));
     public static final Setting.BooleanSetting WORLD_FOG = BUILDER.add(Setting.bool(
             "world.fog", "Video", "Fog", "Fades terrain into the sky at the render distance.", true));
     public static final Setting.FloatSetting WORLD_FOG_START = BUILDER.add(Setting.decimal(
@@ -116,6 +123,8 @@ public final class ClientSettings {
     public static final Setting.EnumSetting<Particles> WORLD_PARTICLES = BUILDER.add(Setting.choice(
             "world.particles", "Video", "Particles", "How many particles effects, blocks and the weather spawn.",
             Particles.class, Particles.ALL));
+    public static final Setting.BooleanSetting WORLD_ENTITY_SHADOWS = BUILDER.add(Setting.bool(
+            "world.entity_shadows", "Video", "Entity shadows", "Round shadows under players, mobs and items.", true));
     public static final Setting.EnumSetting<ViewBobbing> WORLD_VIEW_BOBBING = BUILDER.add(Setting.choice(
             "world.view_bobbing", "Video", "View bobbing",
             "The view sways as you walk. Minimal sways only the hand and keeps the camera level.",

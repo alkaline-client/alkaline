@@ -32,6 +32,13 @@ class ChunkMesherTest {
         return mesher.mesh(0, 0, 0, ids, light, PALETTE, smooth);
     }
 
+    private ChunkMesh mesh(LeafCulling leaves) {
+        for (int cell = 0; cell < ids.length; cell++) {
+            light[cell] = Blocks189.opaqueCube(ids[cell] >> 4) ? 0 : SKY;
+        }
+        return mesher.mesh(0, 0, 0, ids, light, null, PALETTE, true, leaves);
+    }
+
     private static int count(ChunkMesh mesh, MaterialPass pass, int face) {
         return mesh.rangeCount(ChunkMesh.range(pass, face));
     }
@@ -140,6 +147,24 @@ class ChunkMesherTest {
         for (int face = 0; face < 6; face++) {
             assertEquals(1, count(mesh, MaterialPass.OPAQUE, face));
         }
+    }
+
+    /**
+     * Three leaves in a row along x: vanilla draws the -x face of each. Deep drops the one whose leaf neighbor has
+     * another leaf behind it; All drops both faces toward a leaf.
+     */
+    @Test
+    void leafCullingDropsFacesBetweenLeaves() {
+        for (int x = 3; x <= 5; x++) {
+            set(x, 4, 5, VanillaBlocks.OAK_LEAVES);
+        }
+        assertEquals(3, count(mesh(LeafCulling.OFF), MaterialPass.CUTOUT, 0));
+        assertEquals(2, count(mesh(LeafCulling.DEEP), MaterialPass.CUTOUT, 0));
+        assertEquals(1, count(mesh(LeafCulling.ALL), MaterialPass.CUTOUT, 0));
+        // Faces toward air stay: the row's +x end and its tops.
+        assertEquals(1, count(mesh(LeafCulling.ALL), MaterialPass.CUTOUT, 1));
+        assertEquals(count(mesh(LeafCulling.OFF), MaterialPass.CUTOUT, 3),
+                count(mesh(LeafCulling.ALL), MaterialPass.CUTOUT, 3));
     }
 
     @Test

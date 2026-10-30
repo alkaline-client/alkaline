@@ -61,10 +61,13 @@ final class EntityView implements AutoCloseable {
     record HitColor(int argb, boolean tintArmor) {
     }
 
-    /** World lookups for lighting entities. */
+    /** World lookups for lighting entities and laying their shadows. */
     interface Lighting {
         /** Light as {@code sky << 4 | block}. */
         int light(int x, int y, int z);
+
+        /** The block state ({@code id << 4 | meta}), air outside the loaded world. */
+        int state(int x, int y, int z);
     }
 
     private static final int LEATHER = 0xA06540;
@@ -170,6 +173,19 @@ final class EntityView implements AutoCloseable {
     private VulkanTexture glint;
     private boolean glintLoaded;
     private final GlintStyles glints;
+    /**
+     * Render.renderShadow's disc ({@code misc/shadow.png}), whether the Entity Shadows option is on, the dimension
+     * whose light table fades them, the sky light the time and weather take away (World.skylightSubtracted), and
+     * the viewer's feet (RenderManager.viewerPos), which the distance fade measures from.
+     */
+    private VulkanTexture shadow;
+    private boolean shadowLoaded;
+    private boolean shadows;
+    private alkaline.renderer.world.Dimension dimension = alkaline.renderer.world.Dimension.OVERWORLD;
+    private int skylightSubtracted;
+    private double viewerX;
+    private double viewerY;
+    private double viewerZ;
     /** The camera and light lookups of the frame being drawn, for objects that read the world around them. */
     private double cameraX;
     private double cameraY;
@@ -353,6 +369,18 @@ final class EntityView implements AutoCloseable {
             glintLoaded = true;
             glint = load("assets/minecraft/textures/misc/enchanted_item_glint.png",
                     new TextureOptions(ImageSampling.LINEAR, false, true, 1));
+        }
+        if (!crystalBeamLoaded) {
+            // Its v coordinate scrolls past the image, so it repeats, unlike the other entity textures.
+            crystalBeamLoaded = true;
+            crystalBeam = load("assets/minecraft/textures/entity/endercrystal/endercrystal_beam.png",
+                    new TextureOptions(ImageSampling.NEAREST, false, true, 1));
+        }
+        if (!shadowLoaded) {
+            shadowLoaded = true;
+            // shadow.png.mcmeta clamps the texture: the quads cover whole blocks, past the disc's edge.
+            shadow = load("assets/minecraft/textures/misc/shadow.png",
+                    new TextureOptions(ImageSampling.NEAREST, false, false, 1));
         }
         for (int upload = 0; upload < UPLOADS_PER_FRAME && !pendingTextures.isEmpty(); upload++) {
             String path = pendingTextures.poll();
@@ -646,6 +674,9 @@ final class EntityView implements AutoCloseable {
                 hookOwners.add(entity.objectData);
             }
         }
+        if (shadows && shadow != null) {
+            renderShadows(frame, entities, self, partialTick, viewProjection);
+        }
         models.setGlint(glint, System.currentTimeMillis());
         models.setFog(fog);
         models.setLighting(0.2f, 1.0f, -0.7f, -0.2f, 1.0f, 0.7f, 0.4f);
@@ -663,8 +694,178 @@ final class EntityView implements AutoCloseable {
             }
         }
         models.flush();
+        drawHealingBeams(frame, viewProjection);
         drawFramedMaps(frame, viewProjection);
         renderLabels(frame, entities, viewProjection, cameraYaw, cameraPitch, partialTick, cameraX, cameraY, cameraZ);
+    }
+
+    /**
+     * The Entity Shadows option and what shadows read this frame: the dimension (its light table), the sky light
+     * the time and weather take away (World.skylightSubtracted), and the viewer's feet. Call before {@link #render}.
+     */
+    void shadows(boolean enabled, alkaline.renderer.world.Dimension dimension, int skylightSubtracted,
+                 double viewerX, double viewerY, double viewerZ) {
+        shadows = enabled;
+        this.dimension = Objects.requireNonNull(dimension, "dimension");
+        this.skylightSubtracted = skylightSubtracted;
+        this.viewerX = viewerX;
+        this.viewerY = viewerY;
+        this.viewerZ = viewerZ;
+    }
+
+    /** Whether the shadow draw of this frame has begun, and whether it blends in gamma space. */
+    private boolean shadowsBegun;
+    private boolean shadowsGamma;
+
+    /**
+     * Render.doRenderShadowAndFire's shadows, all in one draw before the models. Vanilla draws each right after its
+     * entity; the picture is the same, since a shadow writes no depth and lies on the ground under the models.
+     */
+    private void renderShadows(VulkanFrame frame, Collection<Entity> entities, Entity self, float partialTick,
+                               float[] viewProjection) {
+        shadowsBegun = false;
+        for (Entity entity : entities) {
+            shadow(frame, viewProjection, entity, partialTick);
+        }
+        if (self != null) {
+            shadow(frame, viewProjection, self, partialTick);
+        }
+        if (shadowsBegun) {
+            quads.flush();
+            if (shadowsGamma) {
+                frame.endGammaSpace();
+            }
+        }
+    }
+
+    /**
+     * Render.renderShadow: the shadow disc laid over the top faces of the full blocks under the entity, at each one
+     * fading with the height above it and its light (skipped at level 3 or darker), and as a whole with the
+     * squared distance from the viewer's feet (gone at 16 blocks).
+     */
+    private void shadow(VulkanFrame frame, float[] viewProjection, Entity entity, float partialTick) {
+        float size = shadowSize(entity);
+        if (size <= 0f || entity.invisible()) {
+            return;
+        }
+        double dx = entity.x - viewerX;
+        double dy = entity.y - viewerY;
+        double dz = entity.z - viewerZ;
+        // RenderEntityItem and RenderXPOrb set shadowOpaque to 0.75; every other renderer keeps 1.
+        boolean faint = entity.category == Entity.Category.OBJECT
+                && (entity.type == EntityTypes.OBJECT_ITEM || entity.type == EntityTypes.OBJECT_XP_ORB);
+        float opacity = (float) ((1.0 - (dx * dx + dy * dy + dz * dz) / 256.0) * (faint ? 0.75f : 1f));
+        if (opacity <= 0f) {
+            return;
+        }
+        double x = entity.renderX(partialTick);
+        double y = entity.renderY(partialTick);
+        double z = entity.renderZ(partialTick);
+        int minX = (int) Math.floor(x - size);
+        int maxX = (int) Math.floor(x + size);
+        int minZ = (int) Math.floor(z - size);
+        int maxZ = (int) Math.floor(z + size);
+        int maxY = (int) Math.floor(y);
+        for (int blockY = (int) Math.floor(y - size); blockY <= maxY; blockY++) {
+            float top = (float) (blockY + 0.015625 - cameraY);
+            for (int blockZ = minZ; blockZ <= maxZ; blockZ++) {
+                for (int blockX = minX; blockX <= maxX; blockX++) {
+                    if (!castsOn(lighting.state(blockX, blockY - 1, blockZ))) {
+                        continue;
+                    }
+                    int level = shadowLight(lighting, skylightSubtracted, blockX, blockY, blockZ);
+                    if (level <= 3) {
+                        continue;
+                    }
+                    double alpha = (opacity - (y - blockY) / 2.0) * 0.5 * dimension.levelBrightness(level);
+                    if (alpha < 0.0) {
+                        continue;
+                    }
+                    if (!shadowsBegun) {
+                        beginShadows(frame, viewProjection);
+                    }
+                    int argb = (int) ((float) Math.min(alpha, 1.0) * 255f) << 24 | 0xFFFFFF;
+                    float x0 = (float) (blockX - cameraX);
+                    float x1 = (float) (blockX + 1 - cameraX);
+                    float z0 = (float) (blockZ - cameraZ);
+                    float z1 = (float) (blockZ + 1 - cameraZ);
+                    float u0 = (float) ((x - blockX) / 2.0 / size + 0.5);
+                    float u1 = (float) ((x - blockX - 1) / 2.0 / size + 0.5);
+                    float v0 = (float) ((z - blockZ) / 2.0 / size + 0.5);
+                    float v1 = (float) ((z - blockZ - 1) / 2.0 / size + 0.5);
+                    quads.quad(x0, top, z0, u0, v0, x0, top, z1, u0, v1, x1, top, z1, u1, v1, x1, top, z0, u1, v0,
+                            argb);
+                }
+            }
+        }
+    }
+
+    private void beginShadows(VulkanFrame frame, float[] viewProjection) {
+        shadowsBegun = true;
+        // Vanilla darkens the encoded framebuffer; blending linear values would leave the shadows paler.
+        shadowsGamma = frame.beginGammaSpace();
+        quads.begin(frame, viewProjection);
+        quads.start(shadowsGamma ? QuadRenderer.Mode.GAMMA_ALPHA : QuadRenderer.Mode.ALPHA, shadow);
+    }
+
+    /** A shadow falls on a block with a render type that is a full cube (not air, barriers or slabs). */
+    static boolean castsOn(int state) {
+        int id = state >> 4;
+        return id < Blocks189.COUNT && Blocks189.fullCube(id) && Blocks189.render(id) != Blocks189.Render.NONE;
+    }
+
+    /** World.getLightFromNeighbors: slabs, stairs and farmland take their brightest upper or side neighbor. */
+    static int shadowLight(Lighting world, int subtracted, int x, int y, int z) {
+        int id = world.state(x, y, z) >> 4;
+        if (id < Blocks189.COUNT && Blocks189.neighborBrightness(id)) {
+            int sides = Math.max(Math.max(lightLevel(world, subtracted, x + 1, y, z),
+                    lightLevel(world, subtracted, x - 1, y, z)), Math.max(lightLevel(world, subtracted, x, y, z + 1),
+                    lightLevel(world, subtracted, x, y, z - 1)));
+            return Math.max(lightLevel(world, subtracted, x, y + 1, z), sides);
+        }
+        return lightLevel(world, subtracted, x, y, z);
+    }
+
+    /** Chunk.getLightSubtracted: the sky light less the time's darkening, or the block light if brighter. */
+    private static int lightLevel(Lighting world, int subtracted, int x, int y, int z) {
+        if (y < 0) {
+            return 0;
+        }
+        int packed = world.light(x, Math.min(y, 255), z);
+        return Math.max((packed >> 4) - subtracted, packed & 15);
+    }
+
+    /**
+     * Each renderer's shadowSize, halved for children as Render.renderShadow does for any EntityLiving
+     * (getRenderSizeModifier is 1 for all of them); 0 casts none.
+     */
+    static float shadowSize(Entity entity) {
+        return switch (entity.category) {
+            case PLAYER -> 0.5f;
+            case OBJECT -> switch (entity.type) {
+                case EntityTypes.OBJECT_ITEM, EntityTypes.OBJECT_XP_ORB -> 0.15f;
+                case EntityTypes.OBJECT_BOAT, EntityTypes.OBJECT_MINECART, EntityTypes.OBJECT_TNT,
+                     EntityTypes.OBJECT_FALLING_BLOCK, EntityTypes.OBJECT_ENDER_CRYSTAL -> 0.5f;
+                default -> 0f; // arrows, projectiles, paintings, frames, armor stands, hooks, lightning
+            };
+            case MOB -> {
+                float size = switch (entity.type) {
+                    case EntityTypes.SPIDER, EntityTypes.WITHER -> 1f;
+                    case EntityTypes.GIANT -> 3f; // RenderGiantZombie: 0.5 times its scale of 6
+                    case EntityTypes.SLIME -> 0.25f * Math.max(1, entity.metadata.getByte(16, 1));
+                    case EntityTypes.HORSE -> 0.75f;
+                    case EntityTypes.CAVE_SPIDER, EntityTypes.PIG, EntityTypes.SHEEP, EntityTypes.COW,
+                         EntityTypes.MOOSHROOM, EntityTypes.SQUID -> 0.7f;
+                    case EntityTypes.OCELOT -> 0.4f;
+                    case EntityTypes.SILVERFISH, EntityTypes.ENDERMITE, EntityTypes.CHICKEN, EntityTypes.RABBIT -> 0.3f;
+                    case EntityTypes.MAGMA_CUBE, EntityTypes.BAT -> 0.25f;
+                    // RenderVillager.preRenderCallback: a quarter for a child, then halved again.
+                    case EntityTypes.VILLAGER -> EntityTypes.child(entity) ? 0.25f : 0.5f;
+                    default -> 0.5f;
+                };
+                yield EntityTypes.child(entity) ? size * 0.5f : size;
+            }
+        };
     }
 
     /** The maps the server sent, for filled maps in hand and in frames. */
@@ -1037,6 +1238,9 @@ final class EntityView implements AutoCloseable {
         if (kind == EntityModels.Kind.GUARDIAN && animState != null && !invisible) {
             renderGuardianBeam(entity, animState, x, y, z, partialTick);
         }
+        if (kind == EntityModels.Kind.ENDER_DRAGON && animState != null && animState.healingCrystal >= 0) {
+            queueHealingBeam(entity, anim.entity(animState.healingCrystal), x, y, z, light, partialTick);
+        }
         if (kind == EntityModels.Kind.WITCH && entity.equipment[0] != null) {
             renderWitchHeld(entity.equipment[0], pose, light);
         }
@@ -1125,6 +1329,100 @@ final class EntityView implements AutoCloseable {
 
     private final float[] beamBase = new float[16];
     private final float[] beamSegment = new float[16];
+    /** The healing beams queued this frame (RenderDragon.drawRechargeRay), drawn once the models are flushed. */
+    private static final int MAX_HEALING_BEAMS = 4;
+    private static final int HEALING_BEAM_FLOATS = 19;
+    private final float[] healingBeams = new float[MAX_HEALING_BEAMS * HEALING_BEAM_FLOATS];
+    private final int[] healingBeamLight = new int[MAX_HEALING_BEAMS];
+    private int healingBeamCount;
+    private VulkanTexture crystalBeam;
+    private boolean crystalBeamLoaded;
+
+    /**
+     * RenderDragon.drawRechargeRay's placement: from two blocks above the dragon toward its healing crystal's bob
+     * (a block under the crystal's position), turned so the cone runs along local z. Queued here; the eight-sided cone
+     * is written by {@link #drawHealingBeams} after the models, since its vertex colors need the quad path.
+     */
+    private void queueHealingBeam(Entity dragon, Entity crystal, float x, float y, float z, int light,
+                                  float partialTick) {
+        if (crystal == null || healingBeamCount == MAX_HEALING_BEAMS) {
+            return;
+        }
+        float time = MobAnimator.crystalRotation(crystal) + partialTick;
+        float bob = (float) Math.sin(time * 0.2f) / 2f + 0.5f;
+        bob = (bob * bob + bob) * 0.2f;
+        float dx = (float) (crystal.x - dragon.renderX(partialTick));
+        float dy = (float) (bob + crystal.y - 1.0 - dragon.renderY(partialTick));
+        float dz = (float) (crystal.z - dragon.renderZ(partialTick));
+        float flat = (float) Math.sqrt(dx * dx + dz * dz);
+        float length = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+        float ticks = dragon.ticksExisted + partialTick;
+        int base = healingBeamCount * HEALING_BEAM_FLOATS;
+        Mat4.identity(beamBase);
+        Mat4.translate(beamBase, x, y + 2f, z, beamBase);
+        Mat4.rotate(beamBase, (float) -Math.atan2(dz, dx) - (float) (Math.PI / 2), 0f, 1f, 0f, beamBase);
+        Mat4.rotate(beamBase, (float) -Math.atan2(flat, dy) - (float) (Math.PI / 2), 1f, 0f, 0f, beamBase);
+        System.arraycopy(beamBase, 0, healingBeams, base, 16);
+        healingBeams[base + 16] = length;
+        healingBeams[base + 17] = -ticks * 0.01f;
+        healingBeams[base + 18] = length / 32f - ticks * 0.01f;
+        healingBeamLight[healingBeamCount++] = light;
+    }
+
+    /**
+     * The queued healing beams: a triangle strip of eight sides, 0.15 blocks across at the dragon and 0.75 at the
+     * crystal, black at the dragon fading to the dragon's light at the crystal, its texture scrolling toward the
+     * dragon. Drawn unculled, without the standard lights.
+     */
+    private void drawHealingBeams(VulkanFrame frame, float[] viewProjection) {
+        if (healingBeamCount == 0 || crystalBeam == null) {
+            healingBeamCount = 0;
+            return;
+        }
+        quads.begin(frame, viewProjection);
+        quads.start(QuadRenderer.Mode.ALPHA, crystalBeam);
+        for (int beam = 0; beam < healingBeamCount; beam++) {
+            int base = beam * HEALING_BEAM_FLOATS;
+            float length = healingBeams[base + 16];
+            float far = healingBeams[base + 17];
+            float near = healingBeams[base + 18];
+            int lit = 0xFF000000 | healingBeamLight[beam];
+            for (int side = 0; side < 8; side++) {
+                float angle0 = side * (float) Math.PI * 2f / 8f;
+                float angle1 = (side + 1) % 8 * (float) Math.PI * 2f / 8f;
+                float s0 = (float) Math.sin(angle0) * 0.75f;
+                float t0 = (float) Math.cos(angle0) * 0.75f;
+                float s1 = (float) Math.sin(angle1) * 0.75f;
+                float t1 = (float) Math.cos(angle1) * 0.75f;
+                float u0 = side / 8f;
+                float u1 = (side + 1) % 8 / 8f;
+                quads.quad(beamX(base, s0 * 0.2f, t0 * 0.2f, 0f), beamY(base, s0 * 0.2f, t0 * 0.2f, 0f),
+                        beamZ(base, s0 * 0.2f, t0 * 0.2f, 0f), u0, near, 0xFF000000,
+                        beamX(base, s0, t0, length), beamY(base, s0, t0, length), beamZ(base, s0, t0, length), u0,
+                        far, lit,
+                        beamX(base, s1, t1, length), beamY(base, s1, t1, length), beamZ(base, s1, t1, length), u1,
+                        far, lit,
+                        beamX(base, s1 * 0.2f, t1 * 0.2f, 0f), beamY(base, s1 * 0.2f, t1 * 0.2f, 0f),
+                        beamZ(base, s1 * 0.2f, t1 * 0.2f, 0f), u1, near, 0xFF000000);
+            }
+        }
+        quads.flush();
+        healingBeamCount = 0;
+    }
+
+    private float beamX(int base, float x, float y, float z) {
+        return healingBeams[base] * x + healingBeams[base + 4] * y + healingBeams[base + 8] * z + healingBeams[base + 12];
+    }
+
+    private float beamY(int base, float x, float y, float z) {
+        return healingBeams[base + 1] * x + healingBeams[base + 5] * y + healingBeams[base + 9] * z
+                + healingBeams[base + 13];
+    }
+
+    private float beamZ(int base, float x, float y, float z) {
+        return healingBeams[base + 2] * x + healingBeams[base + 6] * y + healingBeams[base + 10] * z
+                + healingBeams[base + 14];
+    }
 
     /**
      * RenderGuardian's beam from the guardian's eye to its target's middle: crossed planes turning about the beam,
@@ -1563,6 +1861,7 @@ final class EntityView implements AutoCloseable {
             case EntityTypes.OBJECT_XP_ORB -> experienceOrb(entity, x, y, z, partialTick);
             case EntityTypes.OBJECT_ARMOR_STAND -> armorStand(entity, x, y, z, light, partialTick);
             case EntityTypes.OBJECT_LIGHTNING -> lightning(entity, x, y, z);
+            case EntityTypes.OBJECT_ENDER_CRYSTAL -> enderCrystal(entity, x, y, z, light, partialTick);
             default -> {
             }
         }
@@ -1960,6 +2259,49 @@ final class EntityView implements AutoCloseable {
         }
     }
 
+    private static final float CRYSTAL_TIP = (float) Math.toRadians(60.0);
+    private static final float CRYSTAL_DIAGONAL = (float) Math.sqrt(0.5);
+
+    /**
+     * RenderEnderCrystal and ModelEnderCrystal, without the flip into model space (y stays up): at twice size and
+     * half a block down, the base plate; then, spun by the inner rotation and lifted by its bob, the glass cube
+     * tipped 60 degrees about the x = z diagonal, a second glass cube at 0.875 tipped and spun again, and the inner
+     * cube at 0.875 of that, tipped and spun again.
+     */
+    private void enderCrystal(Entity entity, float x, float y, float z, int light, float partialTick) {
+        VulkanTexture texture = texture("entity/endercrystal/endercrystal");
+        if (texture == null) {
+            return;
+        }
+        float time = MobAnimator.crystalRotation(entity) + partialTick;
+        float bob = (float) Math.sin(time * 0.2f) / 2f + 0.5f;
+        bob = bob * bob + bob;
+        float spin = (float) Math.toRadians(time * 3f);
+        Mat4.identity(stand);
+        Mat4.translate(stand, x, y, z, stand);
+        Mat4.scale(stand, 2f, 2f, 2f, stand);
+        Mat4.translate(stand, 0f, -0.5f, 0f, stand);
+        crystalPart(ObjectModels.CRYSTAL_BASE, texture, light);
+        Mat4.rotate(stand, spin, 0f, 1f, 0f, stand);
+        Mat4.translate(stand, 0f, 0.8f + bob * 0.2f, 0f, stand);
+        Mat4.rotate(stand, CRYSTAL_TIP, CRYSTAL_DIAGONAL, 0f, CRYSTAL_DIAGONAL, stand);
+        crystalPart(ObjectModels.CRYSTAL_GLASS, texture, light);
+        for (int inner = 0; inner < 2; inner++) {
+            Mat4.scale(stand, 0.875f, 0.875f, 0.875f, stand);
+            Mat4.rotate(stand, CRYSTAL_TIP, CRYSTAL_DIAGONAL, 0f, CRYSTAL_DIAGONAL, stand);
+            Mat4.rotate(stand, spin, 0f, 1f, 0f, stand);
+            crystalPart(inner == 0 ? ObjectModels.CRYSTAL_GLASS : ObjectModels.CRYSTAL_CUBE, texture, light);
+        }
+    }
+
+    /** One part of the crystal at the current {@link #stand} matrix. */
+    private void crystalPart(int part, VulkanTexture texture, int light) {
+        ModelPose pose = poses.get(EntityModels.Kind.ENDER_CRYSTAL);
+        pose.visibleAll(false);
+        pose.visible(part, true);
+        models.submit(gpu.get(EntityModels.Kind.ENDER_CRYSTAL), texture, pose, stand, 0xFFFFFFFF, 0, light);
+    }
+
     /**
      * RenderLightningBolt: the jagged bolt from its foot up, blended into the scene (additive at 0.3 alpha),
      * unlit. Its geometry comes from the bolt's seed and is rebuilt when a new strike changes it.
@@ -2023,9 +2365,8 @@ final class EntityView implements AutoCloseable {
         }
         GpuItem item = gpuItem(catalog.model(held, use.bowPull(), use.cast()));
         if (item != null) {
-            FirstPersonItem.transform(item.definition().firstPerson(), item.definition().block(), equipProgress,
-                    swingProgress, armPitchLag, armYawLag, use.action(), use.using(), use.useLeft(), use.maxUse(),
-                    use.style(), root);
+            FirstPersonItem.transform(item.definition().firstPerson(), equipProgress, swingProgress, armPitchLag,
+                    armYawLag, use.action(), use.using(), use.useLeft(), use.maxUse(), use.style(), root);
             prepend(bob, root);
             submitItem(item, held, root, light);
         } else if (held == null) {
@@ -2253,6 +2594,12 @@ final class EntityView implements AutoCloseable {
         glints.close();
         if (glint != null) {
             glint.close();
+        }
+        if (crystalBeam != null) {
+            crystalBeam.close();
+        }
+        if (shadow != null) {
+            shadow.close();
         }
     }
 }

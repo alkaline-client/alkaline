@@ -4,9 +4,9 @@ import java.util.Random;
 
 /**
  * Geometry of the world objects that are not mobs: the minecart (ModelMinecart), the boat (ModelBoat), the armor
- * stand (ModelArmorStand) and its poses, one tile of a painting (RenderPainting), the experience orb's quads
- * (RenderXPOrb) and a lightning bolt (RenderLightningBolt). Boxes, pivots, texture layouts and constants are
- * vanilla 1.8.9's.
+ * stand (ModelArmorStand) and its poses, the ender crystal (ModelEnderCrystal), one tile of a painting
+ * (RenderPainting), the experience orb's quads (RenderXPOrb) and a lightning bolt (RenderLightningBolt). Boxes,
+ * pivots, texture layouts and constants are vanilla 1.8.9's.
  */
 public final class ObjectModels {
     private static final float PI = (float) Math.PI;
@@ -114,6 +114,26 @@ public final class ObjectModels {
     private static void rotate(ModelPose pose, int part, float[] degrees) {
         pose.rotation(part, (float) Math.toRadians(degrees[0]), (float) Math.toRadians(degrees[1]),
                 (float) Math.toRadians(degrees[2]));
+    }
+
+    // ---- ender crystal -------------------------------------------------------------------------------------
+
+    /** Ender crystal parts: the base plate and the two cubes, each drawn on its own by the renderer. */
+    public static final int CRYSTAL_BASE = 0;
+    public static final int CRYSTAL_GLASS = 1;
+    public static final int CRYSTAL_CUBE = 2;
+
+    /**
+     * ModelEnderCrystal (texture 64x32, the 1.8.9 image being twice that): the base plate, the glass cube (drawn
+     * twice) and the inner cube. RenderEnderCrystal stacks a separate turn and scale before each, so every part is
+     * a root at the origin and the renderer gives each draw its own matrix.
+     */
+    static CuboidModel enderCrystal() {
+        return CuboidModel.builder("ender_crystal", 64, 32)
+                .part("base", null, 0, 0, 0, box(0, 16, -6, 0, -6, 12, 4, 12))
+                .part("glass", null, 0, 0, 0, box(0, 0, -4, -4, -4, 8, 8, 8))
+                .part("cube", null, 0, 0, 0, box(32, 0, -4, -4, -4, 8, 8, 8))
+                .build();
     }
 
     // ---- painting ------------------------------------------------------------------------------------------

@@ -37,7 +37,6 @@ import alkaline.renderer.world.BlockPalette;
 import alkaline.renderer.texture.RandomEntities;
 import alkaline.renderer.world.BlockSource;
 import alkaline.renderer.world.CustomColors;
-import alkaline.renderer.world.Lightmap;
 import alkaline.renderer.world.Sky;
 import alkaline.renderer.world.vanilla.Blocks189;
 import java.io.IOException;
@@ -123,6 +122,9 @@ final class GameView implements MenuBackground {
      * {@link #ownTarget}, copied into the scene afterwards.
      */
     private VulkanRenderTarget target;
+    /** The size of the image this frame's scene draws into (the target, or the swapchain image). */
+    private int sceneWidth;
+    private int sceneHeight;
     private VulkanRenderTarget ownTarget;
     /** Set when a frame found the scene without depth: the next {@link #beforeFrame} makes {@link #ownTarget}. */
     private boolean needsOwnTarget;
@@ -219,7 +221,17 @@ final class GameView implements MenuBackground {
         particleRenderer = new ParticleRenderer(renderer, SCENE_FORMAT);
         particleSheet = sheet(VanillaParticles.SHEET);
         explosionSheet = sheet(VanillaParticles.EXPLOSION_SHEET);
-        entityLight = (x, y, z) -> session.world().light(x, y, z);
+        entityLight = new EntityView.Lighting() {
+            @Override
+            public int light(int x, int y, int z) {
+                return session.world().light(x, y, z);
+            }
+
+            @Override
+            public int state(int x, int y, int z) {
+                return session.world().state(x, y, z);
+            }
+        };
         damageStates = (x, y, z) -> session.world().state(x, y, z);
         effects = new ParticleEffects(particles, new ParticleEffects.Blocks() {
             @Override
@@ -388,7 +400,7 @@ final class GameView implements MenuBackground {
         int light = current.light(x, y, z);
         int skyLevel = Math.max(0, (light >> 4) - Sky.skylightSubtracted(worldTime, rain, thunder));
         int level = Math.max(skyLevel, light & 15);
-        world.sky().tick(Lightmap.levelBrightness(level), values.get(ClientSettings.WORLD_RENDER_DISTANCE));
+        world.sky().tick(play.dimension().levelBrightness(level), values.get(ClientSettings.WORLD_RENDER_DISTANCE));
         PlaySession.Effect nausea = play.effects().get(9);
         camera.tick(player, zoomFactor, smoothZoom, nausea == null ? -1 : nausea.ticksLeft());
         swirls();
@@ -531,7 +543,7 @@ final class GameView implements MenuBackground {
         }
         OverworldBackground.Settings options = options(config.get());
         streamer.update(Math.floorDiv((int) Math.floor(player.x), 16), Math.floorDiv((int) Math.floor(player.z), 16),
-                options.renderDistanceChunks(), options.ambientOcclusion());
+                options.renderDistanceChunks(), options.ambientOcclusion(), options.leaves());
         current.drainChanged(key -> {
             streamer.invalidate(ClientWorld.sectionKeyX(key), ClientWorld.sectionKeyY(key), ClientWorld.sectionKeyZ(key));
             chestTracker.changed(key);
@@ -544,16 +556,34 @@ final class GameView implements MenuBackground {
 
     @Override
     public void render(VulkanFrame frame, VulkanRenderTarget scene, float partialTick) {
+        renderScene(frame, scene, partialTick);
+    }
+
+    @Override
+    public boolean rendersToSwapchain() {
+        return true;
+    }
+
+    @Override
+    public void renderToSwapchain(VulkanFrame frame, float partialTick) {
+        renderScene(frame, null, partialTick);
+    }
+
+    /** Draws the world into {@code scene}, or into the swapchain image when it is null. */
+    private void renderScene(VulkanFrame frame, VulkanRenderTarget scene, float partialTick) {
         world.animate(ticks);
-        boolean direct = scene.hasDepth();
+        boolean swapchain = scene == null;
+        boolean direct = swapchain || scene.hasDepth();
         needsOwnTarget = !direct;
-        target = direct ? scene : ownTarget != null && ownTarget.width() == scene.width()
+        target = swapchain ? null : direct ? scene : ownTarget != null && ownTarget.width() == scene.width()
                 && ownTarget.height() == scene.height() ? ownTarget : null;
-        if (target == null) {
+        if (!swapchain && target == null) {
             frame.beginRendering(scene, true, 0.52f, 0.70f, 1f, 1f);
             frame.endRendering();
             return;
         }
+        sceneWidth = swapchain ? frame.width() : target.width();
+        sceneHeight = swapchain ? frame.height() : target.height();
         ConfigSnapshot values = config.get();
         double yaw = Math.toRadians(player.yaw);
         double pitch = Math.toRadians(player.pitch);
@@ -604,6 +634,7 @@ final class GameView implements MenuBackground {
         sky.millis = System.currentTimeMillis();
         sky.rainfall = Biomes189.rainfall(biome);
         sky.flat = play.flat();
+        sky.dimension = play.dimension();
         Sky.Medium medium = medium(current, eyeX, eyeY, eyeZ);
         sky.update(worldTime, partialTick, rain, thunder, temperature, forward[0], forward[1], forward[2], eyeY,
                 distance, medium);
@@ -614,7 +645,7 @@ final class GameView implements MenuBackground {
         PlaySession.Effect blindness = play.effects().get(15);
         sky.blindness = blindness == null ? -1 : blindness.ticksLeft();
         sky.nightVision = vision;
-        world.setLighting(sky.sunBrightness, 0f, values.get(ClientSettings.WORLD_BRIGHTNESS), vision);
+        world.setLighting(sky.dimension, sky.sunBrightness, 0f, values.get(ClientSettings.WORLD_BRIGHTNESS), vision);
         world.setWeather(weather, values.get(ClientSettings.WORLD_RAIN) ? rain : 0f, ticks, partialTick, feetX, feetY, feetZ);
         float[] eyeTransform = camera.update(player, values.get(ClientSettings.WORLD_VIEW_BOBBING),
                 values.get(ClientSettings.WORLD_HURT_SHAKE), partialTick);
@@ -622,14 +653,15 @@ final class GameView implements MenuBackground {
         if (medium != Sky.Medium.AIR) {
             fov = fov * 60f / 70f; // EntityRenderer.getFOVModifier under water and in lava
         }
-        world.prepare(frame, target.width(), target.height(), eyeX, eyeY, eyeZ, forward,
+        world.prepare(frame, sceneWidth, sceneHeight, eyeX, eyeY, eyeZ, forward,
                 (float) Math.toRadians(fov), reach + 96f, eyeTransform);
         world.lightmap(lightmap);
         int hitArgb = values.get(ClientSettings.WORLD_HIT_COLOR);
         if (hitColor == null || hitColor.argb() != hitArgb) {
             hitColor = new EntityView.HitColor(hitArgb, false);
         }
-        CloudRenderer.Mode cloudMode = clouds == null ? CloudRenderer.Mode.OFF : switch (values.get(ClientSettings.WORLD_CLOUDS)) {
+        // RenderGlobal.renderClouds draws only over a surface world.
+        CloudRenderer.Mode cloudMode = clouds == null || !sky.dimension.surface() ? CloudRenderer.Mode.OFF : switch (values.get(ClientSettings.WORLD_CLOUDS)) {
             case OFF -> CloudRenderer.Mode.OFF;
             case FAST -> CloudRenderer.Mode.FAST;
             case FANCY -> CloudRenderer.Mode.FANCY;
@@ -639,7 +671,11 @@ final class GameView implements MenuBackground {
         double cloudTicks = ticks + partialTick;
 
         renderer.gpuMark(frame, gpuSetup);
-        frame.beginRendering(target, true, 0f, 0f, 0f, 1f);
+        if (swapchain) {
+            frame.beginSwapchainScene(SCENE_FORMAT, 0f, 0f, 0f, 1f);
+        } else {
+            frame.beginRendering(target, true, 0f, 0f, 0f, 1f);
+        }
         // Clouds below the eye go between the sky and the terrain; otherwise the sky can follow the terrain and
         // shade only what it leaves uncovered (the same picture: it draws at the far plane, depth-tested).
         boolean cloudsBetween = belowClouds && cloudMode != CloudRenderer.Mode.OFF;
@@ -665,6 +701,8 @@ final class GameView implements MenuBackground {
         entities.world(sky.moonPhase, worldTime, thunder * rain > 0.5f ? RandomEntities.THUNDER
                 : rain > 0.5f ? RandomEntities.RAIN : RandomEntities.CLEAR, columnBiomes);
         viewer.refresh();
+        entities.shadows(values.get(ClientSettings.WORLD_ENTITY_SHADOWS), sky.dimension,
+                Sky.skylightSubtracted(worldTime, rain, thunder), feetX, feetY, feetZ);
         entities.render(frame, play.entities().all(), play.players(), entityLight, lightmap,
                 fog, hitColor, partialTick, eyeX, eyeY, eyeZ, world.viewProjection(), cameraYaw, cameraPitch,
                 perspective > 0 ? selfModel : null);
@@ -782,7 +820,7 @@ final class GameView implements MenuBackground {
         }
         frame.clearDepth();
         float handFov = submerged ? 60f : 70f;
-        Mat4.perspective((float) Math.toRadians(handFov), target.width() / (float) target.height(), 0.05f,
+        Mat4.perspective((float) Math.toRadians(handFov), sceneWidth / (float) sceneHeight, 0.05f,
                 reach * 2f, handProjection);
         int packed = current.light((int) Math.floor(eyeX), (int) Math.floor(eyeY), (int) Math.floor(eyeZ));
         int light = lightmap[(packed >> 4 & 15) * 16 + (packed & 15)];

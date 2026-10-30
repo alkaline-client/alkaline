@@ -194,4 +194,34 @@ class MobAnimatorTest {
         }
         assertEquals(500, table.size());
     }
+
+    @Test
+    void dragonHealsFromTheNearestCrystalInRangeAndLetsGoWhenItIsGone() {
+        MobAnimator animator = new MobAnimator();
+        Entity dragon = mob(9, EntityTypes.ENDER_DRAGON);
+        Entity near = new Entity(20, Entity.Category.OBJECT, EntityTypes.OBJECT_ENDER_CRYSTAL, null, 30, 4, 0, 0f, 0f);
+        Entity far = new Entity(21, Entity.Category.OBJECT, EntityTypes.OBJECT_ENDER_CRYSTAL, null, -35, 4, 0, 0f, 0f);
+        // Past the dragon's box grown by 32 (8 + 32 = 40 from its middle, plus the crystal's half width).
+        Entity outside = new Entity(22, Entity.Category.OBJECT, EntityTypes.OBJECT_ENDER_CRYSTAL, null, 0, 4, 41.5, 0f,
+                0f);
+        // A skeleton shares the crystal's type number but is a mob.
+        Entity skeleton = mob(23, EntityTypes.SKELETON);
+        List<Entity> all = List.of(dragon, near, far, outside, skeleton);
+        for (int tick = 0; tick < 200; tick++) {
+            animator.tick(all, null);
+        }
+        assertEquals(20, animator.state(dragon).healingCrystal);
+        List<Entity> onlyOutside = List.of(dragon, outside);
+        animator.tick(onlyOutside, null);
+        assertEquals(-1, animator.state(dragon).healingCrystal);
+    }
+
+    @Test
+    void crystalRotationStartsBelowOneHundredThousandAndCountsTicks() {
+        Entity crystal = new Entity(-5, Entity.Category.OBJECT, EntityTypes.OBJECT_ENDER_CRYSTAL, null, 0, 0, 0, 0f, 0f);
+        int start = MobAnimator.crystalRotation(crystal);
+        assertTrue(start >= 0 && start < 100000);
+        crystal.tick();
+        assertEquals(start + 1, MobAnimator.crystalRotation(crystal));
+    }
 }

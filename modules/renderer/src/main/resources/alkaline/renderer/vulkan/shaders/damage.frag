@@ -16,10 +16,6 @@ layout(location = 0) in vec3 texcoord;
 layout(location = 1) flat in uint tileArray;
 layout(location = 0) out vec4 outColor;
 
-vec3 linearToSrgb(vec3 c) {
-    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308)));
-}
-
 void main() {
     vec4 texel = tileArray == 0u ? texture(blocks, texcoord) : texture(tiles, texcoord);
     if (texel.a * 0.5 <= 0.1) {

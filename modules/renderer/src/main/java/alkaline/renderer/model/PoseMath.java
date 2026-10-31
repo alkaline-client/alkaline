@@ -16,6 +16,33 @@ public final class PoseMath {
      * @param out receives {@code partCount * 12} floats
      */
     public static void resolve(ModelPose pose, float[] root, float[] out) {
+        resolve(pose, root, out, true);
+    }
+
+    /**
+     * {@link #resolve} without hiding: every part gets its matrix whether it is visible or not, so models that
+     * share a skeleton (a body and the armor over it) can share the matrices and differ only in
+     * {@link #visibleMask}.
+     */
+    public static void resolveAll(ModelPose pose, float[] root, float[] out) {
+        resolve(pose, root, out, false);
+    }
+
+    /** Bit {@code n} is set when part {@code n} draws: it is visible and so is every parent above it. */
+    public static long visibleMask(ModelPose pose) {
+        CuboidModel model = pose.model();
+        int parts = model.partCount();
+        long visible = 0L;
+        for (int part = 0; part < parts; part++) {
+            int parent = model.parent(part);
+            if (pose.visible[part] && (parent < 0 || (visible >>> parent & 1L) != 0)) {
+                visible |= 1L << part;
+            }
+        }
+        return visible;
+    }
+
+    private static void resolve(ModelPose pose, float[] root, float[] out, boolean hide) {
         CuboidModel model = pose.model();
         int parts = model.partCount();
         if (out.length < parts * FLOATS_PER_PART || root.length != 16) {
@@ -26,7 +53,7 @@ public final class PoseMath {
         for (int part = 0; part < parts; part++) {
             int parent = model.parent(part);
             int target = part * FLOATS_PER_PART;
-            if (!pose.visible[part] || (parent >= 0 && (zero >>> parent & 1L) != 0)) {
+            if (hide && (!pose.visible[part] || (parent >= 0 && (zero >>> parent & 1L) != 0))) {
                 java.util.Arrays.fill(out, target, target + FLOATS_PER_PART, 0f);
                 zero |= 1L << part;
                 continue;

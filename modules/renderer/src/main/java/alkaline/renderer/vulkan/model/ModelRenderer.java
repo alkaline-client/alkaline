@@ -5,6 +5,7 @@ import alkaline.renderer.model.CuboidModel;
 import alkaline.renderer.model.ModelMesher;
 import alkaline.renderer.model.ModelPose;
 import alkaline.renderer.model.PoseMath;
+import alkaline.renderer.model.SkeletonMatch;
 import alkaline.renderer.vulkan.resource.PipelineSpec;
 import alkaline.renderer.vulkan.resource.RenderTargetFormat;
 import alkaline.renderer.vulkan.resource.VertexFormat;
@@ -27,8 +28,13 @@ import org.lwjgl.system.MemoryUtil;
  * <p>Vanilla 1.8.9 re-tessellates (or replays a display list for) every box of every entity, and every quad of
  * every item, each frame with matrix-stack calls in between. Here a model's geometry is uploaded once
  * ({@link BakedModel}); per frame, each submitted instance costs one pass over its part hierarchy on the CPU (12
- * floats per part written straight into mapped memory) and one 16-byte instance record. Instances sharing a
- * model and texture become a single instanced draw. Like vanilla's item rendering, texels with alpha at or
+ * floats per part written straight into mapped memory), a 16-byte header row and one 16-byte instance record.
+ * Instances sharing a model and texture become a single instanced draw.
+ *
+ * <p>Layers drawn over a body with the body's pose (the four armor pieces, the emissive pass, a sheep's wool)
+ * share its skeleton: when a posed submit has the same parent chain, rotations, pivots and root as the skeleton
+ * written just before, its header points at those matrices instead of new ones, and the header's 64-bit mask
+ * hides the parts it does not draw. A fully armored player costs one skeleton instead of five. Like vanilla's item rendering, texels with alpha at or
  * below 0.1 are discarded and the rest blend over the scene.
  *
  * <p>Usage per frame: {@link #begin}, any number of {@link #submit}, then {@link #flush} inside the main pass
@@ -78,6 +84,9 @@ public final class ModelRenderer implements AutoCloseable {
     private float ambient = 0.4f;
     private final float[] viewProjection = new float[16];
     private VulkanFrame frame;
+    /** The skeleton written last this frame: its first matrix row (-1 for none) and what produced it. */
+    private int skeletonRow = -1;
+    private final SkeletonMatch skeleton = new SkeletonMatch();
     private int instanceCount;
     private int droppedInstances;
     /** Whether the models submitted now ignore the two lights (flat color, like fixed-function with lighting off). */
@@ -240,6 +249,8 @@ public final class ModelRenderer implements AutoCloseable {
         frame = Objects.requireNonNull(target, "target");
         System.arraycopy(viewProjectionMatrix, 0, viewProjection, 0, 16);
         instanceCount = 0;
+        skeletonRow = -1;
+        skeleton.clear();
         frameTextures.clear();
         unlit = false;
     }
@@ -256,11 +267,7 @@ public final class ModelRenderer implements AutoCloseable {
         if (frame == null) {
             throw new IllegalStateException("Call begin() before submitting entities.");
         }
-        if (model.owner != this || model.model == null || pose.model() != model.model) {
-            throw new IllegalArgumentException("Pose and model must match a cuboid model uploaded by this renderer.");
-        }
-        PoseMath.resolve(pose, root, matrices);
-        return queue(model, texture, model.partCount, tintArgb, overlayArgb, lightRgb, null, 0f);
+        return submit(model, texture, pose, root, tintArgb, overlayArgb, lightRgb, null, 0f);
     }
 
     /**
@@ -275,8 +282,34 @@ public final class ModelRenderer implements AutoCloseable {
         if (model.owner != this || model.model == null || pose.model() != model.model) {
             throw new IllegalArgumentException("Pose and model must match a cuboid model uploaded by this renderer.");
         }
-        PoseMath.resolve(pose, root, matrices);
-        return queue(model, texture, model.partCount, tintArgb, overlayArgb, lightRgb, glint, glintTime);
+        int row;
+        if (instanceCount >= MAX_INSTANCES) {
+            row = -1;
+        } else if (skeletonRow >= 0 && skeleton.matches(pose, root)) {
+            row = skeletonRow;
+        } else {
+            PoseMath.resolveAll(pose, root, matrices);
+            row = writeMatrices(model.partCount);
+            if (row >= 0) {
+                skeletonRow = row;
+                skeleton.remember(pose, root);
+            }
+        }
+        return queue(model, texture, row, PoseMath.visibleMask(pose), tintArgb, overlayArgb, lightRgb, glint,
+                glintTime);
+    }
+
+    /** Copies {@code parts} matrices from {@link #matrices} into the stream; their first row, or -1 when it is full. */
+    private int writeMatrices(int parts) {
+        long offset = frame.allocate((long) parts * PoseMath.FLOATS_PER_PART * Float.BYTES, MATRIX_ROW_BYTES);
+        if (offset < 0) {
+            return -1;
+        }
+        long pointer = frame.streamPointer(offset);
+        for (int index = 0; index < parts * PoseMath.FLOATS_PER_PART; index++) {
+            MemoryUtil.memPutFloat(pointer + (long) index * Float.BYTES, matrices[index]);
+        }
+        return (int) (offset / MATRIX_ROW_BYTES);
     }
 
     /**
@@ -317,21 +350,26 @@ public final class ModelRenderer implements AutoCloseable {
         matrices[9] = root[6];
         matrices[10] = root[10];
         matrices[11] = root[14];
-        return queue(model, texture, 1, tintArgb, overlayArgb, lightRgb, glint, 0f);
+        int row = instanceCount < MAX_INSTANCES ? writeMatrices(1) : -1;
+        return queue(model, texture, row, 1L, tintArgb, overlayArgb, lightRgb, glint, 0f);
     }
 
-    private boolean queue(GpuModel model, VulkanSampledImage texture, int parts, int tintArgb, int overlayArgb,
-                          int lightRgb, GlintEffect glint, float glintTime) {
-        long offset = instanceCount < MAX_INSTANCES
-                ? frame.allocate((long) parts * PoseMath.FLOATS_PER_PART * Float.BYTES, MATRIX_ROW_BYTES) : -1L;
+    /**
+     * Queues an instance whose matrices start at {@code matrixRow} (-1 when they could not be written): its header
+     * row holds the visible-part mask and that row, and the record points at the header.
+     */
+    private boolean queue(GpuModel model, VulkanSampledImage texture, int matrixRow, long visibleParts, int tintArgb,
+                          int overlayArgb, int lightRgb, GlintEffect glint, float glintTime) {
+        long offset = matrixRow >= 0 && instanceCount < MAX_INSTANCES ? frame.allocate(MATRIX_ROW_BYTES, MATRIX_ROW_BYTES) : -1L;
         if (offset < 0) {
             droppedInstances++;
             return false;
         }
-        long pointer = frame.streamPointer(offset);
-        for (int index = 0; index < parts * PoseMath.FLOATS_PER_PART; index++) {
-            MemoryUtil.memPutFloat(pointer + (long) index * Float.BYTES, matrices[index]);
-        }
+        long header = frame.streamPointer(offset);
+        MemoryUtil.memPutInt(header, (int) visibleParts);
+        MemoryUtil.memPutInt(header + 4, (int) (visibleParts >>> 32));
+        MemoryUtil.memPutInt(header + 8, matrixRow);
+        MemoryUtil.memPutInt(header + 12, 0);
         int textureSlot = textureSlot(texture);
         int instance = instanceCount++;
         instanceModel[instance] = model.id;

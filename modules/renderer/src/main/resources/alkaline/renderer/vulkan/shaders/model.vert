@@ -28,12 +28,20 @@ layout(location = 3) out vec3 shade;
 layout(location = 4) out float fog;
 
 void main() {
-    // record: x = first matrix row (vec4 index), y = tint RGBA8, z = overlay RGBA8, w = light RGBA8
+    // record: x = the instance's header row (vec4 index), y = tint RGBA8, z = overlay RGBA8, w = light RGBA8
     uvec4 record = scene.instances.records[gl_InstanceIndex];
-    uint base = record.x + inPart * 3u;
+    // header: xy = visible-part mask (low, high 32 bits), z = first matrix row; layers over a body share its rows.
+    uvec4 header = floatBitsToUint(scene.matrices.rows[record.x]);
+    uint base = header.z + inPart * 3u;
     vec4 r0 = scene.matrices.rows[base];
     vec4 r1 = scene.matrices.rows[base + 1u];
     vec4 r2 = scene.matrices.rows[base + 2u];
+    // A hidden part collapses to the origin, as a zero matrix does.
+    if (((inPart < 32u ? header.x >> inPart : header.y >> (inPart - 32u)) & 1u) == 0u) {
+        r0 = vec4(0.0);
+        r1 = vec4(0.0);
+        r2 = vec4(0.0);
+    }
     vec4 local = vec4(inPosition, 1.0);
     vec3 world = vec3(dot(r0, local), dot(r1, local), dot(r2, local));
     gl_Position = scene.viewProjection * vec4(world, 1.0);

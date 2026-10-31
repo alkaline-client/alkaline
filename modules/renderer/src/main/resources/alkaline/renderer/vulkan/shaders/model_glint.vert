@@ -29,13 +29,16 @@ layout(location = 3) flat out float alpha;
 const float SPRITE_SPAN = 16.0 / 512.0;
 
 void main() {
-    // record: x = first matrix row, y = instance time (float bits), z = the model's tint RGBA8 (for its alpha
+    // record: x = header row, y = instance time (float bits), z = the model's tint RGBA8 (for its alpha
     // test), w = light RGBA8 (the lightmap texel vanilla modulates the glint with)
     uvec4 record = scene.instances.records[gl_InstanceIndex];
-    uint base = record.x + inPart * 3u;
+    // header (record.x): xy = visible-part mask (low, high 32 bits), z = first matrix row.
+    uvec4 header = floatBitsToUint(scene.matrices.rows[record.x]);
+    uint base = header.z + inPart * 3u;
     vec4 local = vec4(inPosition, 1.0);
-    vec3 world = vec3(dot(scene.matrices.rows[base], local), dot(scene.matrices.rows[base + 1u], local),
-            dot(scene.matrices.rows[base + 2u], local));
+    bool shown = ((inPart < 32u ? header.x >> inPart : header.y >> (inPart - 32u)) & 1u) != 0u;
+    vec3 world = shown ? vec3(dot(scene.matrices.rows[base], local), dot(scene.matrices.rows[base + 1u], local),
+            dot(scene.matrices.rows[base + 2u], local)) : vec3(0.0);
     gl_Position = scene.viewProjection * vec4(world, 1.0);
     uint flags = uint(scene.tint.w);
     vec2 coordinate = (flags & 2u) != 0u ? inUv : vec2(inPosition.x, 1.0 - inPosition.y) * SPRITE_SPAN;

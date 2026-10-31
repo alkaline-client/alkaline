@@ -739,6 +739,25 @@ public final class VulkanRenderer implements Renderer {
         return created;
     }
 
+    /**
+     * Runs {@code work} with every staging upload it makes (static buffers, and textures where the device has no
+     * host image copy) recorded into one submission with one wait at the end, instead of a queue drain per upload.
+     * Building a view with dozens of models then waits on the GPU once. If {@code work} throws, its copies are
+     * discarded. Call outside a frame; batches do not nest.
+     */
+    public void batchUploads(Runnable work) {
+        requireOwnerAndOpen();
+        requireOutsideFrame("Upload batches");
+        uploader.beginBatch();
+        boolean completed = false;
+        try {
+            work.run();
+            completed = true;
+        } finally {
+            uploader.endBatch(completed);
+        }
+    }
+
     /** Builds a pipeline for the main pass (color + depth) or an offscreen format named by the spec. */
     public VulkanPipeline createPipeline(PipelineSpec spec) {
         requireOwnerAndOpen();

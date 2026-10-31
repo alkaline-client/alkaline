@@ -8,12 +8,17 @@ import alkaline.ui.theme.AlkalineTheme
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
+import alkaline.renderer.vulkan.ui.LocalGlassFade
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -60,6 +65,9 @@ internal val PagePanelMaxHeight = 620.dp
 /** How long the background plays alone between the loading screen fading and the menu arriving. */
 private const val REVEAL_PAUSE_MILLIS = 450L
 
+/** The menu's cross-fade into a joined world; the client's compositor fades its background over the same time. */
+const val WORLD_FADE_MILLIS = 600
+
 /**
  * Alkaline's menus. The title page is only the logo and the primary actions; everything else lives one level
  * down. Sub-pages slide in place of the buttons so the background stays put. At startup a loading screen
@@ -85,6 +93,16 @@ fun AlkalineMenu(controller: MenuController) {
                         || (controller.play == PlayPhase.PAUSED && controller.page != MenuPage.SETTINGS)
                 val overlay = controller.overlay
                 val profiles = controller.profiles
+                val morph = androidx.compose.runtime.remember { MorphState() }
+                // The HUD and crosshair arrive with the world rather than before it.
+                val world = androidx.compose.runtime.remember { Animatable(1f) }
+                LaunchedEffect(controller.worldReveals) {
+                    if (controller.worldReveals > 0) {
+                        world.snapTo(0f)
+                        world.animateTo(1f, tween(WORLD_FADE_MILLIS, easing = LinearOutSlowInEasing))
+                    }
+                }
+                val worldFade = androidx.compose.runtime.remember(world) { derivedStateOf { world.value } }
                 // Under the HUD, so the open chat's own messages still take the pointer; the wheel scrolls from anywhere else.
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.CHAT) {
                     alkaline.ui.hud.ChatWheel(controller.chat)
@@ -97,16 +115,25 @@ fun AlkalineMenu(controller: MenuController) {
                     CompositionLocalProvider(
                         alkaline.ui.hud.LocalHudSprites provides controller.hudSprites,
                         alkaline.ui.hud.LocalChatInput provides controller.chat,
+                        alkaline.ui.hud.LocalNotifications provides controller.notifications,
+                        alkaline.ui.hud.LocalMusic provides controller.music,
+                        LocalGlassFade provides worldFade,
                     ) {
+                        val plugins = controller.plugins
+                        if (plugins != null && overlay != Overlay.HUD_EDITOR) {
+                            alkaline.ui.plugins.PluginOverlays(plugins, Modifier.graphicsLayer { alpha = worldFade.value })
+                        }
                         alkaline.ui.hud.GameHud(
                             controller.hud.frame, profiles.store(),
                             if (overlay == Overlay.HUD_EDITOR) controller.hudEditor else null,
+                            modifier = Modifier.graphicsLayer { alpha = worldFade.value },
+                            items = plugins?.hudItems.orEmpty(),
                             onDone = { controller.closeHudEditor() },
                         )
                     }
                 }
                 if (controller.phase == MenuPhase.READY && controller.play == PlayPhase.PLAYING && overlay == Overlay.NONE) {
-                    Crosshair(Modifier.align(Alignment.Center))
+                    Crosshair(Modifier.align(Alignment.Center).graphicsLayer { alpha = worldFade.value })
                 }
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.CLICK_GUI) {
                     ClickGui(controller)
@@ -122,6 +149,9 @@ fun AlkalineMenu(controller: MenuController) {
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.SERVER_PACK) {
                     ServerPackPrompt(controller)
                 }
+                if (controller.phase == MenuPhase.READY && overlay == Overlay.PLUGIN) {
+                    controller.pluginScreen?.let { alkaline.ui.plugins.PluginScreenPanel(it) { controller.closeOverlay() } }
+                }
                 if (controller.phase == MenuPhase.READY && overlay == Overlay.DEATH) {
                     DeathScreen(controller)
                 }
@@ -130,9 +160,15 @@ fun AlkalineMenu(controller: MenuController) {
                 ) {
                     ServerPackProgress(controller, Modifier.align(Alignment.TopCenter))
                 }
-                if (controller.phase == MenuPhase.READY && controller.play == PlayPhase.CONNECTING) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        ConnectingCard(controller)
+                AnimatedVisibility(
+                    visible = controller.phase == MenuPhase.READY && controller.play == PlayPhase.CONNECTING,
+                    enter = fadeIn(tween(200)),
+                    exit = fadeOut(tween(WORLD_FADE_MILLIS)),
+                ) {
+                    FadingGlass(200, 0, WORLD_FADE_MILLIS) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            ConnectingCard(controller)
+                        }
                     }
                 }
                 if (controller.phase == MenuPhase.READY && controller.play == PlayPhase.PAUSED
@@ -143,17 +179,24 @@ fun AlkalineMenu(controller: MenuController) {
                     }
                 }
                 if (controller.phase == MenuPhase.READY && !inGame) {
-                    AnimatedContent(
-                        targetState = controller.page,
-                        transitionSpec = { pageTransition(initialState, targetState) },
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 72.dp, vertical = 48.dp),
-                        label = "menu-page",
-                    ) { page ->
-                        when (page) {
-                            MenuPage.TITLE -> TitlePage(controller)
-                            MenuPage.SINGLEPLAYER -> SingleplayerPage(controller)
-                            MenuPage.MULTIPLAYER -> MultiplayerPage(controller)
-                            MenuPage.SETTINGS -> SettingsPage(controller)
+                    // The title action grows into the page it opens; see MorphState.
+                    CompositionLocalProvider(LocalMorph provides morph) {
+                        MorphDriver(morph, controller.page, ButtonDefaults.MediumContainerHeight)
+                        MorphContainer(morph)
+                        AnimatedContent(
+                            targetState = controller.page,
+                            transitionSpec = { pageTransition() },
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 72.dp, vertical = 48.dp),
+                            label = "menu-page",
+                        ) { page ->
+                            MorphPage(this) {
+                                when (page) {
+                                    MenuPage.TITLE -> TitlePage(controller)
+                                    MenuPage.SINGLEPLAYER -> SingleplayerPage(controller)
+                                    MenuPage.MULTIPLAYER -> MultiplayerPage(controller)
+                                    MenuPage.SETTINGS -> SettingsPage(controller)
+                                }
+                            }
                         }
                     }
                     // Corner controls sit outside the page transition so they stay put while pages slide.
@@ -163,8 +206,16 @@ fun AlkalineMenu(controller: MenuController) {
                         exit = fadeOut(tween(160)),
                         modifier = Modifier.align(Alignment.TopStart).padding(20.dp),
                     ) {
-                        AccountChip(controller)
+                        FadingGlass(320, 200, 160) { AccountChip(controller) }
                     }
+                }
+                // Outside the game the menus show notifications in their bottom corner, with the menu's glass.
+                if (controller.phase == MenuPhase.READY && controller.play == PlayPhase.MENU) {
+                    alkaline.ui.hud.NotificationStack(
+                        controller.notifications, seconds = 5, newestAtBottom = true, alignment = Alignment.End,
+                        blur = config.get(ClientSettings.MENU_GLASS), hud = false,
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
+                    )
                 }
                 AnimatedVisibility(
                     visible = controller.phase == MenuPhase.LOADING,
@@ -178,12 +229,11 @@ fun AlkalineMenu(controller: MenuController) {
     }
 }
 
-private fun pageTransition(from: MenuPage, to: MenuPage): ContentTransform {
-    val forward = to != MenuPage.TITLE
-    val direction = if (forward) 1 else -1
-    return (slideInHorizontally(tween(320)) { it / 6 * direction } + fadeIn(tween(220)))
-        .togetherWith(slideOutHorizontally(tween(240)) { -it / 8 * direction } + fadeOut(tween(160)))
-}
+/**
+ * Pages only cross-fade, and [MorphPage] does the fading (without offscreen layers); the motion is the
+ * container transform ([MorphState]).
+ */
+private fun pageTransition(): ContentTransform = EnterTransition.None togetherWith ExitTransition.None
 
 /** Opaque brand surface with the mark and an Expressive loading indicator. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -211,17 +261,21 @@ private fun LoadingScreen(status: String) {
     }
 }
 
-/** The Alkaline mark and the four primary actions, centered and staggered in on first appearance. */
+/**
+ * The Alkaline mark and the four primary actions, centered and staggered in when the menu first appears. Coming
+ * back from a page they simply fade in around the action the page shrinks into.
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun TitlePage(controller: MenuController) {
+    val stagger = androidx.compose.runtime.remember { controller.firstTitleEntrance() }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
             Modifier.width(320.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Staggered(0) {
+            Staggered(0, stagger) {
                 // A soft shadow keeps the light mark legible over bright skies without adding a surface.
                 Box(Modifier.padding(bottom = 36.dp)) {
                     val size = Modifier.size(width = 84.dp * AlkalineLogo.ASPECT, height = 84.dp)
@@ -231,16 +285,22 @@ private fun TitlePage(controller: MenuController) {
             }
             val large = ButtonDefaults.MediumContainerHeight
             // Every action shares one calm style; the one under the pointer lights up.
-            Staggered(1) {
-                HoverAction(AlkalineIcons.Play, "Singleplayer", large) { controller.open(MenuPage.SINGLEPLAYER) }
+            Staggered(1, stagger) {
+                HoverAction(AlkalineIcons.Play, "Singleplayer", large, morph = MenuPage.SINGLEPLAYER) {
+                    controller.open(MenuPage.SINGLEPLAYER)
+                }
             }
-            Staggered(2) {
-                HoverAction(AlkalineIcons.Globe, "Multiplayer", large) { controller.open(MenuPage.MULTIPLAYER) }
+            Staggered(2, stagger) {
+                HoverAction(AlkalineIcons.Globe, "Multiplayer", large, morph = MenuPage.MULTIPLAYER) {
+                    controller.open(MenuPage.MULTIPLAYER)
+                }
             }
-            Staggered(3) {
-                HoverAction(AlkalineIcons.Tune, "Settings", large) { controller.open(MenuPage.SETTINGS) }
+            Staggered(3, stagger) {
+                HoverAction(AlkalineIcons.Tune, "Settings", large, morph = MenuPage.SETTINGS) {
+                    controller.open(MenuPage.SETTINGS)
+                }
             }
-            Staggered(4) {
+            Staggered(4, stagger) {
                 HoverAction(AlkalineIcons.Power, "Quit", large) { controller.actions.quit() }
             }
         }
@@ -248,7 +308,11 @@ private fun TitlePage(controller: MenuController) {
 }
 
 @Composable
-private fun Staggered(index: Int, content: @Composable () -> Unit) {
+private fun Staggered(index: Int, animate: Boolean, content: @Composable () -> Unit) {
+    if (!animate) {
+        content()
+        return
+    }
     AnimatedVisibility(
         visibleState = rememberEntrance(index),
         enter = fadeIn(tween(380, delayMillis = index * 70)) +
@@ -274,16 +338,29 @@ internal fun BackHeader(controller: MenuController, title: String) {
     }
 }
 
-/** Frosted surface used by every menu panel. */
+/**
+ * Frosted surface used by every menu panel. A page's panel names its [morph] page: the title action that opened
+ * it grows into it, and while that container flies the panel lets it stand in, then fades its content in.
+ */
 @Composable
-internal fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+internal fun Panel(
+    modifier: Modifier = Modifier,
+    morph: MenuPage? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val state = if (morph != null) LocalMorph.current else null
+    val flying = morph != null && state?.flying(morph) == true
     Surface(
         shape = RoundedCornerShape(PanelRadius),
-        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.66f),
+        color = if (flying) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.66f),
         tonalElevation = 0.dp,
-        modifier = modifier.glass(PanelRadius),
+        modifier = (if (morph == null) modifier else modifier.morphTarget(state, morph))
+            .glass(PanelRadius, enabled = !flying),
     ) {
-        Column(Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            (if (morph == null) Modifier else Modifier.morphContent(state, morph)).padding(28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             content()
         }
     }

@@ -16,6 +16,7 @@ dependencies {
     implementation(project(":modules:renderer"))
     implementation(project(":modules:ui"))
     implementation(project(":modules:audio"))
+    implementation(project(":modules:music"))
     implementation(libs.lwjgl)
     implementation(libs.lwjgl.sdl)
     implementation(libs.lwjgl.vulkan)

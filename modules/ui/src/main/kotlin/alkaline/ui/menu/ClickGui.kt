@@ -111,10 +111,12 @@ internal fun ClickGui(controller: MenuController) {
                 Box(Modifier.weight(1f).fillMaxHeight()) {
                     when (controller.clickGuiSection) {
                         ClickGuiSection.MODULES -> ModuleList(controller, store, snapshot)
-                        ClickGuiSection.PLUGINS -> EmptySection(AlkalineIcons.Plugin, "No plugins yet",
-                            "Plugins will be listed here, each with its settings in your profiles, once Alkaline can load them.")
-                        ClickGuiSection.MUSIC -> EmptySection(AlkalineIcons.Music, "Nothing to play yet",
-                            "Music playback is not part of Alkaline yet.")
+                        ClickGuiSection.PLUGINS -> controller.plugins?.let { host ->
+                            alkaline.ui.plugins.PluginsSection(host, controller)
+                        } ?: EmptySection(AlkalineIcons.Plugin, "Plugins are unavailable", "This build does not load plugins.")
+                        ClickGuiSection.MUSIC -> controller.music?.let { music ->
+                            alkaline.ui.music.MusicSection(music, controller)
+                        } ?: EmptySection(AlkalineIcons.Music, "Music is unavailable", "This build has no music player.")
                     }
                 }
             }

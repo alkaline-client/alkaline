@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * the radius or a meshing option changes.
  */
 public final class SectionStreamer implements AutoCloseable {
-    private record Result(long generation, long version, ChunkMesh mesh) {
+    private record Result(long generation, long version, long key, ChunkMesh mesh) {
     }
 
     private final BlockSource source;
@@ -47,6 +47,14 @@ public final class SectionStreamer implements AutoCloseable {
     /** Latest re-mesh request per section; an older job finishing late must not replace a newer mesh. */
     private final java.util.concurrent.ConcurrentHashMap<Long, Long> versions = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicLong nextVersion = new AtomicLong();
+    /**
+     * Sections with a re-mesh queued and not yet started. A section changes many times while the server sends its
+     * chunk and lighting; one queued job reads the latest blocks when it starts, so further changes before then
+     * need no job of their own.
+     */
+    private final Set<Long> queuedRemesh = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Jobs per section of the current generation not yet drained (render thread), for {@link #settled}. */
+    private final java.util.HashMap<Long, Integer> unfinished = new java.util.HashMap<>();
     private int centerX = Integer.MIN_VALUE;
     private int centerZ = Integer.MIN_VALUE;
     private int radius = -1;
@@ -124,6 +132,8 @@ public final class SectionStreamer implements AutoCloseable {
             // Old meshes stay on screen until their replacements arrive; queued old-generation jobs are dropped.
             generation.incrementAndGet();
             workers.getQueue().clear();
+            queuedRemesh.clear();
+            unfinished.clear();
             inFlight.set(workers.getActiveCount());
             requested.clear();
             additions.clear();
@@ -138,6 +148,7 @@ public final class SectionStreamer implements AutoCloseable {
         for (long[] section : additions) {
             requested.add(WorldRenderer.key((int) section[0], (int) section[1], (int) section[2]));
             renderer.request((int) section[0], (int) section[1], (int) section[2]);
+            unfinished.merge(WorldRenderer.key((int) section[0], (int) section[1], (int) section[2]), 1, Integer::sum);
             inFlight.incrementAndGet();
             workers.execute(new Job((int) section[0], (int) section[1], (int) section[2], (int) section[3], current));
         }
@@ -148,7 +159,13 @@ public final class SectionStreamer implements AutoCloseable {
         Result result;
         while ((result = results.poll()) != null) {
             ChunkMesh mesh = result.mesh();
-            long key = WorldRenderer.key(mesh.sectionX(), mesh.sectionY(), mesh.sectionZ());
+            long key = result.key();
+            if (result.generation() == current) {
+                unfinished.computeIfPresent(key, (ignored, count) -> count > 1 ? count - 1 : null);
+            }
+            if (mesh == null) {
+                continue; // a job that had nothing to do
+            }
             Long latest = versions.get(key);
             if (result.generation() == current && wanted.contains(key)
                     && (latest == null || result.version() >= latest)) {
@@ -166,11 +183,22 @@ public final class SectionStreamer implements AutoCloseable {
         if (closed || !requested.contains(key)) {
             return;
         }
-        long version = nextVersion.incrementAndGet();
-        versions.put(key, version);
+        versions.put(key, nextVersion.incrementAndGet());
+        if (!queuedRemesh.add(key)) {
+            return; // the queued job will see this change too
+        }
+        unfinished.merge(key, 1, Integer::sum);
         inFlight.incrementAndGet();
         int distance = (x - centerX) * (x - centerX) + (z - centerZ) * (z - centerZ);
-        workers.execute(new Job(x, y, z, distance, generation.get(), version));
+        workers.execute(new Job(x, y, z, distance, generation.get(), true));
+    }
+
+    /**
+     * Whether the section's newest blocks are meshed and on the GPU: no job is queued or running for it and no
+     * mesh is waiting to be uploaded. Render thread.
+     */
+    public boolean settled(int x, int y, int z) {
+        return !unfinished.containsKey(WorldRenderer.key(x, y, z)) && renderer.settled(x, y, z);
     }
 
     /** Sections still being generated, meshed, or uploaded. */
@@ -190,19 +218,20 @@ public final class SectionStreamer implements AutoCloseable {
         private final int z;
         private final int distance;
         private final long jobGeneration;
-        private final long version;
+        /** A re-mesh after a change, rather than the section's first mesh. */
+        private final boolean remesh;
 
         Job(int x, int y, int z, int distance, long jobGeneration) {
-            this(x, y, z, distance, jobGeneration, 0);
+            this(x, y, z, distance, jobGeneration, false);
         }
 
-        Job(int x, int y, int z, int distance, long jobGeneration, long version) {
+        Job(int x, int y, int z, int distance, long jobGeneration, boolean remesh) {
             this.x = x;
             this.y = y;
             this.z = z;
             this.distance = distance;
             this.jobGeneration = jobGeneration;
-            this.version = version;
+            this.remesh = remesh;
         }
 
         @Override
@@ -213,10 +242,18 @@ public final class SectionStreamer implements AutoCloseable {
 
         @Override
         public void run() {
+            long key = WorldRenderer.key(x, y, z);
+            ChunkMesh mesh = null;
+            long version = 0L;
             try {
+                if (remesh) {
+                    queuedRemesh.remove(key);
+                }
                 if (closed || jobGeneration != generation.get()) {
                     return;
                 }
+                // Read after leaving the queue: every change up to here is in the blocks this job meshes.
+                version = remesh ? versions.getOrDefault(key, 0L) : 0L;
                 long start = System.nanoTime();
                 char[] ids = buffers.get();
                 byte[] light = lightBuffers.get();
@@ -226,13 +263,14 @@ public final class SectionStreamer implements AutoCloseable {
                     biomes = biomeBuffers.get();
                     source.fillBiomes(x, z, biomes);
                 }
-                ChunkMesh mesh = meshers.get().mesh(x, y, z, ids, light, biomes, palette, ambientOcclusion, leaves);
+                mesh = meshers.get().mesh(x, y, z, ids, light, biomes, palette, ambientOcclusion, leaves);
                 meshNanos.addAndGet(System.nanoTime() - start);
                 meshed.incrementAndGet();
-                results.add(new Result(jobGeneration, version, mesh));
             } catch (RuntimeException failure) {
                 System.err.println("Section " + x + "," + y + "," + z + " failed: " + failure);
             } finally {
+                // Every job reports back, so the render thread can count it finished.
+                results.add(new Result(jobGeneration, version, key, mesh));
                 inFlight.decrementAndGet();
             }
         }

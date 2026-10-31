@@ -291,6 +291,16 @@ final class GameView implements MenuBackground {
         chestTracker.blockAction(x, y, z, action, value, block);
     }
 
+    /** A drawn frame's camera: its camera-relative view-projection (column-major) and the eye it is relative to. */
+    record Projection(float[] viewProjection, double eyeX, double eyeY, double eyeZ) {
+    }
+
+    /** Whether frames publish their {@link Projection} (a plugin projects world points); set by the client. */
+    volatile boolean publishProjection;
+
+    /** The last drawn frame's projection while {@link #publishProjection} is on, or null. */
+    volatile Projection projection;
+
     /** The server's time of day, for sun brightness. */
     void time(long timeOfDay) {
         worldTime = dayTime(timeOfDay);
@@ -516,6 +526,39 @@ final class GameView implements MenuBackground {
         return true;
     }
 
+    /**
+     * Whether the world is worth showing: the server has placed the player, and the chunk under them and its
+     * eight neighbours have arrived and are meshed from their latest blocks and on the GPU. Until then the client
+     * keeps the menu up and streams the world in behind it ({@link #preload}).
+     */
+    @Override
+    public boolean ready() {
+        ClientWorld current = session.world();
+        if (!play.spawned() || streamer == null || current != streamed) {
+            return false;
+        }
+        int chunkX = Math.floorDiv((int) Math.floor(player.x), 16);
+        int chunkZ = Math.floorDiv((int) Math.floor(player.z), 16);
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (!current.isLoaded(chunkX + dx, chunkZ + dz)) {
+                    return false;
+                }
+                for (int y = 0; y < ClientWorld.SECTIONS; y++) {
+                    if (!streamer.settled(chunkX + dx, y, chunkZ + dz)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Records the section uploads {@link #beforeFrame} reserved, on frames that do not draw the world. */
+    void preload(VulkanFrame frame) {
+        world.upload(frame);
+    }
+
     @Override
     public void beforeFrame(int width, int height) {
         if (needsOwnTarget && width > 0 && height > 0
@@ -655,6 +698,9 @@ final class GameView implements MenuBackground {
         }
         world.prepare(frame, sceneWidth, sceneHeight, eyeX, eyeY, eyeZ, forward,
                 (float) Math.toRadians(fov), reach + 96f, eyeTransform);
+        if (publishProjection) {
+            projection = new Projection(world.viewProjection().clone(), eyeX, eyeY, eyeZ);
+        }
         world.lightmap(lightmap);
         int hitArgb = values.get(ClientSettings.WORLD_HIT_COLOR);
         if (hitColor == null || hitColor.argb() != hitArgb) {

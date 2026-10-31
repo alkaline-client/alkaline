@@ -230,6 +230,13 @@ public final class ClientSettings {
     public static final Setting.KeySetting KEY_CLICK_GUI = BUILDER.add(Setting.key(
             "controls.miscellaneous.click_gui", "Controls", "Modules", "Opens modules, profiles and the HUD editor in game.",
             "key:Right Shift"));
+    // The music player's keys work everywhere but in text fields; the keyboard's media keys always do.
+    public static final Setting.KeySetting KEY_MUSIC_PLAY = BUILDER.add(Setting.key(
+            "controls.music.play_pause", "Controls", "Play or pause", "The keyboard's play key works as well.", "none"));
+    public static final Setting.KeySetting KEY_MUSIC_NEXT = BUILDER.add(Setting.key(
+            "controls.music.next", "Controls", "Next track", "", "none"));
+    public static final Setting.KeySetting KEY_MUSIC_PREVIOUS = BUILDER.add(Setting.key(
+            "controls.music.previous", "Controls", "Previous track", "", "none"));
 
     // Advanced
     public static final Setting.IntSetting PANORAMA_SAMPLES = BUILDER.add(Setting.integer(

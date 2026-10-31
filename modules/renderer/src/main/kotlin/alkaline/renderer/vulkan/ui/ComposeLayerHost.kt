@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineExceptionHandler
 
 /**
  * Runs a Compose UI in-game. A dedicated thread owns an offscreen [ImageComposeScene] (Skia CPU raster),
@@ -73,6 +74,8 @@ class ComposeLayerHost(
         const val CONTENT_GAP = 32
         const val MIN_RATE = 10
         const val MAX_RATE = 1000
+        const val MAX_RECOVERIES = 5
+        const val RECOVERY_WINDOW = 60_000_000_000L
     }
 
     private sealed interface Command {
@@ -131,6 +134,17 @@ class ComposeLayerHost(
 
     @Volatile private var running = true
     @Volatile private var failure: Throwable? = null
+
+    /**
+     * Called on the UI thread with an exception from composition, layout, drawing, input or an effect. True means
+     * the cause was dealt with (a plugin stopped) and the scene is rebuilt from the content; false fails the UI as
+     * before. State kept outside the composition survives a rebuild; `remember`ed state does not.
+     */
+    @Volatile var recover: (Throwable) -> Boolean = { false }
+
+    /** An effect's exception, caught by the scene's coroutine context; handled by the loop like a thrown one. */
+    private var effectFailure: Throwable? = null
+    private val recoveries = ArrayDeque<Long>()
 
     /** Called on the UI thread when a primary press lands on an enabled control (vanilla's button click sound). */
     @Volatile var onControlPressed: () -> Unit = {}
@@ -247,29 +261,13 @@ class ComposeLayerHost(
     private fun runLoop() {
         try {
             createScene()
-            var lastRender = 0L
             while (running) {
-                val minFrameNanos = 1_000_000_000L / maxFramesPerSecond
-                val animating = scene!!.hasInvalidations()
-                val waitNanos = if (animating || dirty) {
-                    (lastRender + minFrameNanos - System.nanoTime()).coerceAtLeast(0L)
-                } else {
-                    100_000_000L
-                }
-                var command = if (waitNanos > 0) commands.poll(waitNanos, TimeUnit.NANOSECONDS) else commands.poll()
-                while (command != null) {
-                    apply(command)
-                    command = commands.poll()
-                }
-                while (true) {
-                    val task = composeTasks.poll() ?: break
-                    task.run()
-                }
-                Snapshot.sendApplyNotifications()
-                val now = System.nanoTime()
-                if ((dirty || scene!!.hasInvalidations()) && now - lastRender >= minFrameNanos) {
-                    render(now)
-                    lastRender = now
+                try {
+                    iterate()
+                } catch (interrupted: InterruptedException) {
+                    throw interrupted
+                } catch (throwable: Throwable) {
+                    if (!survive(throwable)) throw throwable
                 }
             }
         } catch (interrupted: InterruptedException) {
@@ -277,9 +275,62 @@ class ComposeLayerHost(
         } catch (throwable: Throwable) {
             failure = throwable
         } finally {
-            scene?.close()
+            try {
+                scene?.close()
+            } catch (ignored: RuntimeException) {
+                // A broken scene may fail to close; it is dropped either way.
+            }
             scene = null
         }
+    }
+
+    private var lastRender = 0L
+
+    /** Rebuilds the scene after [throwable] when [recover] dealt with it, at most a few times a minute. */
+    private fun survive(throwable: Throwable): Boolean {
+        if (throwable is VirtualMachineError && throwable !is StackOverflowError) return false
+        val now = System.nanoTime()
+        while (recoveries.isNotEmpty() && now - recoveries.first() > RECOVERY_WINDOW) recoveries.removeFirst()
+        if (recoveries.size >= MAX_RECOVERIES) return false
+        val dealt = try {
+            recover(throwable)
+        } catch (failure: Throwable) {
+            throwable.addSuppressed(failure)
+            false
+        }
+        if (!dealt) return false
+        System.err.println("Rebuilding the interface after: $throwable")
+        recoveries.addLast(now)
+        effectFailure = null
+        createScene()
+        return true
+    }
+
+    /** One pass of the loop: input and tasks, then a frame when one is due. */
+    private fun iterate() {
+        val minFrameNanos = 1_000_000_000L / maxFramesPerSecond
+        val animating = scene!!.hasInvalidations()
+        val waitNanos = if (animating || dirty) {
+            (lastRender + minFrameNanos - System.nanoTime()).coerceAtLeast(0L)
+        } else {
+            100_000_000L
+        }
+        var command = if (waitNanos > 0) commands.poll(waitNanos, TimeUnit.NANOSECONDS) else commands.poll()
+        while (command != null) {
+            apply(command)
+            command = commands.poll()
+        }
+        while (true) {
+            val task = composeTasks.poll() ?: break
+            task.run()
+        }
+        Snapshot.sendApplyNotifications()
+        val now = System.nanoTime()
+        if ((dirty || scene!!.hasInvalidations()) && now - lastRender >= minFrameNanos) {
+            render(now)
+            lastRender = now
+        }
+        effectFailure?.let { throw it }
     }
 
     /**
@@ -389,14 +440,19 @@ class ComposeLayerHost(
         lastPixels?.let(MemoryUtil::memFree)
         lastPixels = null
         filledRows = null
-        scene?.close()
+        try {
+            scene?.close()
+        } catch (ignored: RuntimeException) {
+            // A scene that failed may not close cleanly; it is replaced either way.
+        }
         generation++
         generationSnapshot = generation
         while (true) {
             val stale = free.poll() ?: break
             MemoryUtil.memFree(stale.pixels)
         }
-        scene = ImageComposeScene(sceneWidth, sceneHeight, Density(sceneDensity), uiDispatcher) {
+        val effects = CoroutineExceptionHandler { _, thrown -> if (effectFailure == null) effectFailure = thrown }
+        scene = ImageComposeScene(sceneWidth, sceneHeight, Density(sceneDensity), uiDispatcher + effects) {
             CompositionLocalProvider(LocalGlassRegistry provides glassRegistry) {
                 content()
             }

@@ -206,4 +206,77 @@ object AlkalineIcons {
         moveTo(9f, 18f); arcTo(3f, 3f, 0f, true, true, 3f, 18f); arcTo(3f, 3f, 0f, true, true, 9f, 18f)
         moveTo(20f, 16f); arcTo(3f, 3f, 0f, true, true, 14f, 16f); arcTo(3f, 3f, 0f, true, true, 20f, 16f)
     }
+
+    // ---- the music player ----
+
+    val Pause: ImageVector = icon("Pause", false) {
+        moveTo(7f, 5f); lineTo(10.5f, 5f); lineTo(10.5f, 19f); lineTo(7f, 19f); close()
+        moveTo(13.5f, 5f); lineTo(17f, 5f); lineTo(17f, 19f); lineTo(13.5f, 19f); close()
+    }
+
+    val Next: ImageVector = icon("Next", false) {
+        moveTo(5f, 5.5f); lineTo(15f, 12f); lineTo(5f, 18.5f); close()
+        moveTo(16f, 5.5f); lineTo(19f, 5.5f); lineTo(19f, 18.5f); lineTo(16f, 18.5f); close()
+    }
+
+    val Previous: ImageVector = icon("Previous", false) {
+        moveTo(19f, 5.5f); lineTo(9f, 12f); lineTo(19f, 18.5f); close()
+        moveTo(5f, 5.5f); lineTo(8f, 5.5f); lineTo(8f, 18.5f); lineTo(5f, 18.5f); close()
+    }
+
+    val Shuffle: ImageVector = icon("Shuffle", true) {
+        moveTo(3f, 7f); lineTo(7f, 7f); curveTo(12f, 7f, 12f, 17f, 17f, 17f); lineTo(21f, 17f)
+        moveTo(3f, 17f); lineTo(7f, 17f); curveTo(9.2f, 17f, 10.3f, 15f, 11.2f, 13f)
+        moveTo(12.8f, 11f); curveTo(13.7f, 9f, 14.8f, 7f, 17f, 7f); lineTo(21f, 7f)
+        moveTo(18f, 4f); lineTo(21f, 7f); lineTo(18f, 10f)
+        moveTo(18f, 14f); lineTo(21f, 17f); lineTo(18f, 20f)
+    }
+
+    val Repeat: ImageVector = icon("Repeat", true) {
+        moveTo(4f, 11f); lineTo(4f, 9f); arcTo(2f, 2f, 0f, false, true, 6f, 7f); lineTo(20f, 7f)
+        moveTo(17f, 4f); lineTo(20f, 7f); lineTo(17f, 10f)
+        moveTo(20f, 13f); lineTo(20f, 15f); arcTo(2f, 2f, 0f, false, true, 18f, 17f); lineTo(4f, 17f)
+        moveTo(7f, 20f); lineTo(4f, 17f); lineTo(7f, 14f)
+    }
+
+    val RepeatOne: ImageVector = icon("RepeatOne", true) {
+        moveTo(4f, 11f); lineTo(4f, 9f); arcTo(2f, 2f, 0f, false, true, 6f, 7f); lineTo(20f, 7f)
+        moveTo(17f, 4f); lineTo(20f, 7f); lineTo(17f, 10f)
+        moveTo(20f, 13f); lineTo(20f, 15f); arcTo(2f, 2f, 0f, false, true, 18f, 17f); lineTo(4f, 17f)
+        moveTo(7f, 20f); lineTo(4f, 17f); lineTo(7f, 14f)
+        moveTo(11f, 11f); lineTo(12.5f, 10f); lineTo(12.5f, 14.5f)
+    }
+
+    val Volume: ImageVector = icon("Volume", true) {
+        moveTo(4f, 9.5f); lineTo(7.5f, 9.5f); lineTo(12f, 5.5f); lineTo(12f, 18.5f); lineTo(7.5f, 14.5f); lineTo(4f, 14.5f); close()
+        moveTo(15.5f, 9f); curveTo(17f, 10.5f, 17f, 13.5f, 15.5f, 15f)
+        moveTo(18f, 6.5f); curveTo(21f, 9.5f, 21f, 14.5f, 18f, 17.5f)
+    }
+
+    val Muted: ImageVector = icon("Muted", true) {
+        moveTo(4f, 9.5f); lineTo(7.5f, 9.5f); lineTo(12f, 5.5f); lineTo(12f, 18.5f); lineTo(7.5f, 14.5f); lineTo(4f, 14.5f); close()
+        moveTo(16f, 9.5f); lineTo(21f, 14.5f)
+        moveTo(21f, 9.5f); lineTo(16f, 14.5f)
+    }
+
+    val Queue: ImageVector = icon("Queue", true) {
+        moveTo(4f, 6f); lineTo(16f, 6f)
+        moveTo(4f, 11f); lineTo(16f, 11f)
+        moveTo(4f, 16f); lineTo(11f, 16f)
+        moveTo(15f, 14f); lineTo(15f, 20f); lineTo(20f, 17f); close()
+    }
+
+    val More: ImageVector = icon("More", false) {
+        moveTo(12f, 5f); arcTo(1.75f, 1.75f, 0f, true, true, 12f, 8.5f); arcTo(1.75f, 1.75f, 0f, true, true, 12f, 5f)
+        moveTo(12f, 10.25f); arcTo(1.75f, 1.75f, 0f, true, true, 12f, 13.75f); arcTo(1.75f, 1.75f, 0f, true, true, 12f, 10.25f)
+        moveTo(12f, 15.5f); arcTo(1.75f, 1.75f, 0f, true, true, 12f, 19f); arcTo(1.75f, 1.75f, 0f, true, true, 12f, 15.5f)
+    }
+
+    val Link: ImageVector = icon("Link", true) {
+        moveTo(10f, 14f); arcTo(4f, 4f, 0f, false, false, 15.66f, 14f); lineTo(18.5f, 11.17f)
+        arcTo(4f, 4f, 0f, false, false, 12.83f, 5.5f); lineTo(11.5f, 6.83f)
+        moveTo(14f, 10f); arcTo(4f, 4f, 0f, false, false, 8.34f, 10f); lineTo(5.5f, 12.83f)
+        arcTo(4f, 4f, 0f, false, false, 11.17f, 18.5f); lineTo(12.5f, 17.17f)
+    }
 }
+

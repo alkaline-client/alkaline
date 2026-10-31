@@ -132,6 +132,8 @@ public final class WorldRenderer implements AutoCloseable {
     private final Map<Long, GpuSection> sections = new HashMap<>();
     private final ArrayDeque<PendingUpload> uploads = new ArrayDeque<>();
     private final ArrayDeque<ChunkMesh> waiting = new ArrayDeque<>();
+    /** Meshes submitted per section and not yet installed, so a caller can tell when a section is current. */
+    private final java.util.HashMap<Long, Integer> unplaced = new java.util.HashMap<>();
     private final ByteBuffer scene = MemoryUtil.memCalloc(PUSH_BYTES).order(ByteOrder.nativeOrder());
     private final float[] projection = new float[16];
     private final float[] view = new float[16];
@@ -255,6 +257,8 @@ public final class WorldRenderer implements AutoCloseable {
         GeometryPool.Allocation allocation;
         GeometryPool.Allocation indices;
         short[] translucentCells = new short[0];
+        /** Whether a mesh (possibly empty) has been installed since the section was requested. */
+        boolean meshed;
         /** Until meshed, a section is assumed to see through; its neighbors stay reachable. */
         long visibility = ChunkMesh.ALL_CONNECTED;
         int sortedKey = -1;
@@ -673,6 +677,19 @@ public final class WorldRenderer implements AutoCloseable {
     /** Queues a mesh to replace its section; geometry becomes visible after the upload is recorded. */
     public void submit(ChunkMesh mesh) {
         waiting.add(Objects.requireNonNull(mesh, "mesh"));
+        unplaced.merge(key(mesh.sectionX(), mesh.sectionY(), mesh.sectionZ()), 1, Integer::sum);
+    }
+
+    /** Whether the section has a mesh on the GPU and none newer waiting to replace it. Render thread. */
+    public boolean settled(int x, int y, int z) {
+        long key = key(x, y, z);
+        GpuSection section = sections.get(key);
+        return section != null && section.meshed && !unplaced.containsKey(key);
+    }
+
+    private void placed(ChunkMesh mesh) {
+        unplaced.computeIfPresent(key(mesh.sectionX(), mesh.sectionY(), mesh.sectionZ()),
+                (ignored, count) -> count > 1 ? count - 1 : null);
     }
 
     /** Drops a section and frees its geometry once no frame can read it. */
@@ -738,11 +755,20 @@ public final class WorldRenderer implements AutoCloseable {
             GeometryPool.Allocation allocation = pool.allocate(mesh.quadCount());
             if (allocation == null) {
                 System.err.println("Section mesh exceeds a geometry page; skipped.");
+                placed(mesh);
                 continue;
             }
             uploads.add(new PendingUpload(mesh, allocation));
             budget -= bytes;
         }
+    }
+
+    /**
+     * Records the uploads {@link #prepareUploads} reserved without drawing, for a world that streams in while it
+     * is not on screen yet. Call inside a frame, before its first pass.
+     */
+    public void upload(VulkanFrame frame) {
+        recordUploads(frame);
     }
 
     /** Copies reserved meshes through the stream region; part of {@link #prepare}. */
@@ -764,6 +790,7 @@ public final class WorldRenderer implements AutoCloseable {
     }
 
     private void install(ChunkMesh mesh, GeometryPool.Allocation allocation) {
+        placed(mesh);
         long key = key(mesh.sectionX(), mesh.sectionY(), mesh.sectionZ());
         GpuSection section = sections.get(key);
         if (section == null) {
@@ -781,6 +808,7 @@ public final class WorldRenderer implements AutoCloseable {
             section.indices = null;
         }
         section.allocation = allocation;
+        section.meshed = true;
         section.visibility = mesh.visibility();
         gridVersion++;
         int slot = slot(section.x, section.y, section.z);

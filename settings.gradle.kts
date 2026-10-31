@@ -23,9 +23,12 @@ include(
     ":modules:renderer",
     ":modules:game",
     ":modules:ui",
+    ":modules:plugin-api",
     ":apps:diagnostics",
     ":apps:game-client",
     ":apps:screen-space-check",
     ":apps:hud-preview",
+    ":apps:example-plugin",
     ":modules:audio",
+    ":modules:music",
 )

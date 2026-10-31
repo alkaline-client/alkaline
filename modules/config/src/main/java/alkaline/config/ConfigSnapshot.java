@@ -72,6 +72,10 @@ public final class ConfigSnapshot {
         return (String) references[slot(setting)];
     }
 
+    public String get(Setting.OptionSetting setting) {
+        return (String) references[slot(setting)];
+    }
+
     /** Boxed generic read for settings UIs; render code should use the typed overloads. */
     public <T> T value(Setting<T> setting) {
         int slot = slot(setting);

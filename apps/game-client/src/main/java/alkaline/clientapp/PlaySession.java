@@ -163,6 +163,11 @@ public final class PlaySession implements AutoCloseable {
         return session;
     }
 
+    /** Whether the server has placed the player (its first position and look). */
+    boolean spawned() {
+        return spawned;
+    }
+
     LocalPlayer player() {
         return player;
     }
@@ -290,6 +295,11 @@ public final class PlaySession implements AutoCloseable {
     /** The blocks being dug, for the renderer's crack stages. */
     BlockDamage damage() {
         return damage;
+    }
+
+    /** The game view drawing this session, once it exists. */
+    GameView view() {
+        return view;
     }
 
     void view(GameView view) {
@@ -584,6 +594,71 @@ public final class PlaySession implements AutoCloseable {
     }
 
     private Consumer<java.util.List<String>> tabCompleted = matches -> { };
+    private java.util.function.UnaryOperator<String> chatFilter = text -> text;
+    private java.util.function.BiConsumer<String, byte[]> pluginMessage = (channel, data) -> { };
+    private java.util.function.UnaryOperator<LocalPlayer.Input> movementFilter = input -> input;
+    private long worldAge;
+    private long timeOfDay;
+
+    /**
+     * Each chat message (not the action bar), § formatted, before it is shown: the filter returns the text to show,
+     * or null to leave it out.
+     */
+    void onChat(java.util.function.UnaryOperator<String> filter) {
+        chatFilter = filter;
+    }
+
+    /** Plugin messages (Custom Payload) on channels the session does not decode itself. */
+    void onPluginMessage(java.util.function.BiConsumer<String, byte[]> action) {
+        pluginMessage = action;
+    }
+
+    /** Changes each tick's movement input before the player moves (plugins steering). */
+    void movementFilter(java.util.function.UnaryOperator<LocalPlayer.Input> filter) {
+        movementFilter = filter;
+    }
+
+    /** A line in the player's own chat that the server did not send (§ formatted). */
+    void showChat(String text) {
+        addChatLine(text, java.util.List.of());
+    }
+
+    private void addChatLine(String text, java.util.List<ChatText.Action> actions) {
+        chatLines.addFirst(new ChatLine(text, actions, ticks, chatVersion));
+        while (chatLines.size() > CHAT_HISTORY) {
+            chatLines.removeLast();
+        }
+        chatVersion++;
+    }
+
+    /** Time Update's world age and time of day (negative when the daylight cycle is off). */
+    long worldAge() {
+        return worldAge;
+    }
+
+    long timeOfDay() {
+        return timeOfDay;
+    }
+
+    float thunder() {
+        return thunder;
+    }
+
+    /** A chat component as § formatted text. */
+    String formatted(String json) {
+        return chat.legacy(json);
+    }
+
+    /** The block under the crosshair within reach, or null. */
+    BlockTarget crosshair() {
+        return crosshairBlock();
+    }
+
+    /** Turns the player to a yaw and pitch (plugins). */
+    void turnTo(float yaw, float pitch) {
+        player.yaw = yaw;
+        player.pitch = Math.max(-90.0F, Math.min(90.0F, pitch));
+    }
 
     void onTabComplete(Consumer<java.util.List<String>> action) {
         tabCompleted = action;
@@ -894,7 +969,7 @@ public final class PlaySession implements AutoCloseable {
         }
         player.jumpDelay = settings.get(ClientSettings.JUMP_DELAY);
         applyEffects();
-        LocalPlayer.Input input = controls ? input(settings, keys, buttons) : LocalPlayer.Input.NONE;
+        LocalPlayer.Input input = movementFilter.apply(controls ? input(settings, keys, buttons) : LocalPlayer.Input.NONE);
         Entity ridden = vehicle >= 0 ? entities.get(vehicle) : null;
         if (ridden != null) {
             // Entity.updateRidden: seated on the vehicle; EntityPlayerSP.onUpdate steers instead of walking.
@@ -1008,6 +1083,8 @@ public final class PlaySession implements AutoCloseable {
                 player.walkSpeed = abilities.walkSpeed();
             }
             case ServerSession.Time time -> {
+                worldAge = time.worldAge();
+                timeOfDay = time.timeOfDay();
                 if (view != null) {
                     view.time(time.timeOfDay());
                 }
@@ -1050,12 +1127,12 @@ public final class PlaySession implements AutoCloseable {
                 } else {
                     ChatText.Rich rich = chat.rich(message.json());
                     String text = rich.text();
-                    chatLines.addFirst(new ChatLine(text, rich.actions(), ticks, chatVersion));
-                    while (chatLines.size() > CHAT_HISTORY) {
-                        chatLines.removeLast();
+                    String shown = chatFilter.apply(text);
+                    if (shown != null) {
+                        // A replaced line's click and hover actions belonged to the original text.
+                        addChatLine(shown, shown.equals(text) ? rich.actions() : java.util.List.of());
                     }
-                    chatVersion++;
-                    System.out.println("[chat] " + text.replaceAll("§.", ""));
+                    System.out.println((shown == null ? "[chat hidden] " : "[chat] ") + text.replaceAll("§.", ""));
                 }
             }
             case ServerSession.TabComplete completion -> tabCompleted.accept(completion.matches());
@@ -1205,6 +1282,7 @@ public final class PlaySession implements AutoCloseable {
                 }
             }
             case ServerSession.Disconnected gone -> disconnected.accept(gone.reason());
+            case ServerSession.PluginMessage message -> pluginMessage.accept(message.channel(), message.data());
             default -> {
             }
         }

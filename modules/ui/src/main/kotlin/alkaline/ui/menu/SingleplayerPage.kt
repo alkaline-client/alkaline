@@ -63,7 +63,7 @@ internal fun SingleplayerPage(controller: MenuController) {
     var selectedId by remember { mutableStateOf<String?>(null) }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight()) {
+        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight(), morph = MenuPage.SINGLEPLAYER) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BackHeader(controller, "Singleplayer")
                 Spacer(Modifier.weight(1f))

@@ -113,7 +113,7 @@ internal fun MultiplayerPage(controller: MenuController) {
     }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Panel(Modifier.widthIn(max = 920.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight()) {
+        Panel(Modifier.widthIn(max = 920.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight(), morph = MenuPage.MULTIPLAYER) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BackHeader(controller, "Multiplayer")
                 Spacer(Modifier.weight(1f))

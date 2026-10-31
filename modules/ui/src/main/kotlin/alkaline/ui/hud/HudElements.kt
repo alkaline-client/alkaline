@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -22,6 +23,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -88,7 +92,9 @@ private fun ModuleElement(module: Module, frame: HudFrame, options: ConfigSnapsh
         Modules.CLOCK -> Chip(LocalTime.now().format(DateTimeFormatter.ofPattern(
             if (options.get(Modules.CLOCK_24_HOUR)) "HH:mm" else "h:mm a", Locale.ROOT)))
         Modules.SERVER -> Chip(frame.server.ifEmpty { if (preview) "play.example.net" else "Singleplayer" })
+        Modules.MUSIC -> NowPlaying(options, preview)
         Modules.POTIONS -> Potions(frame, preview)
+        Modules.NOTIFICATIONS -> NotificationsElement(options, preview)
         Modules.SCOREBOARD -> Scoreboard(frame, options, preview)
         Modules.CHAT -> Chat(frame, options, preview)
         Modules.STATUS -> Status(frame, preview)
@@ -98,6 +104,92 @@ private fun ModuleElement(module: Module, frame: HudFrame, options: ConfigSnapsh
             if (options.get(Modules.TOGGLE_SPRINT_READOUT) && status.isNotEmpty()) Chip(status)
         }
         else -> {}
+    }
+}
+
+/**
+ * The notification stack, growing away from its anchor: anchored low, the newest card is at the bottom; anchored
+ * right, cards slide in from the right. The editor shows one sample card so the element can be placed.
+ */
+@Composable
+private fun NotificationsElement(options: ConfigSnapshot, preview: Boolean) {
+    val anchor = options.get(Modules.NOTIFICATIONS.placement().anchor())
+    val alignment = when (anchor.column()) {
+        0 -> Alignment.Start
+        1 -> Alignment.CenterHorizontally
+        else -> Alignment.End
+    }
+    val blur = LocalHudBlur.current
+    if (preview) {
+        NotificationCard(remember { Notification("Resource packs applied", "Xe Lite", Notification.Kind.SUCCESS) },
+            blur, hud = true)
+        return
+    }
+    val notifications = LocalNotifications.current ?: return
+    NotificationStack(notifications, options.get(Modules.NOTIFICATIONS_SECONDS), anchor.row() > 0, alignment,
+        blur, hud = true)
+}
+
+/** The music player, for the Now playing element; null where there is none. */
+val LocalMusic = staticCompositionLocalOf<alkaline.ui.music.MusicController?> { null }
+
+/**
+ * What the music player plays: its cover (an option), title and artist, and a thin bar of its progress. Hidden
+ * while nothing plays; the editor shows a sample to place.
+ */
+@Composable
+private fun NowPlaying(options: ConfigSnapshot, preview: Boolean) {
+    val music = LocalMusic.current
+    val state = music?.state
+    val track = state?.track?.takeIf { state.status != alkaline.music.MusicPlayer.Status.STOPPED }
+    if (track == null && !preview) return
+    val title = track?.title ?: "Song title"
+    val byline = state?.liveTitle ?: track?.byline ?: "Artist"
+    var progress by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(0.4f) }
+    if (music != null && track != null) {
+        androidx.compose.runtime.LaunchedEffect(music, track.location) {
+            while (true) {
+                val duration = track.durationMillis
+                progress = if (duration != null && duration > 0) (music.player.positionMillis().toFloat() / duration).coerceIn(0f, 1f) else 1f
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+    }
+    val cover = state?.cover
+    val bitmap = androidx.compose.runtime.remember(cover) {
+        cover?.let { runCatching { org.jetbrains.skia.Image.makeFromEncoded(it).toComposeImageBitmap() }.getOrNull() }
+    }
+    Surface(
+        shape = ChipShape,
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.62f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.hudGlass(10.dp).widthIn(max = 260.dp),
+    ) {
+        Column {
+            Row(Modifier.padding(start = 6.dp, end = 12.dp, top = 6.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (options.get(Modules.MUSIC_COVER)) {
+                    if (bitmap != null) {
+                        androidx.compose.foundation.Image(bitmap, null, Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                    } else {
+                        Box(Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center) {
+                            androidx.compose.material3.Icon(alkaline.ui.theme.AlkalineIcons.Music, null, Modifier.size(16.dp))
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
+                Column {
+                    Text(title, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(byline, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Box(Modifier.padding(horizontal = 10.dp).padding(bottom = 5.dp).fillMaxWidth().height(2.dp)
+                .clip(RoundedCornerShape(1.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f))) {
+                Box(Modifier.fillMaxWidth(progress).height(2.dp).background(MaterialTheme.colorScheme.primary))
+            }
+        }
     }
 }
 

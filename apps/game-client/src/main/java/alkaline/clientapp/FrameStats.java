@@ -61,8 +61,14 @@ final class FrameStats {
         }
     }
 
+    /** Diagnostics: {@code -Dalkaline.stats.hitchMillis=20} logs every frame interval longer than that, with its time. */
+    private static final long HITCH_NANOS = Long.getLong("alkaline.stats.hitchMillis", 0L) * 1_000_000L;
+
     void framePresented() {
         long now = System.nanoTime();
+        if (HITCH_NANOS > 0 && previousFrame != 0 && now - previousFrame > HITCH_NANOS) {
+            System.out.printf("Hitch: %.1f ms frame at %d ms%n", (now - previousFrame) / 1e6, (now - startNanos) / 1_000_000L);
+        }
         if (now - startNanos < WARMUP_NANOS) {
             previousFrame = now;
             return;

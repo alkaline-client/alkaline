@@ -65,6 +65,53 @@ final class VulkanUploader {
         this.hostImageCopy = hostImageCopy;
     }
 
+    /** The command buffer collecting a batch's copies, and its staging buffers; null outside a batch. */
+    private VkCommandBuffer batch;
+    private final java.util.List<VulkanBuffer> batchStaging = new java.util.ArrayList<>();
+
+    /**
+     * Starts collecting staging copies into one command buffer: {@link #endBatch} submits them once and waits
+     * once, instead of draining the queue for every upload.
+     */
+    void beginBatch() {
+        if (batch != null) {
+            throw new IllegalStateException("An upload batch is already open.");
+        }
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            batch = beginOneTime(stack);
+        }
+    }
+
+    /** Submits the batch and waits for it ({@code submit}), or discards it after a failure; frees its staging. */
+    void endBatch(boolean submit) {
+        VkCommandBuffer command = batch;
+        if (command == null) {
+            return;
+        }
+        batch = null;
+        try {
+            requireSuccess(vkEndCommandBuffer(command), "vkEndCommandBuffer staging");
+            if (submit) {
+                submitAndWait(command);
+            }
+        } finally {
+            free(command);
+            for (VulkanBuffer staging : batchStaging) {
+                staging.close();
+            }
+            batchStaging.clear();
+        }
+    }
+
+    /** Frees a staging buffer now, or at the end of the batch whose copy still reads it. */
+    private void release(VulkanBuffer staging) {
+        if (batch != null) {
+            batchStaging.add(staging);
+        } else {
+            staging.close();
+        }
+    }
+
     /**
      * Whether static textures are written from the CPU (Vulkan 1.4 host image copy): their images need
      * VK_IMAGE_USAGE_HOST_TRANSFER_BIT and go through {@link #uploadImageFromHost}.
@@ -141,7 +188,7 @@ final class VulkanUploader {
                 }
             });
         } finally {
-            staging.close();
+            release(staging);
         }
     }
 
@@ -167,7 +214,7 @@ final class VulkanUploader {
             submitOneTime(command -> recordImageUpload(command, staging.nativeHandle(), destinationImage, width, height, layers,
                     mipLevels));
         } finally {
-            staging.close();
+            release(staging);
         }
     }
 
@@ -215,37 +262,60 @@ final class VulkanUploader {
     }
 
     private void submitOneTime(CommandRecorder recorder) {
+        if (batch != null) {
+            recorder.record(batch);
+            return;
+        }
         VkCommandBuffer command = null;
         try {
             try (MemoryStack stack = MemoryStack.stackPush()) {
-                VkCommandBufferAllocateInfo allocate = VkCommandBufferAllocateInfo.calloc(stack)
-                        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
-                        .commandPool(commandPool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(1);
-                PointerBuffer address = stack.mallocPointer(1);
-                requireSuccess(vkAllocateCommandBuffers(device, allocate, address), "vkAllocateCommandBuffers staging");
-                command = new VkCommandBuffer(address.get(0), device);
-                VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
-                        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
-                        .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-                requireSuccess(vkBeginCommandBuffer(command, begin), "vkBeginCommandBuffer staging");
+                command = beginOneTime(stack);
                 recorder.record(command);
                 requireSuccess(vkEndCommandBuffer(command), "vkEndCommandBuffer staging");
-                VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
-                        .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO)
-                        .pCommandBuffers(stack.pointers(command.address()));
-                requireSuccess(vkQueueSubmit(graphicsQueue, submit, 0L), "vkQueueSubmit staging");
-                requireSuccess(vkQueueWaitIdle(graphicsQueue), "vkQueueWaitIdle staging");
+                submitAndWait(command);
             }
         } finally {
             if (command != null) {
-                PointerBuffer commandAddress = memAllocPointer(1);
-                try {
-                    commandAddress.put(0, command.address());
-                    vkFreeCommandBuffers(device, commandPool, commandAddress);
-                } finally {
-                    memFree(commandAddress);
-                }
+                free(command);
             }
+        }
+    }
+
+    private VkCommandBuffer beginOneTime(MemoryStack stack) {
+        VkCommandBufferAllocateInfo allocate = VkCommandBufferAllocateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+                .commandPool(commandPool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(1);
+        PointerBuffer address = stack.mallocPointer(1);
+        requireSuccess(vkAllocateCommandBuffers(device, allocate, address), "vkAllocateCommandBuffers staging");
+        VkCommandBuffer command = new VkCommandBuffer(address.get(0), device);
+        VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+                .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        int began = vkBeginCommandBuffer(command, begin);
+        if (began != VK_SUCCESS) {
+            free(command);
+            requireSuccess(began, "vkBeginCommandBuffer staging");
+        }
+        return command;
+    }
+
+    private void submitAndWait(VkCommandBuffer command) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO)
+                    .pCommandBuffers(stack.pointers(command.address()));
+            requireSuccess(vkQueueSubmit(graphicsQueue, submit, 0L), "vkQueueSubmit staging");
+            requireSuccess(vkQueueWaitIdle(graphicsQueue), "vkQueueWaitIdle staging");
+        }
+    }
+
+    private void free(VkCommandBuffer command) {
+        PointerBuffer commandAddress = memAllocPointer(1);
+        try {
+            commandAddress.put(0, command.address());
+            vkFreeCommandBuffers(device, commandPool, commandAddress);
+        } finally {
+            memFree(commandAddress);
         }
     }
 

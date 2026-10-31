@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ButtonShapes
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -33,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
@@ -68,7 +71,11 @@ internal fun hoverColors(hovered: Boolean, selected: Boolean = false): Pair<Stat
         animateColorAsState(content, tween(140), label = "hover-content")
 }
 
-/** Tonal button over frosted glass that highlights while hovered. */
+/**
+ * Tonal button over frosted glass that highlights while hovered. With a [morph] page it is where that page's
+ * panel grows from and shrinks back into (see [MorphState]): its pill is a rounded rectangle with the same corners
+ * and no pressed-shape animation, and while the morph container flies it gives way to it, then fades its label in.
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun HoverAction(
@@ -76,24 +83,36 @@ internal fun HoverAction(
     label: String,
     height: Dp,
     modifier: Modifier = Modifier.fillMaxWidth(),
+    morph: MenuPage? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val (container, content) = hoverColors(hovered)
+    val state = if (morph != null) LocalMorph.current else null
+    val flying = morph != null && state?.flying(morph) == true
     FilledTonalButton(
         onClick = onClick,
-        shapes = ButtonDefaults.shapesFor(height),
+        shapes = if (morph == null) ButtonDefaults.shapesFor(height)
+            else RoundedCornerShape(height / 2).let { ButtonShapes(it, it) },
         contentPadding = ButtonDefaults.contentPaddingFor(height),
         interactionSource = interaction,
         colors = ButtonDefaults.filledTonalButtonColors(containerColor = container.value, contentColor = content.value),
-        modifier = modifier.height(height).glass(height / 2),
+        modifier = (if (morph == null || state == null) modifier else modifier.morphSource(state, morph, container.value)
+            // While the container flies the whole button gives way, its state layer included.
+            .graphicsLayer { alpha = if (state.flying(morph)) 0f else 1f })
+            .height(height).glass(height / 2, enabled = !flying),
     ) {
-        if (icon != null) {
-            Icon(icon, null, Modifier.size(ButtonDefaults.iconSizeFor(height)))
-            Spacer(Modifier.width(ButtonDefaults.iconSpacingFor(height)))
+        Row(
+            if (morph == null) Modifier else Modifier.morphContent(state, morph),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (icon != null) {
+                Icon(icon, null, Modifier.size(ButtonDefaults.iconSizeFor(height)))
+                Spacer(Modifier.width(ButtonDefaults.iconSpacingFor(height)))
+            }
+            Text(label, style = ButtonDefaults.textStyleFor(height))
         }
-        Text(label, style = ButtonDefaults.textStyleFor(height))
     }
 }
 

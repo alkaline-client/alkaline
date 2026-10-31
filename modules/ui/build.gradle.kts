@@ -14,6 +14,8 @@ kotlin {
 dependencies {
     api(project(":modules:renderer"))
     api(project(":modules:client"))
+    api(project(":modules:plugin-api"))
+    api(project(":modules:music"))
     implementation(libs.material.color.utilities)
 
     testImplementation(platform(libs.junit.bom))

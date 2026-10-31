@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "click-guard",
+  "name": "Click Guard",
+  "version": "1.1.0",
+  "entrypoint": "alkaline.example.clickguard.ClickGuard",
+  "api": 1,
+  "minecraft": "1.8.9",
+  "description": "Counts your attack clicks and drops presses that come too soon after the last one, as a worn switch's double click does.",
+  "authors": [{ "name": "Alkaline" }],
+  "icon": "click-guard/icon.png",
+  "settings": [
+    {
+      "id": "drop",
+      "type": "boolean",
+      "title": "Drop double clicks",
+      "description": "Off, presses are only counted.",
+      "default": true
+    },
+    {
+      "id": "gap",
+      "type": "integer",
+      "title": "Minimum gap",
+      "description": "A press this many milliseconds or less after the previous one is dropped.",
+      "default": 40,
+      "min": 0,
+      "max": 120
+    },
+    {
+      "id": "reset_key",
+      "type": "key",
+      "title": "Reset the counter",
+      "default": "none"
+    }
+  ],
+  "hud": [
+    {
+      "id": "counter",
+      "title": "Click counter",
+      "description": "Clicks counted, and those dropped.",
+      "anchor": "top_right",
+      "x": -6,
+      "y": 118
+    }
+  ]
+}

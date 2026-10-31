@@ -49,10 +49,19 @@ public final class MenuCompositor implements AutoCloseable {
     private final VulkanPipeline up;
     private final VulkanPipeline glass;
     private final VulkanPipeline ui;
+    private final VulkanPipeline fade;
     private final ByteBuffer push = MemoryUtil.memCalloc(PipelineSpec.MAX_PUSH_CONSTANT_BYTES);
     private final VulkanRenderTarget[] downTargets = new VulkanRenderTarget[DOWN_LEVELS];
     private final VulkanRenderTarget[] upTargets = new VulkanRenderTarget[UP_LEVELS];
     private VulkanRenderTarget scene;
+    /** What the backdrop and blur sample this frame: the scene, or {@link #mix} during a hand-off. */
+    private VulkanRenderTarget backdrop;
+    /** The background being handed off, its own target, the cross-fade of both scenes, and the timing. */
+    private MenuBackground outgoing;
+    private VulkanRenderTarget held;
+    private VulkanRenderTarget mix;
+    private long handOffNanos;
+    private long handOffStart;
     /** Rows of the uploaded Compose layer with content ({@code start, end} pairs), or null for all of them. */
     private int[] uiContent;
     private VulkanDynamicTexture uiTexture;
@@ -95,6 +104,42 @@ public final class MenuCompositor implements AutoCloseable {
                 .blend(PipelineSpec.Blend.ALPHA).sampledImage(true).pushConstants(16).build());
         ui = renderer.createPipeline(PipelineSpec.builder("fullscreen.vert", "ui.frag")
                 .blend(PipelineSpec.Blend.PREMULTIPLIED).sampledImage(true).pushConstants(4).build());
+        fade = renderer.createPipeline(PipelineSpec.builder("fullscreen.vert", "fade.frag")
+                .offscreen(MenuBackground.SCENE_FORMAT).blend(PipelineSpec.Blend.ALPHA).sampledImage(true)
+                .pushConstants(4).build());
+    }
+
+    /**
+     * Starts handing the screen from {@code previous} to whatever background {@link #prepare} is given next. Until
+     * {@link #release}, only {@code previous} shows, but the new background already draws every frame behind it,
+     * so its first visible frames are not its first frames at all (warm code, created resources). Both draw into
+     * their own targets and one extra pass mixes them; the blur and backdrop sample the mix, so frosted surfaces
+     * agree with what is under them. The caller keeps owning {@code previous} and must keep it open (and call its
+     * {@code beforeFrame} and {@code tick}) while {@link #handingOff}, or call {@link #cancelHandOff}. Call outside
+     * a frame.
+     */
+    public void hold(MenuBackground previous) {
+        outgoing = Objects.requireNonNull(previous, "previous");
+        handOffNanos = 0L;
+        handOffStart = 0L;
+    }
+
+    /** Cross-fades from the held background to the new one over {@code durationNanos}, from the next frame. */
+    public void release(long durationNanos) {
+        if (outgoing != null) {
+            handOffNanos = Math.max(1L, durationNanos);
+        }
+    }
+
+    /** Whether a {@link #handOff} is still drawing the previous background. */
+    public boolean handingOff() {
+        return outgoing != null;
+    }
+
+    /** Stops a hand-off at once (the previous background is about to close). */
+    public void cancelHandOff() {
+        outgoing = null;
+        closeHandOffTargets();
     }
 
     private static VulkanPipeline blurPipeline(VulkanRenderer renderer, String fragment) {
@@ -126,6 +171,15 @@ public final class MenuCompositor implements AutoCloseable {
         if (width > 0 && height > 0 && (scene == null || scene.width() != width || scene.height() != height
                 || scene.hasDepth() != depth)) {
             recreateTargets(width, height, depth);
+        }
+        if (outgoing != null && scene != null && (held == null || held.width() != scene.width()
+                || held.height() != scene.height() || held.hasDepth() != outgoing.needsDepth())) {
+            closeHandOffTargets();
+            held = renderer.createRenderTarget(scene.width(), scene.height(), MenuBackground.SCENE_FORMAT, true,
+                    false, outgoing.needsDepth());
+            mix = renderer.createRenderTarget(scene.width(), scene.height(), MenuBackground.SCENE_FORMAT, true, false);
+        } else if (outgoing == null && held != null) {
+            closeHandOffTargets();
         }
         ComposeLayerHost.Frame next = host.poll();
         if (next == null) {
@@ -175,14 +229,18 @@ public final class MenuCompositor implements AutoCloseable {
             setRegions(allRegions, menuGlass);
         }
         swapchainScene = false;
+        backdrop = scene;
         if (scene == null) {
             return;
         }
         glassReady = !glassRegions.isEmpty() && uiTexture != null;
         long now = System.nanoTime();
         boolean blurDue = glassReady && (!blurValid || now - lastBlurNanos >= blurIntervalNanos);
-        // Only the blur samples the scene: on other frames a background that can draws into the swapchain image.
-        if (background != null && !blurDue && !SCENE_COPY && background.rendersToSwapchain()
+        if (outgoing != null && background != null && held != null) {
+            handOff(frame, background, partialTick, now);
+            // The mix changes every frame: the blur under glass must follow it.
+            blurDue = glassReady;
+        } else if (background != null && !blurDue && !SCENE_COPY && background.rendersToSwapchain()
                 && renderer.swapchainScene(MenuBackground.SCENE_FORMAT)) {
             background.renderToSwapchain(frame, partialTick);
             swapchainScene = true;
@@ -200,6 +258,39 @@ public final class MenuCompositor implements AutoCloseable {
             lastBlurNanos = blurValid ? Math.max(lastBlurNanos + blurIntervalNanos, now - blurIntervalNanos) : now;
             blurValid = true;
         }
+    }
+
+    /** Draws both backgrounds and their cross-fade into {@link #mix}, or ends the hand-off when it is over. */
+    private void handOff(VulkanFrame frame, MenuBackground background, float partialTick, long now) {
+        float t = 0f;
+        if (handOffNanos > 0L) {
+            if (handOffStart == 0L) {
+                handOffStart = now;
+            }
+            t = Math.min(1f, (now - handOffStart) / (float) handOffNanos);
+        }
+        background.render(frame, scene, partialTick);
+        if (t >= 1f) {
+            outgoing = null; // the targets close on the next update, outside the frame
+            return;
+        }
+        outgoing.render(frame, held, partialTick);
+        // Smoothstep: the new scene neither pops in nor lingers at the end.
+        float shown = 1f - t * t * (3f - 2f * t);
+        frame.beginRendering(mix, false, 0f, 0f, 0f, 1f);
+        frame.bindPipeline(fade);
+        push.clear();
+        push.putFloat(0, 1f);
+        push.limit(4);
+        frame.bindImage(scene);
+        frame.pushConstants(push);
+        frame.draw(3, 1, 0, 0);
+        push.putFloat(0, shown);
+        frame.bindImage(held);
+        frame.pushConstants(push);
+        frame.draw(3, 1, 0, 0);
+        frame.endRendering();
+        backdrop = mix;
     }
 
     /** Takes a UI frame's glass regions; a moved, added or removed region invalidates the cached blur. */
@@ -243,7 +334,7 @@ public final class MenuCompositor implements AutoCloseable {
         blurRefreshes++;
         for (int pass = 0; pass < PASSES; pass++) {
             VulkanRenderTarget target = pass < DOWN_LEVELS ? downTargets[pass] : upTargets[pass - DOWN_LEVELS];
-            VulkanRenderTarget source = pass == 0 ? scene
+            VulkanRenderTarget source = pass == 0 ? backdrop
                     : pass <= DOWN_LEVELS ? downTargets[pass - 1] : upTargets[pass - DOWN_LEVELS - 1];
             int count = padRects(glassRegions, scaleX, scaleY, pads[pass], scene.width(), scene.height(), rects);
             long offset = frame.allocate((long) count * RECT_BYTES, 16);
@@ -332,7 +423,7 @@ public final class MenuCompositor implements AutoCloseable {
         }
         if (!swapchainScene) {
             frame.bindPipeline(blit);
-            frame.bindImage(scene);
+            frame.bindImage(backdrop);
             frame.draw(3, 1, 0, 0);
         }
         if (!glassReady || !blurValid) {
@@ -541,7 +632,19 @@ public final class MenuCompositor implements AutoCloseable {
         blurValid = false;
     }
 
+    private void closeHandOffTargets() {
+        if (held != null) {
+            held.close();
+            held = null;
+        }
+        if (mix != null) {
+            mix.close();
+            mix = null;
+        }
+    }
+
     private void closeTargets() {
+        closeHandOffTargets();
         for (int level = 0; level < UP_LEVELS; level++) {
             if (upTargets[level] != null) {
                 upTargets[level].close();
@@ -571,6 +674,7 @@ public final class MenuCompositor implements AutoCloseable {
             uiTexture.close();
         }
         ui.close();
+        fade.close();
         glass.close();
         up.close();
         down.close();

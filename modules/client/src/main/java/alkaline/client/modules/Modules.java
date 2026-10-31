@@ -60,9 +60,20 @@ public final class Modules {
     public static final Module SERVER = hud("server", "Server", "The address you joined.", false,
             HudAnchor.TOP_RIGHT, -6, 62);
     public static final Setting.BooleanSetting SERVER_BLUR = blur(SERVER, true);
+    public static final Module MUSIC = hud("music", "Now playing", "The track the music player plays, with its progress.",
+            false, HudAnchor.TOP_RIGHT, -6, 90);
+    public static final Setting.BooleanSetting MUSIC_BLUR = blur(MUSIC, true);
+    public static final Setting.BooleanSetting MUSIC_COVER = option(MUSIC, Setting.bool(
+            "music.cover", MUSIC.title(), "Cover", "Shows the track's cover beside its title.", true));
     public static final Module POTIONS = hud("potions", "Potion effects", "Active effects and their time left.", false,
             HudAnchor.TOP_RIGHT, -6, 90);
     public static final Setting.BooleanSetting POTIONS_BLUR = blur(POTIONS, true);
+    public static final Module NOTIFICATIONS = hud("notifications", "Notifications",
+            "Short messages from Alkaline and your plugins, such as a resource pack finishing.", true,
+            HudAnchor.BOTTOM_RIGHT, -6, -6);
+    public static final Setting.BooleanSetting NOTIFICATIONS_BLUR = blur(NOTIFICATIONS, true);
+    public static final Setting.IntSetting NOTIFICATIONS_SECONDS = option(NOTIFICATIONS, Setting.integer(
+            "notifications.seconds", NOTIFICATIONS.title(), "Duration", "Seconds each notification stays.", 5, 2, 15));
 
     // ---- HUD: vanilla's elements --------------------------------------------------------------------------
 

@@ -69,14 +69,35 @@ class HudEditor {
 }
 
 /**
- * The in-game HUD: every enabled HUD module at its profile placement, plus vanilla's fixed overlays (titles, the
- * action bar, the player list). With an [editor] the elements can be dragged (snapping to the screen's edges and
- * center and to each other), scaled with the wheel, and the placement is written to the active profile on drop.
+ * An element the HUD places that is not one of Alkaline's modules (a plugin's): its switch and placement live in
+ * [store], and [content] draws it.
+ */
+class HudContribution(
+    val id: String,
+    val title: String,
+    val enabled: alkaline.config.Setting.BooleanSetting,
+    val placement: HudPlacement,
+    val store: ConfigStore,
+    val content: @Composable () -> Unit,
+)
+
+/**
+ * The in-game HUD: every enabled HUD module at its profile placement, then [items] (plugins' elements) at theirs,
+ * plus vanilla's fixed overlays (titles, the action bar, the player list). With an [editor] the elements can be
+ * dragged (snapping to the screen's edges and center and to each other), scaled with the wheel, and the placement
+ * is written to the element's store on drop.
  */
 @Composable
-fun GameHud(frame: HudFrame, profile: ConfigStore, editor: HudEditor?, onDone: () -> Unit = {}) {
+fun GameHud(
+    frame: HudFrame,
+    profile: ConfigStore,
+    editor: HudEditor?,
+    modifier: Modifier = Modifier,
+    items: List<HudContribution> = emptyList(),
+    onDone: () -> Unit = {},
+) {
     val snapshot by alkaline.ui.menu.rememberConfig(profile)
-    Box(Modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize()) {
         if (editor == null) {
             FixedOverlays(frame)
         }
@@ -84,14 +105,45 @@ fun GameHud(frame: HudFrame, profile: ConfigStore, editor: HudEditor?, onDone: (
             // Typing in chat shows it even where the Chat module is off.
             val typingChat = module == Modules.CHAT && LocalChatInput.current?.open == true
             if (module.kind() != Module.Kind.HUD || !(snapshot.get(module.enabled()) || typingChat)) continue
-            PlacedElement(module, snapshot, profile, frame, editor)
+            androidx.compose.runtime.key(module.id()) {
+                PlacedElement(module.id(), module.placement(), snapshot, profile, editor) {
+                    HudElement(module, frame, snapshot, editor != null)
+                }
+            }
+        }
+        for (item in items) {
+            androidx.compose.runtime.key(item.id) {
+                val itemSnapshot by alkaline.ui.menu.rememberConfig(item.store)
+                if (itemSnapshot.get(item.enabled)) {
+                    PlacedElement(item.id, item.placement, itemSnapshot, item.store, editor, item.content)
+                }
+            }
         }
         if (editor != null) {
             Guides(editor)
-            EditorToolbar(editor, profile, snapshot, onDone, Modifier.align(Alignment.TopCenter).padding(top = 20.dp))
+            val module = editor.selected?.let { Modules.find(it) }?.takeIf { it.placement() != null }
+            val item = items.firstOrNull { it.id == editor.selected }
+            EditorToolbar(
+                editor,
+                selection = when {
+                    module != null -> Selection(module.title(), module.placement(), module.enabled(), profile)
+                    item != null -> Selection(item.title, item.placement, item.enabled, item.store)
+                    else -> null
+                },
+                onDone = onDone,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp),
+            )
         }
     }
 }
+
+/** The element the editor's toolbar acts on. */
+private class Selection(
+    val title: String,
+    val placement: HudPlacement,
+    val enabled: alkaline.config.Setting.BooleanSetting,
+    val store: ConfigStore,
+)
 
 /** Screen position of an element's top left for an anchor and offset, in pixels. */
 private fun anchored(anchor: HudAnchor, x: Float, y: Float, width: Float, height: Float, screenWidth: Int,
@@ -102,21 +154,20 @@ private fun anchored(anchor: HudAnchor, x: Float, y: Float, width: Float, height
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun PlacedElement(module: Module, snapshot: ConfigSnapshot, store: ConfigStore, frame: HudFrame,
-                          editor: HudEditor?) {
-    val placement = module.placement()
+private fun PlacedElement(id: String, placement: HudPlacement, snapshot: ConfigSnapshot, store: ConfigStore,
+                          editor: HudEditor?, content: @Composable () -> Unit) {
     val density = LocalDensity.current.density
     val anchor = snapshot.get(placement.anchor())
     val scale = snapshot.get(placement.scale())
     val offsetX = snapshot.get(placement.x()) * density
     val offsetY = snapshot.get(placement.y()) * density
     // The element's laid-out size and screen while dragging; the live top left replaces the stored one.
-    var drag by remember(module) { mutableStateOf<Offset?>(null) }
-    val current = remember(module) { FloatArray(6) } // left, top, width, height, screen width, screen height
+    var drag by remember(id) { mutableStateOf<Offset?>(null) }
+    val current = remember(id) { FloatArray(6) } // left, top, width, height, screen width, screen height
     val latestScale by rememberUpdatedState(scale)
     // A hidden element must not keep attracting snaps.
-    androidx.compose.runtime.DisposableEffect(module, editor) {
-        onDispose { editor?.bounds?.remove(module.id()) }
+    androidx.compose.runtime.DisposableEffect(id, editor) {
+        onDispose { editor?.bounds?.remove(id) }
     }
     Box(Modifier.layout { measurable, constraints ->
         val placeable = measurable.measure(Constraints())
@@ -130,7 +181,7 @@ private fun PlacedElement(module: Module, snapshot: ConfigSnapshot, store: Confi
         current[3] = height
         current[4] = constraints.maxWidth.toFloat()
         current[5] = constraints.maxHeight.toFloat()
-        editor?.bounds?.put(module.id(), Rect(position, Size(width, height)))
+        editor?.bounds?.put(id, Rect(position, Size(width, height)))
         layout(constraints.maxWidth, constraints.maxHeight) {
             placeable.placeWithLayer(position.x.roundToInt(), position.y.roundToInt()) {
                 scaleX = scale
@@ -140,23 +191,23 @@ private fun PlacedElement(module: Module, snapshot: ConfigSnapshot, store: Confi
         }
     }) {
         val editing = editor != null
-        val selected = editor?.selected == module.id()
+        val selected = editor?.selected == id
         val outline = MaterialTheme.colorScheme.primary
         Box(
             if (!editing) Modifier else Modifier
                 .border(if (selected) 2.dp else 1.dp, outline.copy(alpha = if (selected) 1f else 0.45f),
                     RoundedCornerShape(10.dp))
-                .pointerInput(module) {
+                .pointerInput(id) {
                     detectDragGestures(
                         onDragStart = {
-                            editor!!.selected = module.id()
+                            editor!!.selected = id
                             drag = Offset(current[0], current[1])
                         },
                         onDrag = { change, amount ->
                             change.consume()
                             val start = drag ?: Offset(current[0], current[1])
                             val moved = start + amount * latestScale
-                            drag = if (editor!!.snapping) snap(editor, module.id(), moved, current, density) else {
+                            drag = if (editor!!.snapping) snap(editor, id, moved, current, density) else {
                                 editor.guidesX = emptyList()
                                 editor.guidesY = emptyList()
                                 moved
@@ -174,13 +225,13 @@ private fun PlacedElement(module: Module, snapshot: ConfigSnapshot, store: Confi
                 .onPointerEvent(PointerEventType.Scroll) { event ->
                     val delta = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
                     if (delta != 0f) {
-                        editor!!.selected = module.id()
+                        editor!!.selected = id
                         val next = (latestScale - delta * 0.05f).coerceIn(HudPlacement.MIN_SCALE, HudPlacement.MAX_SCALE)
                         store.trySet(placement.scale(), (next * 20f).roundToInt() / 20f)
                     }
                 },
         ) {
-            HudElement(module, frame, snapshot, editing)
+            content()
         }
     }
 }
@@ -259,9 +310,7 @@ private fun Guides(editor: HudEditor) {
 
 /** The editor's one frosted bar: the selected element's size and visibility, snapping, reset, and Done. */
 @Composable
-private fun EditorToolbar(editor: HudEditor, store: ConfigStore, snapshot: ConfigSnapshot, onDone: () -> Unit,
-                          modifier: Modifier) {
-    val selected = editor.selected?.let { Modules.find(it) }
+private fun EditorToolbar(editor: HudEditor, selection: Selection?, onDone: () -> Unit, modifier: Modifier) {
     Surface(
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.78f),
@@ -270,10 +319,12 @@ private fun EditorToolbar(editor: HudEditor, store: ConfigStore, snapshot: Confi
     ) {
         Row(Modifier.padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (selected?.placement() != null) {
-                val placement = selected.placement()
+            if (selection != null) {
+                val store = selection.store
+                val placement = selection.placement
+                val snapshot by alkaline.ui.menu.rememberConfig(store)
                 val scale = snapshot.get(placement.scale())
-                Text(selected.title(), style = MaterialTheme.typography.titleSmall, modifier = Modifier.widthIn(min = 96.dp))
+                Text(selection.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.widthIn(min = 96.dp))
                 FilledTonalIconButton(onClick = {
                     store.trySet(placement.scale(), (scale - 0.1f).coerceAtLeast(HudPlacement.MIN_SCALE))
                 }, modifier = Modifier.size(36.dp)) { Text("−") }
@@ -289,7 +340,7 @@ private fun EditorToolbar(editor: HudEditor, store: ConfigStore, snapshot: Confi
                     alkaline.ui.menu.resetSetting(store, placement.scale())
                 }) { Text("Reset") }
                 TextButton(onClick = {
-                    store.trySet(selected.enabled(), false)
+                    store.trySet(selection.enabled, false)
                     editor.selected = null
                 }) { Text("Hide") }
             } else {

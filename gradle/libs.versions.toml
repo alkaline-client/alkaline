@@ -5,6 +5,9 @@ material3 = "1.13.0-alpha02"
 # Keep LWJGL pinned; it is intentionally excluded from dependency updates.
 lwjgl = "3.4.3"
 junit = "6.1.3"
+# FFmpeg (LGPL build) through JavaCPP, for the music player's decoding; ships natives for linux-x86_64 and windows-x86_64.
+javacpp = "1.5.14"
+ffmpeg = "8.1.2-1.5.14"
 # Material You ("Monet") tonal palettes and dynamic schemes; Kotlin port of Google's material-color-utilities.
 material-color-utilities = "5.0.1"
 
@@ -15,6 +18,8 @@ lwjgl-vulkan = { module = "org.lwjgl:lwjgl-vulkan", version.ref = "lwjgl" }
 # OpenAL Soft and stb_vorbis for the sound system; both ship natives-linux and natives-windows for 3.4.3.
 lwjgl-openal = { module = "org.lwjgl:lwjgl-openal", version.ref = "lwjgl" }
 lwjgl-stb = { module = "org.lwjgl:lwjgl-stb", version.ref = "lwjgl" }
+javacpp = { module = "org.bytedeco:javacpp", version.ref = "javacpp" }
+ffmpeg = { module = "org.bytedeco:ffmpeg", version.ref = "ffmpeg" }
 compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "material3" }
 material-color-utilities = { module = "com.materialkolor:material-color-utilities", version.ref = "material-color-utilities" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }

@@ -11,15 +11,22 @@ import java.util.function.Supplier;
 final class ChatBridge implements ChatHost {
     private final Supplier<PlaySession> play;
     private final Consumer<Runnable> mainThread;
+    /** Plugins' commands: true when one handled the line, which then never reaches the server. */
+    private final java.util.function.Predicate<String> commands;
 
-    ChatBridge(Supplier<PlaySession> play, Consumer<Runnable> mainThread) {
+    ChatBridge(Supplier<PlaySession> play, Consumer<Runnable> mainThread, java.util.function.Predicate<String> commands) {
         this.play = play;
         this.mainThread = mainThread;
+        this.commands = commands;
     }
 
     @Override
     public void send(String message) {
-        onPlay(session -> session.sendChat(message));
+        onPlay(session -> {
+            if (!commands.test(message)) {
+                session.sendChat(message);
+            }
+        });
     }
 
     @Override

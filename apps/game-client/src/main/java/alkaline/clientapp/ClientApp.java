@@ -93,6 +93,12 @@ final class ClientApp implements AutoCloseable {
     private ConfigSnapshot appliedSettings;
     private final MenuController menu;
     private final ComposeLayerHost ui;
+    /** Plugin jars from the plugin folder beside the settings; see {@link alkaline.ui.plugins.PluginHost}. */
+    private final alkaline.ui.plugins.PluginHost plugins;
+    /** The game as plugins see it. */
+    private final PluginGame pluginGame;
+    private final alkaline.music.MusicPlayer music;
+    private final alkaline.ui.music.MusicController musicUi;
     private final MenuCompositor compositor;
     private volatile boolean running = true;
     private float uiDensity;
@@ -121,12 +127,19 @@ final class ClientApp implements AutoCloseable {
     private ClientSettings.Theme surfaceTheme;
     private FluidBackground.Look fluidLook;
     private ClientSettings.Theme fluidLookTheme;
-    /** The multiplayer game in progress (render thread), or null in the menus. */
-    private PlaySession play;
+    /** The multiplayer game in progress (render thread; plugins read it from the UI thread), or null in the menus. */
+    private volatile PlaySession play;
     /** Whether {@link #play} is set, for the pack reload thread: a game view needs world textures. */
     private volatile boolean inGame;
     /** The menu background, kept while a game view replaces it. */
     private MenuBackground menuBackground;
+    /**
+     * Whether the game view is on screen. After login the menu background stays up (under the joining card) while
+     * the world streams in and draws, unseen, behind it; once it is ready the compositor cross-fades to it
+     * ({@link #revealWorld}).
+     */
+    private boolean worldShown;
+    private long loggedInNanos;
     /** Bumped to abandon a connection attempt the player cancelled. */
     private final java.util.concurrent.atomic.AtomicInteger joinAttempt = new java.util.concurrent.atomic.AtomicInteger();
     private boolean mouseCaptured;
@@ -304,7 +317,13 @@ final class ClientApp implements AutoCloseable {
 
             @Override
             public void applyResourcePacks() {
-                reloadResourcePacks(config.snapshot().get(ClientSettings.RESOURCE_PACKS));
+                String selection = config.snapshot().get(ClientSettings.RESOURCE_PACKS);
+                reloadResourcePacks(selection, loaded -> {
+                    if (loaded) {
+                        notifyPlayer("Resource packs applied", packNames(selection),
+                                alkaline.ui.hud.Notification.Kind.SUCCESS);
+                    }
+                });
             }
 
             @Override
@@ -318,7 +337,7 @@ final class ClientApp implements AutoCloseable {
             }
         }, services, true, profiles);
         menu.setInventoryInput(new InventoryPointer());
-        menu.setChatHost(new ChatBridge(() -> play, mainThreadTasks::add));
+        menu.setChatHost(new ChatBridge(() -> play, mainThreadTasks::add, this::pluginCommand));
         menu.setLoadingStatus("Loading vanilla assets");
         try {
             menu.open(alkaline.ui.menu.MenuPage.valueOf(options.page().toUpperCase(java.util.Locale.ROOT)));
@@ -330,6 +349,53 @@ final class ClientApp implements AutoCloseable {
         SdlWindow.PixelSize size = window.pixelSize();
         uiDensity = density(size);
         ui = MenuUi.createHost(size.width(), size.height(), uiDensity, menu);
+        plugins = new alkaline.ui.plugins.PluginHost(alkalineDirectory.resolve("plugins"), task -> {
+            ui.post(task);
+            return kotlin.Unit.INSTANCE;
+        }, notification -> {
+            menu.getNotifications().post(notification);
+            return kotlin.Unit.INSTANCE;
+        });
+        pluginGame = new PluginGame(() -> play, () -> {
+            PlaySession session = play;
+            return session != null ? session.view() : null;
+        }, () -> joinedAddress, mainThreadTasks::add, audio);
+        plugins.setGame(pluginGame);
+        // An exception on the interface thread no longer ends the game: a plugin's composable or effect stops that
+        // plugin, and anything else (a Compose race, a bug of Alkaline's) is reported; either way the interface is
+        // rebuilt (at most a few times a minute; ComposeLayerHost gives up after that).
+        ui.setRecover(failure -> {
+            if (plugins.recover(failure) == null) {
+                System.err.println("The interface failed and is rebuilt: " + failure);
+                failure.printStackTrace();
+                menu.getNotifications().post(new alkaline.ui.hud.Notification("Interface restarted",
+                        "It hit an error: " + failure, alkaline.ui.hud.Notification.Kind.WARNING, null));
+            }
+            return true;
+        });
+        ui.post(() -> {
+            menu.setPlugins(plugins);
+            plugins.scan();
+            return kotlin.Unit.INSTANCE;
+        });
+        // The music player: FFmpeg into the audio engine's music feed; its files beside the settings.
+        music = new alkaline.music.MusicPlayer(alkaline.music.Output.Companion.of(audio.music()),
+                new alkaline.music.Sources(new alkaline.music.YtDlp(alkalineDirectory.resolve("tools"), () -> null),
+                        new alkaline.music.Web()),
+                new alkaline.music.Library(alkalineDirectory.resolve("music")));
+        musicUi = new alkaline.ui.music.MusicController(music, task -> {
+            ui.post(task);
+            return kotlin.Unit.INSTANCE;
+        }, (title, text, warning) -> {
+            menu.getNotifications().post(new alkaline.ui.hud.Notification(title, text,
+                    warning ? alkaline.ui.hud.Notification.Kind.WARNING : alkaline.ui.hud.Notification.Kind.INFO, "Music"));
+            return kotlin.Unit.INSTANCE;
+        });
+        ui.post(() -> {
+            menu.setMusic(musicUi);
+            plugins.setMusic(musicUi);
+            return kotlin.Unit.INSTANCE;
+        });
         compositor = new MenuCompositor(renderer, ui);
         // GuiButton.playPressSound: PositionedSoundRecord.create(gui.button.press, 1.0) plays at volume 0.25.
         ui.setOnControlPressed(() -> {
@@ -521,6 +587,7 @@ final class ClientApp implements AutoCloseable {
     }
 
     void run() {
+        pluginGame.renderThread(Thread.currentThread());
         long previousTick = System.nanoTime();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             SDL_Event event = SDL_Event.calloc(stack);
@@ -645,6 +712,9 @@ final class ClientApp implements AutoCloseable {
         if (background != null) {
             background.tick();
         }
+        if (menuBackgroundDrawn()) {
+            menuBackground.tick();
+        }
         if (play != null) {
             ConfigSnapshot settings = config.snapshot();
             ConfigSnapshot toggles = profiles.store().snapshot();
@@ -652,6 +722,7 @@ final class ClientApp implements AutoCloseable {
             play.movementToggles(toggling && toggles.get(alkaline.client.modules.Modules.TOGGLE_SPRINT_SPRINT),
                     toggling && toggles.get(alkaline.client.modules.Modules.TOGGLE_SPRINT_SNEAK));
             play.tick(menu.gameHasInput(), settings, heldKeys, heldButtons);
+            plugins.tick();
             if (background instanceof GameView view) {
                 ConfigSnapshot modules = profiles.store().snapshot();
                 boolean zooming = modules.get(alkaline.client.modules.Modules.ZOOM.enabled()) && menu.gameHasInput()
@@ -660,6 +731,10 @@ final class ClientApp implements AutoCloseable {
                         modules.get(alkaline.client.modules.Modules.ZOOM_SMOOTH));
                 view.handStyle(handStyle(modules));
                 view.followSelf();
+                view.publishProjection = plugins.getWantsCamera();
+                if (!view.publishProjection) {
+                    view.projection = null;
+                }
             }
             publishHud(settings);
         }
@@ -790,8 +865,8 @@ final class ClientApp implements AutoCloseable {
                 reason -> mainThreadTasks.add(() -> endGame(reason)));
         created.sounds(new GameSounds(audio));
         try {
-            GameView view = new GameView(renderer, assets, palette, worldTextures(prepared), created, skins,
-                    itemCatalog, config::snapshot);
+            GameView view = batched(() -> new GameView(renderer, assets, palette, worldTextures(prepared), created,
+                    skins, itemCatalog, config::snapshot));
             created.view(view);
             created.onWindowClosedByServer(() -> ui.post(() -> {
                 menu.inventoryClosedByServer();
@@ -808,6 +883,14 @@ final class ClientApp implements AutoCloseable {
                 menu.openSign(java.util.List.of(lines));
                 return kotlin.Unit.INSTANCE;
             }));
+            created.onChat(plugins::chat);
+            created.onPluginMessage(plugins::message);
+            created.movementFilter(input -> {
+                alkaline.plugin.Movement moved = plugins.movement(input.forward(), input.strafe(), input.jump(),
+                        input.sneak(), input.sprint());
+                return moved == null ? input : new alkaline.game.player.LocalPlayer.Input(moved.getForward(),
+                        moved.getStrafe(), moved.getJump(), moved.getSneak(), moved.getSprint());
+            });
             created.onTabComplete(matches -> ui.post(() -> {
                 menu.getChat().completed(matches);
                 return kotlin.Unit.INSTANCE;
@@ -824,12 +907,14 @@ final class ClientApp implements AutoCloseable {
             session.sendClientSettings("en_US", config.snapshot().get(ClientSettings.WORLD_RENDER_DISTANCE));
             play = created;
             inGame = true;
+            plugins.joined(joinedAddress);
             menuBackground = background;
             background = view;
-            ui.post(() -> {
-                menu.joined();
-                return kotlin.Unit.INSTANCE;
-            });
+            worldShown = false;
+            loggedInNanos = System.nanoTime();
+            if (menuBackground != null) {
+                compositor.hold(menuBackground);
+            }
         } catch (java.io.IOException | RuntimeException failure) {
             created.close();
             ui.post(() -> {
@@ -837,6 +922,35 @@ final class ClientApp implements AutoCloseable {
                 return kotlin.Unit.INSTANCE;
             });
         }
+    }
+
+    /** A chat line the player sends: true when a plugin's command handled it (render thread). */
+    private boolean pluginCommand(String line) {
+        return plugins.command(line);
+    }
+
+    private interface ViewFactory {
+        GameView create() throws IOException;
+    }
+
+    /**
+     * Builds a game view with its dozens of model and texture uploads in one GPU submission (see
+     * {@link VulkanRenderer#batchUploads}); one wait instead of one per upload keeps the joining card moving.
+     */
+    private GameView batched(ViewFactory factory) throws IOException {
+        GameView[] view = new GameView[1];
+        try {
+            renderer.batchUploads(() -> {
+                try {
+                    view[0] = factory.create();
+                } catch (IOException failure) {
+                    throw new java.io.UncheckedIOException(failure);
+                }
+            });
+        } catch (java.io.UncheckedIOException failure) {
+            throw failure.getCause();
+        }
+        return view[0];
     }
 
     /** Leaves the game (or reports that it ended) and restores the menu. Render thread, outside frames. */
@@ -849,6 +963,9 @@ final class ClientApp implements AutoCloseable {
             reloadResourcePacks(appliedPacks);
         }
         if (play != null) {
+            plugins.left(reason == null ? null : chatText(reason));
+            compositor.cancelHandOff();
+            worldShown = false;
             play.close();
             play = null;
             inGame = false;
@@ -890,10 +1007,42 @@ final class ClientApp implements AutoCloseable {
         }
     }
 
+    /** How long the menu cross-fades into the world, and the longest the menu waits for the world to be ready. */
+    private static final long WORLD_FADE_NANOS = 600_000_000L;
+    private static final long WORLD_WAIT_NANOS = 6_000_000_000L;
+
+    /**
+     * Shows the world once {@link GameView#ready} (or after {@link #WORLD_WAIT_NANOS}, so an empty or slow world
+     * still opens): the compositor cross-fades from the menu background while the joining card fades out.
+     */
+    private void revealWorld() {
+        if (play == null || worldShown) {
+            return;
+        }
+        boolean ready = background.ready();
+        long waited = System.nanoTime() - loggedInNanos;
+        if (!ready && waited < WORLD_WAIT_NANOS) {
+            return;
+        }
+        worldShown = true;
+        System.out.printf("World shown %d ms after login%s%n", waited / 1_000_000L, ready ? "" : " (not ready yet)");
+        compositor.release(compositor.uiPresented() ? WORLD_FADE_NANOS : 1L);
+        ui.post(() -> {
+            menu.joined();
+            return kotlin.Unit.INSTANCE;
+        });
+    }
+
+    /** Whether the menu background still draws: over the unseen world until it is shown, then in the cross-fade. */
+    private boolean menuBackgroundDrawn() {
+        return play != null && menuBackground != null && compositor.handingOff();
+    }
+
     private boolean renderFrame(float partialTick) {
         captureMouse(play != null && menu.gameHasInput());
         advanceLoading();
         applySettings();
+        revealWorld();
         ui.checkHealthy();
         SdlWindow.PixelSize size = window.pixelSize();
         compositor.update(size.width(), size.height(), background != null && background.needsDepth());
@@ -902,6 +1051,9 @@ final class ClientApp implements AutoCloseable {
         }
         if (background != null) {
             background.beforeFrame(size.width(), size.height());
+        }
+        if (menuBackgroundDrawn()) {
+            menuBackground.beforeFrame(size.width(), size.height());
         }
         if (play != null) {
             // SoundManager.setListener: the player's interpolated eyes and look, every frame.
@@ -916,6 +1068,9 @@ final class ClientApp implements AutoCloseable {
         VulkanFrame frame = renderer.acquireFrame();
         if (frame == null) {
             return false;
+        }
+        if (play != null && !worldShown && !compositor.handingOff() && background instanceof GameView view) {
+            view.preload(frame); // nothing draws the world (the loading screen is still up), but it streams in
         }
         ConfigSnapshot settings = config.snapshot();
         applyUiRate(settings);
@@ -972,8 +1127,15 @@ final class ClientApp implements AutoCloseable {
         }
         if (loaded && appliedSettings != null
                 && appliedSettings.get(ClientSettings.MENU_BACKGROUND) != snapshot.get(ClientSettings.MENU_BACKGROUND)) {
-            background.close();
-            background = createBackground(snapshot.get(ClientSettings.MENU_BACKGROUND), null);
+            if (play == null) {
+                background.close();
+                background = createBackground(snapshot.get(ClientSettings.MENU_BACKGROUND), null);
+            } else if (menuBackground != null) {
+                // In game the world is the background; the menu's waits for the player to leave.
+                compositor.cancelHandOff();
+                menuBackground.close();
+                menuBackground = createBackground(snapshot.get(ClientSettings.MENU_BACKGROUND), null);
+            }
         }
         if (snapshot.get(ClientSettings.VIDEO_FULLSCREEN) != fullscreen) {
             fullscreen = snapshot.get(ClientSettings.VIDEO_FULLSCREEN);
@@ -1146,6 +1308,9 @@ final class ClientApp implements AutoCloseable {
                         if (play == session) {
                             session.resourcePackStatus(hash, loaded ? alkaline.game.net.ServerSession.PACK_LOADED
                                     : alkaline.game.net.ServerSession.PACK_FAILED);
+                            notifyPlayer(loaded ? "Server resource pack applied" : "Server resource pack failed",
+                                    joinedAddress, loaded ? alkaline.ui.hud.Notification.Kind.SUCCESS
+                                            : alkaline.ui.hud.Notification.Kind.WARNING);
                         }
                         serverPackProgress(null, 0f);
                     });
@@ -1156,9 +1321,27 @@ final class ClientApp implements AutoCloseable {
                     if (round == serverPackRound.get() && play == session) {
                         session.resourcePackStatus(hash, alkaline.game.net.ServerSession.PACK_FAILED);
                         serverPackProgress(null, 0f);
+                        notifyPlayer("Server resource pack failed", String.valueOf(failure.getMessage()),
+                                alkaline.ui.hud.Notification.Kind.WARNING);
                     }
                 });
             }
+        });
+    }
+
+    /** The selected packs' names for display ("Vanilla assets" when none): ids are one per line, folder-prefixed. */
+    static String packNames(String selection) {
+        List<String> names = selection.lines().filter(line -> !line.isBlank())
+                .map(id -> id.substring(Math.max(id.lastIndexOf('/'), id.lastIndexOf(':')) + 1).replaceFirst("\\.zip$", ""))
+                .toList();
+        return names.isEmpty() ? "Vanilla assets" : String.join(", ", names);
+    }
+
+    /** Shows a notification (the HUD's Notifications element in game, the menu's corner otherwise); any thread. */
+    private void notifyPlayer(String title, String text, alkaline.ui.hud.Notification.Kind kind) {
+        ui.post(() -> {
+            menu.showNotification(title, text, kind, null);
+            return kotlin.Unit.INSTANCE;
         });
     }
 
@@ -1251,8 +1434,8 @@ final class ClientApp implements AutoCloseable {
         ClientSettings.Background choice = config.snapshot().get(ClientSettings.MENU_BACKGROUND);
         if (play != null && background instanceof GameView old) {
             try {
-                GameView view = new GameView(renderer, layered, loadedPalette, worldTextures(world), play, skins,
-                        itemCatalog, config::snapshot);
+                GameView view = batched(() -> new GameView(renderer, layered, loadedPalette, worldTextures(world),
+                        play, skins, itemCatalog, config::snapshot));
                 view.inherit(old);
                 old.close();
                 play.view(view);
@@ -1261,6 +1444,7 @@ final class ClientApp implements AutoCloseable {
                 System.err.println("World reload failed: " + failure.getMessage());
             }
             if (menuBackground != null) {
+                compositor.cancelHandOff();
                 menuBackground.close();
                 menuBackground = createBackground(choice, world);
             }
@@ -1419,6 +1603,24 @@ final class ClientApp implements AutoCloseable {
         }
     }
 
+    /** The music player's bindings and the keyboard's media keys; true when the key was one of them. */
+    private boolean musicKey(int key, String binding, ConfigSnapshot settings) {
+        if (key == SDLKeycode.SDLK_MEDIA_PLAY_PAUSE || key == SDLKeycode.SDLK_MEDIA_PLAY
+                || key == SDLKeycode.SDLK_MEDIA_PAUSE || binding.equals(settings.get(ClientSettings.KEY_MUSIC_PLAY))) {
+            music.toggle();
+        } else if (key == SDLKeycode.SDLK_MEDIA_NEXT_TRACK || binding.equals(settings.get(ClientSettings.KEY_MUSIC_NEXT))) {
+            music.next();
+        } else if (key == SDLKeycode.SDLK_MEDIA_PREVIOUS_TRACK
+                || binding.equals(settings.get(ClientSettings.KEY_MUSIC_PREVIOUS))) {
+            music.previous();
+        } else if (key == SDLKeycode.SDLK_MEDIA_STOP) {
+            music.stop();
+        } else {
+            return false;
+        }
+        return true;
+    }
+
     /** Keys that are not navigation: game bindings while playing, editing keys for text fields otherwise. */
     private void handleKey(SDL_Event event, boolean down) {
         ConfigSnapshot settings = config.snapshot();
@@ -1428,6 +1630,9 @@ final class ClientApp implements AutoCloseable {
             if (binding.equals(settings.get(ClientSettings.KEY_FULLSCREEN))) {
                 boolean next = !settings.get(ClientSettings.VIDEO_FULLSCREEN);
                 config.set(ClientSettings.VIDEO_FULLSCREEN, next);
+                return;
+            }
+            if (musicKey(event.key().key(), binding, settings)) {
                 return;
             }
             if (play != null && binding.equals(settings.get(ClientSettings.KEY_CLICK_GUI))
@@ -1469,6 +1674,17 @@ final class ClientApp implements AutoCloseable {
                     ClientSettings.KEY_HOTBAR_3, ClientSettings.KEY_HOTBAR_4, ClientSettings.KEY_HOTBAR_5,
                     ClientSettings.KEY_HOTBAR_6, ClientSettings.KEY_HOTBAR_7, ClientSettings.KEY_HOTBAR_8,
                     ClientSettings.KEY_HOTBAR_9};
+            if (play != null && mouseCaptured && plugins.getListensForKeys()) {
+                plugins.pressed(binding);
+                if (plugins.key(binding, System.currentTimeMillis())) {
+                    // A plugin cancelled the press: the game neither acts on it nor sees the key held.
+                    int scancode = event.key().scancode();
+                    if (scancode >= 0 && scancode < heldKeys.length) {
+                        heldKeys[scancode] = false;
+                    }
+                    return;
+                }
+            }
             if (play != null && mouseCaptured) {
                 pressedMovementKey(binding, settings);
                 for (int slot = 0; slot < hotbar.length; slot++) {
@@ -1569,12 +1785,23 @@ final class ClientApp implements AutoCloseable {
             default -> "mouse:x2";
         };
         pressedMovementKey(name, settings);
+        if (plugins.getListensForKeys()) {
+            plugins.pressed(name);
+        }
         String attack = settings.get(ClientSettings.KEY_ATTACK);
         String use = settings.get(ClientSettings.KEY_USE);
-        if (attack.startsWith("mouse:") && PlaySession.mouseButton(attack) == button) {
+        boolean attacks = attack.startsWith("mouse:") && PlaySession.mouseButton(attack) == button;
+        boolean uses = !attacks && use.startsWith("mouse:") && PlaySession.mouseButton(use) == button;
+        if ((attacks || uses) && plugins.getListensForClicks() && plugins.click(
+                attacks ? alkaline.plugin.Click.Button.ATTACK : alkaline.plugin.Click.Button.USE, now)) {
+            // A plugin cancelled the press: the game neither acts on it nor sees the button held.
+            heldButtons[button] = false;
+            return;
+        }
+        if (attacks) {
             leftClicks.addLast(now);
             play.attack();
-        } else if (use.startsWith("mouse:") && PlaySession.mouseButton(use) == button) {
+        } else if (uses) {
             rightClicks.addLast(now);
             // Minecraft.runTick: every press uses at once; holding repeats every four ticks in the tick.
             play.use();
@@ -1653,6 +1880,21 @@ final class ClientApp implements AutoCloseable {
                 script.add(new ScriptedClick(Long.parseLong(parts[0]), "text", 0f, 0f, parts[2]));
                 continue;
             }
+            if (parts.length == 3 && parts[1].equals("shot")) {
+                // Saves the frame presented at this time to a PNG and keeps running (2000:shot:/tmp/a.png).
+                script.add(new ScriptedClick(Long.parseLong(parts[0]), "shot", 0f, 0f, parts[2]));
+                continue;
+            }
+            if (parts.length == 3 && parts[1].equals("wheel")) {
+                // The wheel over a point, in notches, positive away from the user (1500:wheel:640,400,-3).
+                String[] wheel = parts[2].split(",");
+                if (wheel.length != 3) {
+                    throw new IllegalArgumentException("Wheel entries look like 1500:wheel:640,400,-3, not " + entry);
+                }
+                script.add(new ScriptedClick(Long.parseLong(parts[0]), "wheel", Float.parseFloat(wheel[0]),
+                        Float.parseFloat(wheel[1]), wheel[2].trim()));
+                continue;
+            }
             if (parts.length == 3 && List.of("key", "keydown", "keyup").contains(parts[1])) {
                 // A key press (or one half of it, to hold a key) by physical key name, as SDL names scancodes
                 // ("W", "Escape", "Left Shift").
@@ -1665,7 +1907,8 @@ final class ClientApp implements AutoCloseable {
                     || position.length != 2) {
                 throw new IllegalArgumentException("Script entries look like 1500:click:120,300, 1600:move:120,300, "
                         + "1700:down:120,300, 1800:up:200,300 (rclick, rdown, rup for the right button), "
-                        + "2000:resize:900,600 or 2500:key:Q, not " + entry);
+                        + "2000:resize:900,600, 2500:key:Q, 2600:wheel:640,400,-3 or 3000:shot:/tmp/frame.png, not "
+                        + entry);
             }
             script.add(new ScriptedClick(Long.parseLong(parts[0]), parts[1],
                     Float.parseFloat(position[0]), Float.parseFloat(position[1]), null));
@@ -1678,6 +1921,13 @@ final class ClientApp implements AutoCloseable {
             ScriptedClick click = script.poll();
             if (click.action().equals("text")) {
                 ui.typed(click.key());
+                continue;
+            }
+            if (click.action().equals("shot")) {
+                Path destination = Path.of(click.key());
+                if (!renderer.captureNextFrame(image -> saveScriptedShot(image, destination))) {
+                    System.err.println("Cannot capture " + destination + ": the surface is not readable.");
+                }
                 continue;
             }
             if (click.action().startsWith("key")) {
@@ -1696,6 +1946,20 @@ final class ClientApp implements AutoCloseable {
                                 .down(type == SDLEvents.SDL_EVENT_KEY_DOWN);
                         SDLEvents.SDL_PushEvent(synthetic);
                     }
+                }
+                continue;
+            }
+            if (click.action().equals("wheel")) {
+                try (MemoryStack stack = MemoryStack.stackPush()) {
+                    SDL_Event synthetic = SDL_Event.calloc(stack);
+                    synthetic.motion().type(SDLEvents.SDL_EVENT_MOUSE_MOTION).windowID(window.windowId())
+                            .x(click.x()).y(click.y());
+                    SDLEvents.SDL_PushEvent(synthetic);
+                    synthetic.clear();
+                    float notches = Float.parseFloat(click.key());
+                    synthetic.wheel().type(SDLEvents.SDL_EVENT_MOUSE_WHEEL).windowID(window.windowId()).y(notches)
+                            .integer_y(Math.round(notches)).mouse_x(click.x()).mouse_y(click.y());
+                    SDLEvents.SDL_PushEvent(synthetic);
                 }
                 continue;
             }
@@ -1770,6 +2034,15 @@ final class ClientApp implements AutoCloseable {
         running = false;
     }
 
+    private void saveScriptedShot(RgbaImage image, Path destination) {
+        try {
+            writePng(image, destination);
+            System.out.printf("Saved shot %s at %d ms%n", destination, (System.nanoTime() - startNanos) / 1_000_000L);
+        } catch (IOException failure) {
+            System.err.println("Shot failed: " + failure.getMessage());
+        }
+    }
+
     static void writePng(RgbaImage image, Path destination) throws IOException {
         BufferedImage buffered = new BufferedImage(image.width(), image.height(), BufferedImage.TYPE_INT_ARGB);
         byte[] pixels = image.copyPixels();
@@ -1828,6 +2101,9 @@ final class ClientApp implements AutoCloseable {
             hudGlint.close();
         }
         compositor.close();
+        plugins.close();
+        musicUi.close();
+        music.close();
         ui.close();
         audio.close();
         services.close();

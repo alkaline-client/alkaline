@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "id": "waypoints",
+  "name": "Waypoints",
+  "version": "1.0.0",
+  "entrypoint": "alkaline.example.waypoints.Waypoints",
+  "api": 1,
+  "minecraft": "1.8.9",
+  "description": "Marks places in the world, labelled where they are on screen, and tells you how far the nearest one is.",
+  "authors": [{ "name": "Alkaline" }],
+  "icon": "waypoints/icon.png",
+  "settings": [
+    {
+      "id": "add_key",
+      "type": "key",
+      "title": "Mark this place",
+      "default": "key:B"
+    },
+    {
+      "id": "list_key",
+      "type": "key",
+      "title": "Open the waypoint list",
+      "default": "key:J"
+    },
+    {
+      "id": "labels",
+      "type": "choice",
+      "title": "Labels",
+      "options": ["Name", "Name and distance", "Hidden"],
+      "default": "Name and distance"
+    },
+    {
+      "id": "color",
+      "type": "color",
+      "title": "Marker color",
+      "default": "#FF7FE3B0"
+    },
+    {
+      "id": "range",
+      "type": "integer",
+      "title": "Show within",
+      "description": "Waypoints farther than this many blocks are not labelled.",
+      "default": 1000,
+      "min": 16,
+      "max": 10000
+    },
+    {
+      "id": "sound",
+      "type": "boolean",
+      "title": "Sound when marking",
+      "default": true
+    }
+  ],
+  "hud": [
+    {
+      "id": "nearest",
+      "title": "Nearest waypoint",
+      "description": "Its name, distance and direction.",
+      "anchor": "top",
+      "x": 0,
+      "y": 6
+    },
+    {
+      "id": "players",
+      "title": "Players nearby",
+      "description": "Players within 32 blocks, nearest first.",
+      "anchor": "top_left",
+      "x": 6,
+      "y": 146,
+      "enabled": false
+    }
+  ]
+}

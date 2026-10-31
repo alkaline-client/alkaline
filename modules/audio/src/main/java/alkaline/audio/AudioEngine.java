@@ -20,6 +20,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.StampedLock;
 import org.lwjgl.openal.AL;
 import org.lwjgl.openal.AL10;
+import org.lwjgl.openal.AL11;
 import org.lwjgl.openal.ALC;
 import org.lwjgl.openal.ALC10;
 import org.lwjgl.openal.ALCCapabilities;
@@ -42,6 +43,9 @@ import org.lwjgl.system.MemoryUtil;
  * gives way by {@link VoicePolicy}. Decoded clips stay in OpenAL buffers up to {@link #CACHE_BYTES}, least
  * recently played first out once idle. A resource pack reload ({@link #assets}) and {@link #close} release every
  * source and buffer.
+ *
+ * <p>The music player plays through {@link #music()}: a PCM feed on a source of its own, outside the pools and
+ * untouched by pack reloads.
  */
 public final class AudioEngine implements AutoCloseable {
     /** Where sounds come from: the layered assets. */
@@ -115,7 +119,96 @@ public final class AudioEngine implements AutoCloseable {
     private float listenerPitch;
     private long listenerVersion;
 
+    /**
+     * The music player's output: 16-bit interleaved stereo at {@link #RATE}, played on a source of its own beside
+     * the game's voices, without position. The master volume applies, as to every sound; the player's own volume is
+     * {@link #gain}. One thread writes (the player's); any thread may read the clock.
+     *
+     * <p>Written PCM waits in a queue until the audio thread moves it into OpenAL buffers of {@link #BUFFER_FRAMES}
+     * frames, {@link #BUFFERS} of them queued (about 400 ms), so tracks written back to back play without a gap.
+     * {@link #flush} drops everything not yet heard, for a seek or a skip, and restarts the clock.
+     */
+    public static final class MusicFeed {
+        public static final int RATE = 48_000;
+        static final int BUFFER_FRAMES = 2_400;
+        static final int BUFFERS = 8;
+
+        private record Chunk(short[] samples, long generation) {
+        }
+
+        private final AudioEngine engine;
+        private final ConcurrentLinkedQueue<Chunk> chunks = new ConcurrentLinkedQueue<>();
+        private final AtomicLong pending = new AtomicLong();
+        private volatile long generation;
+        private volatile float gain = 1f;
+        private volatile boolean paused = true;
+        // Published by the audio thread: frames heard and frames in OpenAL, for the generation it served.
+        private volatile long servedGeneration;
+        private volatile long played;
+        private volatile long inOpenAl;
+
+        private MusicFeed(AudioEngine engine) {
+            this.engine = engine;
+        }
+
+        /** Queues interleaved stereo frames; the feed owns the array from now on. */
+        public void write(short[] samples) {
+            if (samples.length < 2) {
+                return;
+            }
+            chunks.add(new Chunk(samples, generation));
+            pending.addAndGet(samples.length / 2);
+            LockSupport.unpark(engine.thread);
+        }
+
+        /** Frames written since the last flush and not yet heard. */
+        public long bufferedFrames() {
+            return Math.max(0, pending.get()) + (servedGeneration == generation ? inOpenAl : 0);
+        }
+
+        /** Frames heard since the last flush. */
+        public long playedFrames() {
+            return servedGeneration == generation ? played : 0;
+        }
+
+        /** Drops what has not been heard yet and restarts {@link #playedFrames} at zero. */
+        public void flush() {
+            generation++;
+            pending.set(0);
+            LockSupport.unpark(engine.thread);
+        }
+
+        /** The player's volume, 0..1, applied at once. */
+        public void gain(float value) {
+            gain = Math.clamp(value, 0f, 1f);
+            LockSupport.unpark(engine.thread);
+        }
+
+        public void paused(boolean value) {
+            paused = value;
+            LockSupport.unpark(engine.thread);
+        }
+
+        public boolean available() {
+            return engine.available;
+        }
+    }
+
+    private volatile MusicFeed music;
+
     // ---- audio-thread state ---------------------------------------------------------------------------------
+
+    private int musicSource;
+    private final int[] musicBuffers = new int[MusicFeed.BUFFERS];
+    private final int[] musicBufferFrames = new int[MusicFeed.BUFFERS];
+    private final int[] musicFree = new int[MusicFeed.BUFFERS];
+    private int musicFreeCount;
+    private long musicGeneration = -1;
+    private long musicPlayed;
+    private float musicGain = -1f;
+    private short[] musicChunk;
+    private int musicChunkOffset;
+    private ShortBuffer musicStaging;
 
     private long device;
     private long context;
@@ -336,6 +429,14 @@ public final class AudioEngine implements AutoCloseable {
         LockSupport.unpark(thread);
     }
 
+    /** The music player's feed (created on first use). */
+    public synchronized MusicFeed music() {
+        if (music == null) {
+            music = new MusicFeed(this);
+        }
+        return music;
+    }
+
     /** A one-line summary for --stats. */
     public String describe() {
         long served = Math.max(1, played);
@@ -383,7 +484,8 @@ public final class AudioEngine implements AutoCloseable {
                 }
                 updateListener();
                 service();
-                LockSupport.parkNanos(anyStream() ? 5_000_000L : 10_000_000L);
+                boolean musicPlaying = serviceMusic();
+                LockSupport.parkNanos(anyStream() || musicPlaying ? 5_000_000L : 10_000_000L);
             }
         } catch (RuntimeException failure) {
             System.err.println("Audio thread failed: " + failure);
@@ -391,6 +493,7 @@ public final class AudioEngine implements AutoCloseable {
             available = false;
         } finally {
             releaseAll();
+            releaseMusic();
             closeDevice();
         }
     }
@@ -964,6 +1067,132 @@ public final class AudioEngine implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /**
+     * Keeps the music source fed from the feed's queue, follows its flushes, pause and gain, and publishes its
+     * clock. True while music plays (the loop then wakes more often).
+     */
+    private boolean serviceMusic() {
+        MusicFeed feed = music;
+        if (feed == null) {
+            return false;
+        }
+        if (musicSource == 0) {
+            musicSource = AL10.alGenSources();
+            AL10.alSourcei(musicSource, AL10.AL_SOURCE_RELATIVE, AL10.AL_TRUE);
+            AL10.alSource3f(musicSource, AL10.AL_POSITION, 0f, 0f, 0f);
+            for (int index = 0; index < MusicFeed.BUFFERS; index++) {
+                musicBuffers[index] = AL10.alGenBuffers();
+                musicFree[index] = musicBuffers[index];
+            }
+            musicFreeCount = MusicFeed.BUFFERS;
+            musicStaging = MemoryUtil.memAllocShort(MusicFeed.BUFFER_FRAMES * 2);
+        }
+        long generation = feed.generation;
+        if (generation != musicGeneration) {
+            // A flush: everything queued goes, and chunks written before it are dropped.
+            AL10.alSourceStop(musicSource);
+            AL10.alSourcei(musicSource, AL10.AL_BUFFER, 0);
+            musicFreeCount = 0;
+            for (int buffer : musicBuffers) {
+                musicFree[musicFreeCount++] = buffer;
+            }
+            java.util.Arrays.fill(musicBufferFrames, 0);
+            musicChunk = null;
+            musicGeneration = generation;
+            musicPlayed = 0;
+        }
+        int processed = AL10.alGetSourcei(musicSource, AL10.AL_BUFFERS_PROCESSED);
+        while (processed-- > 0) {
+            int buffer = AL10.alSourceUnqueueBuffers(musicSource);
+            int slot = musicSlot(buffer);
+            musicPlayed += musicBufferFrames[slot];
+            musicBufferFrames[slot] = 0;
+            musicFree[musicFreeCount++] = buffer;
+        }
+        while (musicFreeCount > 0) {
+            int frames = fillMusicStaging(feed, generation);
+            if (frames == 0) {
+                break;
+            }
+            int buffer = musicFree[--musicFreeCount];
+            AL10.alBufferData(buffer, AL10.AL_FORMAT_STEREO16, musicStaging, MusicFeed.RATE);
+            musicBufferFrames[musicSlot(buffer)] = frames;
+            AL10.alSourceQueueBuffers(musicSource, buffer);
+        }
+        float gain = feed.gain;
+        if (gain != musicGain) {
+            AL10.alSourcef(musicSource, AL10.AL_GAIN, gain);
+            musicGain = gain;
+        }
+        int state = AL10.alGetSourcei(musicSource, AL10.AL_SOURCE_STATE);
+        int queued = AL10.alGetSourcei(musicSource, AL10.AL_BUFFERS_QUEUED);
+        if (feed.paused) {
+            if (state == AL10.AL_PLAYING) {
+                AL10.alSourcePause(musicSource);
+            }
+        } else if (state != AL10.AL_PLAYING && queued > 0) {
+            AL10.alSourcePlay(musicSource); // starting, resuming, or carrying on after an underrun
+            state = AL10.AL_PLAYING;
+        }
+        int offset = queued > 0 ? AL10.alGetSourcei(musicSource, AL11.AL_SAMPLE_OFFSET) : 0;
+        long inOpenAl = -offset;
+        for (int frames : musicBufferFrames) {
+            inOpenAl += frames;
+        }
+        feed.played = musicPlayed + offset;
+        feed.inOpenAl = Math.max(0, inOpenAl);
+        feed.servedGeneration = generation;
+        return state == AL10.AL_PLAYING;
+    }
+
+    private int musicSlot(int buffer) {
+        for (int index = 0; index < musicBuffers.length; index++) {
+            if (musicBuffers[index] == buffer) {
+                return index;
+            }
+        }
+        throw new IllegalStateException("Unknown music buffer " + buffer);
+    }
+
+    /** Copies up to one buffer of frames from the feed's queue into the staging buffer; the frames copied. */
+    private int fillMusicStaging(MusicFeed feed, long generation) {
+        musicStaging.clear();
+        while (musicStaging.hasRemaining()) {
+            if (musicChunk == null || musicChunkOffset >= musicChunk.length) {
+                MusicFeed.Chunk next = feed.chunks.poll();
+                if (next == null) {
+                    break;
+                }
+                if (next.generation() != generation) {
+                    continue; // written before a flush
+                }
+                musicChunk = next.samples();
+                musicChunkOffset = 0;
+            }
+            int count = Math.min(musicStaging.remaining(), musicChunk.length - musicChunkOffset);
+            musicStaging.put(musicChunk, musicChunkOffset, count);
+            musicChunkOffset += count;
+            feed.pending.addAndGet(-(count / 2));
+        }
+        musicStaging.flip();
+        return musicStaging.remaining() / 2;
+    }
+
+    private void releaseMusic() {
+        if (musicSource == 0 || context == MemoryUtil.NULL) {
+            return;
+        }
+        AL10.alSourceStop(musicSource);
+        AL10.alSourcei(musicSource, AL10.AL_BUFFER, 0);
+        AL10.alDeleteSources(musicSource);
+        for (int buffer : musicBuffers) {
+            AL10.alDeleteBuffers(buffer);
+        }
+        musicSource = 0;
+        MemoryUtil.memFree(musicStaging);
+        musicStaging = null;
     }
 
     /** Stops everything and deletes every source and buffer (the device and context stay). */

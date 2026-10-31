@@ -91,7 +91,7 @@ internal fun SettingsPage(controller: MenuController) {
     val categories = remember(store) { store.schema().categories() }
     val pending = controller.pendingRestart(snapshot)
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight()) {
+        Panel(Modifier.widthIn(max = 1040.dp).fillMaxWidth().heightIn(max = PagePanelMaxHeight).fillMaxHeight(), morph = MenuPage.SETTINGS) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BackHeader(controller, "Settings")
                 Spacer(Modifier.weight(1f))
@@ -449,7 +449,8 @@ private fun SettingControl(
                 Icon(AlkalineIcons.ChevronDown, if (expanded) "Collapse" else "Edit color", Modifier.size(20.dp).rotate(rotation))
             }
         }
-        is Setting.StringSetting -> Text(snapshot.get(setting), style = MaterialTheme.typography.labelLarge)
+        is Setting.StringSetting -> TextControl(store, snapshot.get(setting), setting)
+        is Setting.OptionSetting -> OptionControl(store, snapshot.get(setting), setting)
         is Setting.KeySetting -> Text(bindingLabel(snapshot.get(setting)), style = MaterialTheme.typography.labelLarge)
     }
 }
@@ -510,6 +511,7 @@ private fun groupTitle(group: String): String = when (group) {
     "gameplay" -> "Gameplay"
     "inventory" -> "Inventory"
     "multiplayer" -> "Multiplayer"
+    "music" -> "Music"
     else -> "Miscellaneous"
 }
 
@@ -639,6 +641,67 @@ private fun <E : Enum<E>> EnumControl(store: ConfigStore, snapshot: ConfigSnapsh
             ) {
                 Text(displayName(value))
             }
+        }
+    }
+}
+
+/** A fixed list of named options: connected toggle buttons for a few, a menu for more. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun OptionControl(store: ConfigStore, selected: String, setting: Setting.OptionSetting) {
+    val options = setting.options()
+    if (options.size <= 4) {
+        Row(horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
+            options.forEachIndexed { index, option ->
+                ToggleButton(
+                    checked = option == selected,
+                    onCheckedChange = { store.update(setting, option) },
+                    shapes = when (index) {
+                        0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                        options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                        else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                    },
+                    modifier = Modifier.semantics { role = Role.RadioButton },
+                ) { Text(option) }
+            }
+        }
+        return
+    }
+    var open by remember(setting) { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.widthIn(min = 152.dp)) {
+            Text(selected, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.width(4.dp))
+            Icon(AlkalineIcons.ChevronDown, null, Modifier.size(18.dp))
+        }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            for (option in options) {
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        store.update(setting, option)
+                        open = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** A single line of text, saved as it is typed (within the setting's length). */
+@Composable
+private fun TextControl(store: ConfigStore, value: String, setting: Setting.StringSetting) {
+    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
+        modifier = Modifier.width(220.dp).height(40.dp)) {
+        Box(Modifier.padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = value,
+                onValueChange = { if (it.length <= setting.maxLength() && '\n' !in it) store.update(setting, it) },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }

@@ -4,7 +4,6 @@ import alkaline.game.net.PacketBuffer;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.LongConsumer;
 
 /**
@@ -71,7 +70,11 @@ public final class ClientWorld {
      */
     private final Cached[] cached = new Cached[64];
     private volatile int columnVersion;
-    private final ConcurrentLinkedQueue<Long> changed = new ConcurrentLinkedQueue<>();
+    /**
+     * Sections changed since the last drain, once each: a column load touches 27 sections per section and
+     * relighting touches the same few sections cell after cell, so a queue would hand most of them out many times.
+     */
+    private final java.util.Set<Long> changed = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final boolean skyLight;
     private final WorldBorder border = new WorldBorder();
     /** Relights after block changes once {@link #lightRules} are set; null until then. */
@@ -213,6 +216,23 @@ public final class ClientWorld {
                 }
             }
         }
+    }
+
+    /**
+     * Copies one section's block states (index {@code y << 8 | z << 4 | x}) into {@code states}; false when the
+     * column is not loaded or the section is empty (all air), leaving {@code states} untouched.
+     */
+    public boolean sectionStates(int sectionX, int sectionY, int sectionZ, char[] states) {
+        if (sectionY < 0 || sectionY >= SECTIONS) {
+            return false;
+        }
+        Column column = column(sectionX, sectionZ);
+        Section section = column == null ? null : column.sections[sectionY];
+        if (section == null) {
+            return false;
+        }
+        System.arraycopy(section.states, 0, states, 0, section.states.length);
+        return true;
     }
 
     static int cell(int x, int y, int z) {
@@ -534,11 +554,13 @@ public final class ClientWorld {
         }
     }
 
-    /** Hands every section changed since the last call to {@code consumer} (duplicates possible). */
+    /** Hands every section changed since the last call to {@code consumer}, once each. */
     public void drainChanged(LongConsumer consumer) {
-        Long key;
-        while ((key = changed.poll()) != null) {
-            consumer.accept(key);
+        for (Long key : changed) {
+            // Removed before it is handed out: a change made meanwhile marks it again for the next drain.
+            if (changed.remove(key)) {
+                consumer.accept(key);
+            }
         }
     }
 }

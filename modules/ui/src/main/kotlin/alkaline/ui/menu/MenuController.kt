@@ -26,7 +26,7 @@ enum class PlayPhase { MENU, CONNECTING, PLAYING, PAUSED }
  * What covers the game while playing: nothing, the ClickGUI, the HUD editor, a container screen (the inventory
  * or a window the server opened), the sign editor, the chat line being typed, or a server's resource pack offer.
  */
-enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN, CHAT, SERVER_PACK, DEATH }
+enum class Overlay { NONE, CLICK_GUI, HUD_EDITOR, INVENTORY, SIGN, CHAT, SERVER_PACK, DEATH, PLUGIN }
 
 /**
  * A container screen's input: pointer events by window slot ({@code -999} outside the window, -1 inside it but
@@ -139,6 +139,52 @@ class MenuController @JvmOverloads constructor(
 
     /** The HUD editor's selection and snapping. */
     val hudEditor = HudEditor()
+
+    /** Installed plugins, once the client has created its host; null where plugins do not apply (previews). */
+    var plugins: alkaline.ui.plugins.PluginHost?
+        get() = pluginHost
+        set(host) {
+            pluginHost = host
+            host?.screens = { showPluginScreen(it) }
+        }
+    private var pluginHost by mutableStateOf<alkaline.ui.plugins.PluginHost?>(null)
+
+    /** The music player, once the client has started it; null where it does not apply (previews). */
+    var music by mutableStateOf<alkaline.ui.music.MusicController?>(null)
+
+    /** The plugin screen over the game while [Overlay.PLUGIN] is open. */
+    var pluginScreen by mutableStateOf<alkaline.ui.plugins.PluginHost.PluginScreen?>(null)
+        private set
+
+    /**
+     * A plugin opens its screen over the game (replacing the ClickGUI or another plugin's screen, never a window
+     * the server opened), or closes it with null. UI thread.
+     */
+    private fun showPluginScreen(screen: alkaline.ui.plugins.PluginHost.PluginScreen?) {
+        if (screen == null) {
+            if (overlay == Overlay.PLUGIN) closeOverlay()
+            pluginScreen = null
+            return
+        }
+        if (play != PlayPhase.PLAYING && play != PlayPhase.PAUSED) return
+        if (overlay != Overlay.NONE && overlay != Overlay.CLICK_GUI && overlay != Overlay.PLUGIN) return
+        pluginScreen = screen
+        overlay = Overlay.PLUGIN
+    }
+
+    /** Short messages for the player: the HUD's Notifications element in game, the corner of the menus otherwise. */
+    val notifications = alkaline.ui.hud.Notifications()
+
+    /** Posts a notification. Call on the UI thread. */
+    @JvmOverloads
+    fun showNotification(
+        title: String,
+        text: String = "",
+        kind: alkaline.ui.hud.Notification.Kind = alkaline.ui.hud.Notification.Kind.INFO,
+        source: String? = null,
+    ) {
+        notifications.post(alkaline.ui.hud.Notification(title, text, kind, source))
+    }
 
     /** Refresh rate of the window's display in whole Hz, 0 when unknown; the client keeps it current. */
     var displayRate by mutableStateOf(0)
@@ -295,6 +341,7 @@ class MenuController @JvmOverloads constructor(
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
         if (overlay == Overlay.SIGN) actions.signDone(signLines)
         if (overlay == Overlay.CHAT) chat.close()
+        if (overlay == Overlay.PLUGIN) pluginScreen = null
         if (overlay == Overlay.SERVER_PACK) {
             answerServerPack(false)
             return
@@ -390,6 +437,11 @@ class MenuController @JvmOverloads constructor(
         page = target
     }
 
+    private var titleEntered = false
+
+    /** True the first time the title page appears (its actions stagger in then), false afterwards. */
+    internal fun firstTitleEntrance(): Boolean = !titleEntered.also { titleEntered = true }
+
     var play by mutableStateOf(PlayPhase.MENU)
         private set
 
@@ -408,13 +460,21 @@ class MenuController @JvmOverloads constructor(
         actions.join(address)
     }
 
-    /** The host finished logging in; the world takes over the screen. Call on the UI thread. */
+    /**
+     * The world is ready and takes over the screen: the host cross-fades its background over [WORLD_FADE_MILLIS]
+     * while the joining card fades out and the HUD fades in. Call on the UI thread.
+     */
     fun joined() {
         if (play == PlayPhase.CONNECTING) {
             death = null
             play = PlayPhase.PLAYING
+            worldReveals++
         }
     }
+
+    /** Counts [joined] calls, so the HUD knows to fade in with the world. */
+    internal var worldReveals by mutableStateOf(0)
+        private set
 
     /** Opens the pause card (the host releases the mouse). Call on the UI thread. */
     fun pause() {
@@ -492,7 +552,7 @@ class MenuController @JvmOverloads constructor(
                 closeHudEditor()
                 return true
             }
-            Overlay.CLICK_GUI, Overlay.INVENTORY, Overlay.SIGN, Overlay.CHAT, Overlay.SERVER_PACK -> {
+            Overlay.CLICK_GUI, Overlay.INVENTORY, Overlay.SIGN, Overlay.CHAT, Overlay.SERVER_PACK, Overlay.PLUGIN -> {
                 closeOverlay()
                 return true
             }

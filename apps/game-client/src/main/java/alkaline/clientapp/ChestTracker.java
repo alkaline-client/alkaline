@@ -46,7 +46,6 @@ final class ChestTracker {
     private final Map<Long, List<Long>> bySection = new HashMap<>();
     private final Set<Long> dirty = new LinkedHashSet<>();
     private final char[] states = new char[16 * 16 * 16];
-    private final byte[] light = new byte[16 * 16 * 16];
 
     static long key(int x, int y, int z) {
         return ((long) x & 0x3FFFFFFL) << 38 | ((long) y & 0xFFFL) << 26 | (long) z & 0x3FFFFFFL;
@@ -91,10 +90,9 @@ final class ChestTracker {
                 }
             }
         }
-        if (!world.isLoaded(baseX >> 4, baseZ >> 4)) {
+        if (!world.sectionStates(baseX >> 4, baseY >> 4, baseZ >> 4, states)) {
             return;
         }
-        world.copy(baseX, baseY, baseZ, 16, 16, 16, states, light);
         List<Long> found = null;
         for (int index = 0; index < states.length; index++) {
             int block = states[index] >> 4;
@@ -102,8 +100,8 @@ final class ChestTracker {
                 continue;
             }
             int x = baseX + (index & 15);
-            int y = baseY + (index >> 4 & 15);
-            int z = baseZ + (index >> 8);
+            int z = baseZ + (index >> 4 & 15);
+            int y = baseY + (index >> 8);
             long key = key(x, y, z);
             Chest chest = kept.get(key);
             if (chest == null) {

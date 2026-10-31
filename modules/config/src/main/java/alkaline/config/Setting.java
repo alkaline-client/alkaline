@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
  */
 public abstract sealed class Setting<T>
         permits Setting.BooleanSetting, Setting.IntSetting, Setting.FloatSetting, Setting.EnumSetting,
-        Setting.ColorSetting, Setting.StringSetting, Setting.KeySetting {
+        Setting.ColorSetting, Setting.StringSetting, Setting.KeySetting, Setting.OptionSetting {
     private static final Pattern ID = Pattern.compile("[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+");
 
     private final String id;
@@ -144,6 +144,12 @@ public abstract sealed class Setting<T>
      */
     public static KeySetting key(String id, String category, String title, String description, String defaultValue) {
         return new KeySetting(id, category, title, description, defaultValue);
+    }
+
+    /** One of a fixed list of named options, for choices declared at run time (an enum's constants are not known). */
+    public static OptionSetting option(String id, String category, String title, String description,
+                                       List<String> options, String defaultValue) {
+        return new OptionSetting(id, category, title, description, options, defaultValue);
     }
 
     public static StringSetting text(String id, String category, String title, String description,
@@ -387,6 +393,45 @@ public abstract sealed class Setting<T>
         @Override
         String decode(Object json) {
             return json instanceof String text && valid(text) ? text : null;
+        }
+
+        @Override Object encode(String value) { return value; }
+    }
+
+    /** One of a fixed list of options, persisted by name. */
+    public static final class OptionSetting extends Setting<String> {
+        private final List<String> options;
+        private final String defaultValue;
+
+        private OptionSetting(String id, String category, String title, String description, List<String> options,
+                              String defaultValue) {
+            super(id, category, title, description);
+            this.options = List.copyOf(options);
+            if (this.options.isEmpty() || !this.options.contains(defaultValue)
+                    || new java.util.HashSet<>(this.options).size() != this.options.size()) {
+                throw new IllegalArgumentException("Option setting " + id
+                        + " needs distinct options that include its default.");
+            }
+            this.defaultValue = defaultValue;
+        }
+
+        public List<String> options() {
+            return options;
+        }
+
+        @Override public String defaultValue() { return defaultValue; }
+
+        @Override
+        public String validate(String value) {
+            if (!options.contains(value)) {
+                throw new IllegalArgumentException(id() + " has no option " + value);
+            }
+            return value;
+        }
+
+        @Override
+        String decode(Object json) {
+            return json instanceof String text && options.contains(text) ? text : null;
         }
 
         @Override Object encode(String value) { return value; }

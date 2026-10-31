@@ -1,7 +1,10 @@
 package alkaline.renderer.vulkan.ui
 
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
@@ -58,8 +61,17 @@ internal class GlassRegistry {
 internal val LocalGlassRegistry = staticCompositionLocalOf<GlassRegistry?> { null }
 
 /**
+ * How visible the content around a glass surface is, 0..1, while it fades in or out as a whole (a menu page,
+ * the joining card). Compose alpha cannot reach the GPU backdrop, so surfaces scale their opacity by it; null
+ * when nothing is fading.
+ */
+val LocalGlassFade = staticCompositionLocalOf<State<Float>?> { null }
+
+/**
  * Requests a frosted backdrop with the element's bounds and corner radius. No-op outside the in-game host and
  * when not [enabled]. [hud] marks HUD elements, which blur by their own option rather than the menu setting.
+ * The backdrop fades with [LocalGlassFade] unless [fades] is false (a surface that morphs into another and
+ * must stay solid throughout).
  */
 fun Modifier.glass(
     cornerRadius: Dp,
@@ -67,18 +79,21 @@ fun Modifier.glass(
     enabled: Boolean = true,
     hud: Boolean = false,
     opacity: Float = 1f,
+    fades: Boolean = true,
 ): Modifier = composed {
     val registry = LocalGlassRegistry.current
     if (registry == null || !enabled) return@composed this
     val key = remember { Any() }
     val bounds = remember { arrayOfNulls<Rect>(1) }
     val radius = with(LocalDensity.current) { cornerRadius.toPx() }
+    val fade = if (fades) LocalGlassFade.current else null
     fun publish() {
         val rect = bounds[0]
+        val shown = opacity * (fade?.value ?: 1f)
         registry.update(
             key,
-            if (rect != null && rect.width > 0f && rect.height > 0f && opacity > 0f) {
-                GlassRegion(rect.left, rect.top, rect.right, rect.bottom, radius, tint, opacity.coerceAtMost(1f), hud)
+            if (rect != null && rect.width > 0f && rect.height > 0f && shown > 0f) {
+                GlassRegion(rect.left, rect.top, rect.right, rect.bottom, radius, tint, shown.coerceAtMost(1f), hud)
             } else {
                 null
             },
@@ -89,6 +104,10 @@ fun Modifier.glass(
     }
     // Tint and opacity can change without the element moving, which onGloballyPositioned would not report.
     SideEffect { publish() }
+    // A fade animates without recomposing this element; follow it directly.
+    if (fade != null) {
+        LaunchedEffect(fade) { snapshotFlow { fade.value }.collect { publish() } }
+    }
     onGloballyPositioned { coordinates ->
         bounds[0] = coordinates.boundsInRoot()
         publish()

@@ -97,9 +97,9 @@ public final class ClientMain {
 
     /** Command-line switches; {@code --screenshot} exists for scripted visual checks. */
     record LaunchOptions(Path settingsFile, Path screenshot, int screenshotDelayMillis, String page, String inputScript,
-                         boolean stats, String join) {
+                         boolean stats, String join, Path world) {
         static final String USAGE = "Usage: game-client [--settings <file>] [--screenshot <png> [--after-ms <n>]] [--page title|singleplayer|multiplayer|settings]"
-                + " [--input-script <ms>:click|move|resize:<x>,<y>;<ms>:key:<name>;...] [--stats] [--join <host[:port]>]";
+                + " [--input-script <ms>:click|move|resize:<x>,<y>;<ms>:key:<name>;...] [--stats] [--join <host[:port]>] [--world <save folder>]";
 
         static LaunchOptions parse(String[] args) {
             Path settings = Path.of(System.getProperty("user.home"), ".alkaline", "legacy", "settings.json");
@@ -109,6 +109,7 @@ public final class ClientMain {
             String inputScript = "";
             boolean stats = false;
             String join = null;
+            Path world = null;
             for (int index = 0; index < args.length; index++) {
                 String argument = args[index];
                 switch (argument) {
@@ -128,10 +129,11 @@ public final class ClientMain {
                     case "--input-script" -> inputScript = value(args, ++index, argument);
                     case "--stats" -> stats = true;
                     case "--join" -> join = value(args, ++index, argument);
+                    case "--world" -> world = Path.of(value(args, ++index, argument)).toAbsolutePath();
                     default -> throw new IllegalArgumentException("Unknown argument " + argument);
                 }
             }
-            return new LaunchOptions(settings, screenshot, delay, page, inputScript, stats, join);
+            return new LaunchOptions(settings, screenshot, delay, page, inputScript, stats, join, world);
         }
 
         private static String value(String[] args, int index, String flag) {

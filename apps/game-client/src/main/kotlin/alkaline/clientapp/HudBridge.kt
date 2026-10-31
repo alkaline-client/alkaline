@@ -49,8 +49,10 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
 
     fun frame(
         play: PlaySession, settings: ConfigSnapshot, fps: Int, server: String, leftCps: Int, rightCps: Int,
-        keys: Int, showPlayers: Boolean, chat: ChatText, movementStatus: String = "",
+        keys: Int, showPlayers: Boolean, chat: ChatText, movementStatus: String = "", targetKeepMillis: Long = 5000L,
     ): HudFrame {
+        val now = System.currentTimeMillis()
+        val combat = play.combat()
         val player = play.player()
         val inventory = play.inventory()
         val dx = player.x - player.previousX
@@ -115,9 +117,48 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
             movementStatus = movementStatus,
             playerListHeader = play.playerListHeader(),
             playerListFooter = play.playerListFooter(),
+            reach = combat.reach().toFloat(),
+            combo = combat.combo(now),
+            target = target(play, combat.target(now, targetKeepMillis)),
+            armorPieces = List(4) { piece -> item(inventory.armor(3 - piece)) },
+            held = item(inventory.held()),
+            itemCounts = counts(inventory),
         )
     }
 
+    /** The Target HUD's player: its tab-list name with team colors, health from its metadata, and its armor. */
+    private fun target(play: PlaySession, id: Int): alkaline.ui.hud.HudTarget? {
+        if (id < 0) return null
+        val entity = play.entities().get(id) ?: return null
+        if (entity.dead) return null
+        val player = play.player()
+        val name = play.players().get(entity.uuid)?.name() ?: "Player"
+        val dx = entity.x - player.x
+        val dy = entity.y - player.y
+        val dz = entity.z - player.z
+        return alkaline.ui.hud.HudTarget(
+            play.scoreboard().format(name), entity.health(), if (entity.maxHealth > 0f) entity.maxHealth else 20f,
+            sqrt(dx * dx + dy * dy + dz * dz).toFloat(),
+            listOf(4, 3, 2, 1).map { item(entity.equipment[it]) }, item(entity.equipment[0]),
+        )
+    }
+
+    /** The Item counter's kinds that the player carries, in a fixed order, each with its first stack's icon. */
+    private fun counts(inventory: Inventory): List<alkaline.ui.hud.HudCount> {
+        val totals = IntArray(COUNTED.size)
+        val first = arrayOfNulls<ItemStack>(COUNTED.size)
+        for (slot in Inventory.FIRST_MAIN until Inventory.SLOTS) {
+            val stack = inventory.slot(slot) ?: continue
+            val kind = COUNTED.indexOfFirst { it(stack) }
+            if (kind >= 0) {
+                totals[kind] += stack.count()
+                if (first[kind] == null) first[kind] = stack
+            }
+        }
+        return COUNTED.indices.mapNotNull { kind ->
+            first[kind]?.let { stack -> item(stack)?.let { alkaline.ui.hud.HudCount(it.copy(count = 1), totals[kind]) } }
+        }
+    }
     /** The open container's screen state: its slots (drag previews applied) and the kind's own values. */
     private fun container(play: PlaySession): ContainerView? {
         val container = play.container() ?: return null
@@ -206,7 +247,7 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
         val max = Items.maxDamage(stack.id())
         val durability = if (max > 0 && stack.damage() > 0) (1f - stack.damage().toFloat() / max).coerceIn(0f, 1f) else -1f
         val glint = catalog.glintStyle(stack)
-        return HudItem(icon(stack), stack.count(), durability, glint >= 0, glint)
+        return HudItem(icon(stack), stack.count(), durability, glint >= 0, glint, if (max > 0) max - stack.damage() else -1)
     }
 
     /**
@@ -229,6 +270,15 @@ class HudBridge(private val catalog: ItemCatalog, private val sprites: HudSprite
     }
 
     private companion object {
+        /**
+         * The Item counter's kinds: golden apples, ender pearls, instant health potions (the potion type in the
+         * damage value's low four bits is 5, drinkable or splash), mushroom stew and arrows.
+         */
+        val COUNTED: List<(ItemStack) -> Boolean> = listOf(
+            { it.id() == 322 }, { it.id() == 368 }, { it.id() == 373 && it.damage() and 15 == 5 },
+            { it.id() == 282 }, { it.id() == 262 },
+        )
+
         /** Potion names (en_US) by 1.8.9 id. */
         val EFFECT_NAMES = mapOf(
             1 to "Speed", 2 to "Slowness", 3 to "Haste", 4 to "Mining Fatigue", 5 to "Strength",

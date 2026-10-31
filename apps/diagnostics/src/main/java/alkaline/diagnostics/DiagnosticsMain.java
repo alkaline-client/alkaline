@@ -34,7 +34,8 @@ public final class DiagnosticsMain {
             } else if (args.length >= 1 && "--click-fix".equals(args[0])) {
                 status = ClickTest.fix(args.length > 1 ? args[1] : "status");
             } else if (args.length >= 2 && "--connect".equals(args[0])) {
-                status = ConnectTest.run(args[1], args.length > 2 ? args[2] : "Alkaline", 6);
+                status = ConnectTest.run(args[1], args.length > 2 ? args[2] : "Alkaline",
+                        args.length > 3 ? Integer.parseInt(args[3]) : 6);
             } else if (args.length >= 1 && "--block-gallery".equals(args[0])) {
                 int view = args.length > 1 ? Integer.parseInt(args[1]) : 0;
                 java.nio.file.Path shot = args.length > 3 && "--screenshot".equals(args[2])

@@ -255,6 +255,13 @@ final class ClientApp implements AutoCloseable {
             }
 
             @Override
+            public void playWorld(java.nio.file.Path folder, String name) {
+                joinedAddress = name;
+                int attempt = joinAttempt.incrementAndGet();
+                Thread.ofVirtual().name("alkaline-singleplayer").start(() -> openWorld(folder, name, attempt));
+            }
+
+            @Override
             public void resumeGame() {
             }
 
@@ -570,6 +577,8 @@ final class ClientApp implements AutoCloseable {
                 menu.finishLoading();
                 if (options.join() != null) {
                     menu.join(options.join());
+                } else if (options.world() != null) {
+                    menu.playWorld(options.world(), options.world().getFileName().toString());
                 }
                 return kotlin.Unit.INSTANCE;
             });
@@ -730,6 +739,12 @@ final class ClientApp implements AutoCloseable {
                 view.zoom(zooming ? modules.get(alkaline.client.modules.Modules.ZOOM_FACTOR) : 1f,
                         modules.get(alkaline.client.modules.Modules.ZOOM_SMOOTH));
                 view.handStyle(handStyle(modules));
+                boolean freelook = modules.get(alkaline.client.modules.Modules.FREELOOK.enabled()) && menu.gameHasInput()
+                        && PlaySession.held(modules.get(alkaline.client.modules.Modules.FREELOOK_KEY), heldKeys, heldButtons);
+                if (freelook != view.freelooking()) {
+                    view.freelook(freelook);
+                }
+                view.outlineStyle(outlineStyle(modules));
                 view.followSelf();
                 view.publishProjection = plugins.getWantsCamera();
                 if (!view.publishProjection) {
@@ -765,6 +780,24 @@ final class ClientApp implements AutoCloseable {
         return lastHandStyle;
     }
 
+    /** The Block outline and Hitboxes modules as the view's outline style, kept while their values stay the same. */
+    private GameView.OutlineStyle outlineStyle(ConfigSnapshot modules) {
+        GameView.OutlineStyle style = new GameView.OutlineStyle(
+                modules.get(alkaline.client.modules.Modules.BLOCK_OUTLINE.enabled()),
+                modules.get(alkaline.client.modules.Modules.BLOCK_OUTLINE_COLOR),
+                modules.get(alkaline.client.modules.Modules.BLOCK_OUTLINE_WIDTH),
+                modules.get(alkaline.client.modules.Modules.HITBOXES.enabled()),
+                modules.get(alkaline.client.modules.Modules.HITBOXES_ALL),
+                modules.get(alkaline.client.modules.Modules.HITBOXES_LOOK),
+                modules.get(alkaline.client.modules.Modules.HITBOXES_COLOR));
+        if (!style.equals(lastOutlineStyle)) {
+            lastOutlineStyle = style;
+        }
+        return lastOutlineStyle;
+    }
+
+    private GameView.OutlineStyle lastOutlineStyle = GameView.OutlineStyle.VANILLA;
+
     private alkaline.renderer.model.FirstPersonItem.Style lastHandStyle =
             alkaline.renderer.model.FirstPersonItem.Style.VANILLA;
 
@@ -787,7 +820,8 @@ final class ClientApp implements AutoCloseable {
         }
         boolean players = input && PlaySession.held(settings.get(ClientSettings.KEY_PLAYER_LIST), heldKeys, heldButtons);
         alkaline.ui.hud.HudFrame frame = hudBridge.frame(play, settings, fps.fps(), joinedAddress, cps(leftClicks, now),
-                cps(rightClicks, now), keys, players, chatText, play.movementStatus(settings, heldKeys, heldButtons));
+                cps(rightClicks, now), keys, players, chatText, play.movementStatus(settings, heldKeys, heldButtons),
+                profiles.store().snapshot().get(alkaline.client.modules.Modules.TARGET_SECONDS) * 1000L);
         if (!frame.equals(publishedHud)) {
             publishedHud = frame;
             ui.post(() -> {
@@ -798,6 +832,37 @@ final class ClientApp implements AutoCloseable {
     }
 
     // ---- multiplayer ---------------------------------------------------------------------------------------
+
+    /** Starts a singleplayer world on the local server off the render thread, then joins it. */
+    private void openWorld(java.nio.file.Path folder, String name, int attempt) {
+        try {
+            alkaline.client.account.MinecraftSession account = services.accounts().session();
+            int port = services.worldServer().start(new alkaline.client.worlds.IntegratedServer.World(folder, name),
+                    account != null ? account.profile().name() : "Player",
+                    config.snapshot().get(ClientSettings.WORLD_RENDER_DISTANCE),
+                    status -> ui.post(() -> {
+                        menu.setConnectStatus(status);
+                        return kotlin.Unit.INSTANCE;
+                    }));
+            if (attempt != joinAttempt.get()) {
+                services.worldServer().stopAsync();
+                return;
+            }
+            connect("127.0.0.1:" + port, attempt);
+        } catch (java.util.concurrent.CancellationException cancelled) {
+            // The player cancelled; leaveGame already returned to the menu.
+        } catch (java.io.IOException | RuntimeException failure) {
+            if (attempt == joinAttempt.get()) {
+                String reason = failure.getMessage();
+                ui.post(() -> {
+                    menu.left(reason == null ? failure.getClass().getSimpleName() : reason);
+                    return kotlin.Unit.INSTANCE;
+                });
+            }
+        } catch (InterruptedException interrupted) {
+            services.worldServer().stopAsync();
+        }
+    }
 
     /** Resolves, connects and logs in off the render thread; hands the session to the render thread. */
     private void connect(String typed, int attempt) {
@@ -824,6 +889,7 @@ final class ClientApp implements AutoCloseable {
             }
             mainThreadTasks.add(() -> startGame(session, attempt, prepared));
         } catch (java.io.IOException | RuntimeException failure) {
+            services.worldServer().stopAsync();
             if (attempt == joinAttempt.get()) {
                 String reason = failure instanceof alkaline.game.net.Login.RefusedException refused
                         ? chatText(refused.reasonJson()) : failure.getMessage();
@@ -853,6 +919,7 @@ final class ClientApp implements AutoCloseable {
         BlockPalette palette = this.palette;
         if (attempt != joinAttempt.get() || palette == null) {
             session.close();
+            services.worldServer().stopAsync();
             if (palette == null) {
                 ui.post(() -> {
                     menu.left("Vanilla 1.8.9 assets are needed to draw the world.");
@@ -917,6 +984,7 @@ final class ClientApp implements AutoCloseable {
             }
         } catch (java.io.IOException | RuntimeException failure) {
             created.close();
+            services.worldServer().stopAsync();
             ui.post(() -> {
                 menu.left(failure.getMessage());
                 return kotlin.Unit.INSTANCE;
@@ -956,6 +1024,8 @@ final class ClientApp implements AutoCloseable {
     /** Leaves the game (or reports that it ended) and restores the menu. Render thread, outside frames. */
     private void endGame(String reason) {
         audio.stopAll();
+        // A singleplayer world saves and stops with its session (a no-op after multiplayer).
+        services.worldServer().stopAsync();
         // Minecraft.loadWorld(null) clears the server's pack: stop its download and drop it from the assets.
         serverPackRound.incrementAndGet();
         if (serverPack != null) {
@@ -1558,8 +1628,15 @@ final class ClientApp implements AutoCloseable {
             refreshDisplayRate();
         } else if (type == SDLEvents.SDL_EVENT_MOUSE_MOTION && event.motion().windowID() == windowId
                 && mouseCaptured && play != null) {
-            play.look(event.motion().xrel(), event.motion().yrel(), config.snapshot(),
-                    background instanceof GameView view ? view.magnification() : 1f);
+            ConfigSnapshot settings = config.snapshot();
+            if (background instanceof GameView view && view.freelooking()) {
+                float degrees = PlaySession.degreesPerCount(settings, view.magnification());
+                int invert = settings.get(ClientSettings.INVERT_MOUSE) ? -1 : 1;
+                view.freeLook(event.motion().xrel() * degrees, event.motion().yrel() * degrees * invert);
+            } else {
+                play.look(event.motion().xrel(), event.motion().yrel(), settings,
+                        background instanceof GameView view ? view.magnification() : 1f);
+            }
         } else if (type == SDLEvents.SDL_EVENT_MOUSE_BUTTON_DOWN || type == SDLEvents.SDL_EVENT_MOUSE_BUTTON_UP
                 || type == SDLEvents.SDL_EVENT_MOUSE_WHEEL) {
             if (!mouseCaptured) {

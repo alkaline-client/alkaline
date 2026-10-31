@@ -33,6 +33,32 @@ public final class WorldLibrary {
         return saves;
     }
 
+    /**
+     * A free folder for a new world called {@code name}, chosen as vanilla's create-world screen does
+     * (GuiCreateWorld.func_146317_a): characters a folder cannot hold become underscores, reserved Windows names
+     * are wrapped in underscores, and a dash is appended until the name is unused. The folder is not created.
+     */
+    public Path newWorldFolder(String name) {
+        String id = name.strip();
+        for (char disallowed : DISALLOWED) {
+            id = id.replace(disallowed, '_');
+        }
+        if (id.isEmpty()) {
+            id = "World";
+        }
+        if (RESERVED.matcher(id).matches()) {
+            id = "_" + id + "_";
+        }
+        while (Files.exists(saves.resolve(id))) {
+            id += "-";
+        }
+        return saves.resolve(id);
+    }
+
+    private static final char[] DISALLOWED = {'/', '\n', '\r', '\t', '\u0000', '\f', '`', '?', '*', '\\', '<', '>', '|', '"', ':'};
+    private static final java.util.regex.Pattern RESERVED = java.util.regex.Pattern.compile(
+            "^(CON|COM|PRN|AUX|CLOCK\\$|NUL|COM[1-9]|LPT[1-9])(\\..*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
+
     /** Reads every world asynchronously; completes with an empty list when the folder does not exist. */
     public CompletableFuture<List<SavedWorld>> scan() {
         return CompletableFuture.supplyAsync(this::scanNow,
@@ -78,7 +104,13 @@ public final class WorldLibrary {
         }
         return new SavedWorld(folder, name, data.getLong("LastPlayed"),
                 SavedWorld.GameMode.fromId(data.getInteger("GameType")), data.getBoolean("hardcore"),
-                data.getBoolean("allowCommands"), readIcon(folder.resolve("icon.png")));
+                data.getBoolean("allowCommands"), icon(folder, data));
+    }
+
+    /** The world's own icon.png (written by versions after 1.8.9), else a map of the area around the player. */
+    private static int[] icon(Path folder, NBTTagCompound data) {
+        int[] saved = readIcon(folder.resolve("icon.png"));
+        return saved != null ? saved : WorldMapIcon.render(folder, data);
     }
 
     private static int[] readIcon(Path file) {

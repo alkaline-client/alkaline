@@ -84,6 +84,7 @@ final class GameView implements MenuBackground {
     private final EntityView entities;
     private final PlayViewer viewer;
     private final BorderView border;
+    private final OutlineView outlines;
     private final CloudRenderer clouds;
     private final ParticleSystem particles = new ParticleSystem(PARTICLE_CAPACITY, 1_8_9L);
     private final ParticleRenderer particleRenderer;
@@ -211,6 +212,7 @@ final class GameView implements MenuBackground {
         entities.viewer(viewer);
         entities.maps(play.maps());
         border = new BorderView(renderer, assets, SCENE_FORMAT);
+        outlines = new OutlineView(renderer, SCENE_FORMAT);
         CloudRenderer createdClouds = null;
         try {
             createdClouds = new CloudRenderer(renderer, assets, SCENE_FORMAT);
@@ -333,6 +335,49 @@ final class GameView implements MenuBackground {
     void zoom(float factor, boolean smooth) {
         zoomFactor = factor;
         smoothZoom = smooth;
+    }
+
+    /** The Block outline and Hitboxes modules' settings, as this tick's profile has them. */
+    record OutlineStyle(boolean block, int blockArgb, float blockWidth, boolean hitboxes, boolean everyEntity,
+                        boolean lookLine, int hitboxArgb) {
+        static final OutlineStyle VANILLA = new OutlineStyle(true, 0x66000000, 2f, false, false, true, 0xFFFFFFFF);
+    }
+
+    private OutlineStyle outlineStyle = OutlineStyle.VANILLA;
+
+    void outlineStyle(OutlineStyle style) {
+        outlineStyle = Objects.requireNonNull(style, "style");
+    }
+
+    /**
+     * The Freelook module: while active the camera orbits the player in third person by its own yaw and pitch,
+     * and the player's aim stays put. Turning it off returns the camera to the player's look.
+     */
+    void freelook(boolean active) {
+        if (!active) {
+            freeYaw = 0f;
+            freePitch = 0f;
+        }
+        freelook = active;
+    }
+
+    boolean freelooking() {
+        return freelook;
+    }
+
+    /** Turns the free camera by degrees (positive pitch looks down). */
+    void freeLook(float yawDegrees, float pitchDegrees) {
+        freeYaw += yawDegrees;
+        freePitch = Math.max(-90f - player.pitch, Math.min(90f - player.pitch, freePitch + pitchDegrees));
+    }
+
+    private boolean freelook;
+    private float freeYaw;
+    private float freePitch;
+
+    /** The perspective drawn: Freelook shows the player from behind (or keeps the front view). */
+    private int viewPerspective() {
+        return freelook ? Math.max(perspective, 1) : perspective;
     }
 
     /** The Animations module's first-person style this tick ({@link FirstPersonItem.Style#VANILLA} when off). */
@@ -628,8 +673,11 @@ final class GameView implements MenuBackground {
         sceneWidth = swapchain ? frame.width() : target.width();
         sceneHeight = swapchain ? frame.height() : target.height();
         ConfigSnapshot values = config.get();
-        double yaw = Math.toRadians(player.yaw);
-        double pitch = Math.toRadians(player.pitch);
+        int perspective = viewPerspective();
+        float lookYaw = player.yaw + freeYaw;
+        float lookPitch = player.pitch + freePitch;
+        double yaw = Math.toRadians(lookYaw);
+        double pitch = Math.toRadians(lookPitch);
         // Minecraft's yaw 0 looks toward +z; pitch is positive looking down.
         forward[0] = (float) (-Math.sin(yaw) * Math.cos(pitch));
         forward[1] = (float) -Math.sin(pitch);
@@ -644,11 +692,12 @@ final class GameView implements MenuBackground {
         double feetY = player.previousY + (player.y - player.previousY) * partialTick;
         double feetZ = eyeZ;
         ClientWorld current = session.world();
-        float cameraYaw = player.yaw;
-        float cameraPitch = player.pitch;
+        float cameraYaw = lookYaw;
+        float cameraPitch = lookPitch;
         if (perspective > 0) {
             // EntityRenderer.orientCamera: four blocks behind (or in front of) the eyes, pulled in by walls.
-            double back = thirdPersonDistance(current, eyeX, eyeY, eyeZ) * (perspective == 2 ? -1.0 : 1.0);
+            double back = thirdPersonDistance(current, eyeX, eyeY, eyeZ, perspective, lookYaw, lookPitch)
+                    * (perspective == 2 ? -1.0 : 1.0);
             eyeX -= forward[0] * back;
             eyeY -= forward[1] * back;
             eyeZ -= forward[2] * back;
@@ -754,6 +803,7 @@ final class GameView implements MenuBackground {
                 perspective > 0 ? selfModel : null);
         renderer.gpuMark(frame, gpuEntities);
         drawDamage(frame, eyeX, eyeY, eyeZ);
+        drawOutlines(frame, current, partialTick, eyeX, eyeY, eyeZ, (float) Math.toRadians(fov));
         if (particleSheet != null) {
             world.cameraBasis(right, up);
             cameraPosition[0] = eyeX;
@@ -789,6 +839,86 @@ final class GameView implements MenuBackground {
             renderer.gpuMark(frame, gpuBlit);
         }
     }
+
+    /**
+     * The block outline (RenderGlobal.drawSelectionBoundingBox: the targeted block's box grown by 0.002) and the
+     * hitboxes (RenderManager.renderDebugBoundingBox: the entity's box, a red band at its eyes and a blue line two
+     * blocks along its look). The block's box is the union of its collision boxes within its cell, or the whole
+     * cell for blocks without one (stairs then outline as a cube and fences one block tall, as vanilla's do).
+     */
+    private void drawOutlines(VulkanFrame frame, ClientWorld current, float partialTick, double eyeX, double eyeY,
+                              double eyeZ, float fovRadians) {
+        OutlineStyle style = outlineStyle;
+        alkaline.game.player.BlockTarget block = style.block() ? play.crosshairBlock() : null;
+        if (block == null && !style.hitboxes()) {
+            return;
+        }
+        outlines.begin(frame, world.viewProjection(), fovRadians, sceneHeight);
+        if (block != null) {
+            int x = block.x();
+            int y = block.y();
+            int z = block.z();
+            outlineBoxes.clear();
+            alkaline.game.player.CollisionShapes.add(current::state, x, y, z,
+                    new alkaline.game.geometry.AxisAlignedBB(x, y, z, x + 1, y + 1, z + 1), outlineBoxes);
+            double minX = x + 1;
+            double minY = y + 1;
+            double minZ = z + 1;
+            double maxX = x;
+            double maxY = y;
+            double maxZ = z;
+            for (alkaline.game.geometry.AxisAlignedBB box : outlineBoxes) {
+                minX = Math.min(minX, Math.max(box.minX, x));
+                minY = Math.min(minY, Math.max(box.minY, y));
+                minZ = Math.min(minZ, Math.max(box.minZ, z));
+                maxX = Math.max(maxX, Math.min(box.maxX, x + 1));
+                maxY = Math.max(maxY, Math.min(box.maxY, y + 1));
+                maxZ = Math.max(maxZ, Math.min(box.maxZ, z + 1));
+            }
+            if (minX >= maxX || minY >= maxY || minZ >= maxZ) {
+                minX = x;
+                minY = y;
+                minZ = z;
+                maxX = x + 1;
+                maxY = y + 1;
+                maxZ = z + 1;
+            }
+            double grow = 0.002;
+            outlines.box((float) (minX - grow - eyeX), (float) (minY - grow - eyeY), (float) (minZ - grow - eyeZ),
+                    (float) (maxX + grow - eyeX), (float) (maxY + grow - eyeY), (float) (maxZ + grow - eyeZ),
+                    style.blockArgb(), style.blockWidth());
+        }
+        if (style.hitboxes()) {
+            int self = play.entities().selfId();
+            for (Entity entity : play.entities().all()) {
+                if (entity.id == self || !style.everyEntity() && entity.category != Entity.Category.PLAYER) {
+                    continue;
+                }
+                float half = EntityTypes.width(entity) / 2f;
+                float height = EntityTypes.height(entity);
+                float ex = (float) (entity.previousX + (entity.x - entity.previousX) * partialTick - eyeX);
+                float ey = (float) (entity.previousY + (entity.y - entity.previousY) * partialTick - eyeY);
+                float ez = (float) (entity.previousZ + (entity.z - entity.previousZ) * partialTick - eyeZ);
+                outlines.box(ex - half, ey, ez - half, ex + half, ey + height, ez + half, style.hitboxArgb(), 1.5f);
+                if (style.lookLine() && entity.living()) {
+                    float eye = entity.category == Entity.Category.PLAYER ? (entity.sneaking() ? 1.54f : 1.62f) : height * 0.85f;
+                    outlines.box(ex - half, ey + eye - 0.01f, ez - half, ex + half, ey + eye + 0.01f, ez + half,
+                            0xFFFF0000, 1.5f);
+                    float headYaw = entity.previousHeadYaw + (entity.headYaw - entity.previousHeadYaw) * partialTick;
+                    float headPitch = entity.previousPitch + (entity.pitch - entity.previousPitch) * partialTick;
+                    double yawRadians = Math.toRadians(headYaw);
+                    double pitchRadians = Math.toRadians(headPitch);
+                    float lx = (float) (-Math.sin(yawRadians) * Math.cos(pitchRadians)) * 2f;
+                    float ly = (float) -Math.sin(pitchRadians) * 2f;
+                    float lz = (float) (Math.cos(yawRadians) * Math.cos(pitchRadians)) * 2f;
+                    outlines.line(ex, ey + eye, ez, ex + lx, ey + eye + ly, ez + lz, 0xFF0000FF, 1.5f);
+                }
+            }
+        }
+        outlines.end();
+    }
+
+    private final java.util.List<alkaline.game.geometry.AxisAlignedBB> outlineBoxes = new java.util.ArrayList<>();
 
     /** RenderGlobal.drawBlockDamageTexture: the cracks of every block being dug within 32 blocks. */
     private void drawDamage(VulkanFrame frame, double eyeX, double eyeY, double eyeZ) {
@@ -834,11 +964,11 @@ final class GameView implements MenuBackground {
      * orientCamera's wall check: eight rays from just around the eyes to the camera, each shortening the distance
      * to where it hits. Vanilla adds the z jitter to x as well, so the rays are not symmetric; kept.
      */
-    private double thirdPersonDistance(ClientWorld current, double eyeX, double eyeY, double eyeZ) {
+    private double thirdPersonDistance(ClientWorld current, double eyeX, double eyeY, double eyeZ, int perspective,
+                                       float lookYaw, float lookPitch) {
         double distance = 4.0;
-        float lookPitch = perspective == 2 ? player.pitch + 180f : player.pitch;
-        double yaw = Math.toRadians(player.yaw);
-        double pitch = Math.toRadians(lookPitch);
+        double yaw = Math.toRadians(lookYaw);
+        double pitch = Math.toRadians(perspective == 2 ? lookPitch + 180f : lookPitch);
         double dx = -Math.sin(yaw) * Math.cos(pitch) * distance;
         double dz = Math.cos(yaw) * Math.cos(pitch) * distance;
         double dy = -Math.sin(pitch) * distance;
@@ -924,6 +1054,7 @@ final class GameView implements MenuBackground {
         }
         entities.close();
         border.close();
+        outlines.close();
         if (clouds != null) {
             clouds.close();
         }

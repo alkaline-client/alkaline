@@ -103,6 +103,17 @@ private fun ModuleElement(module: Module, frame: HudFrame, options: ConfigSnapsh
             val status = frame.movementStatus.ifEmpty { if (preview) HudFrame.SAMPLE.movementStatus else "" }
             if (options.get(Modules.TOGGLE_SPRINT_READOUT) && status.isNotEmpty()) Chip(status)
         }
+        Modules.REACH -> {
+            val reach = if (frame.reach < 0f && preview) HudFrame.SAMPLE.reach else frame.reach
+            Chip(if (reach < 0f) "— blocks" else String.format(Locale.ROOT, "%.2f blocks", reach))
+        }
+        Modules.COMBO -> {
+            val combo = if (frame.combo == 0 && preview) HudFrame.SAMPLE.combo else frame.combo
+            Chip(if (combo == 0) "No combo" else "$combo combo")
+        }
+        Modules.TARGET -> (frame.target ?: if (preview) HudFrame.SAMPLE.target else null)?.let { TargetCard(it) }
+        Modules.ARMOR -> ArmorStatus(if (preview && frame.armorPieces.all { it == null }) HudFrame.SAMPLE else frame, options)
+        Modules.ITEMS -> ItemCounts(frame.itemCounts.ifEmpty { if (preview) HudFrame.SAMPLE.itemCounts else emptyList() })
         else -> {}
     }
 }
@@ -534,4 +545,93 @@ internal fun DrawScope.sprite(image: ImageBitmap, u: Int, v: Int, width: Int, he
         image, IntOffset(u, v), IntSize(width, height), IntOffset(at.x.roundToInt(), at.y.roundToInt()),
         IntSize((width * scale).roundToInt(), (height * scale).roundToInt()), filterQuality = FilterQuality.None,
     )
+}
+
+/** The Target HUD: the opponent's name, a health bar with the hearts left, the distance and what they wear. */
+@Composable
+private fun TargetCard(target: HudTarget) {
+    val scheme = MaterialTheme.colorScheme
+    val sprites = LocalHudSprites.current
+    val fraction = (target.health / target.maxHealth).coerceIn(0f, 1f)
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = scheme.surfaceContainer.copy(alpha = 0.62f),
+        contentColor = scheme.onSurface,
+        modifier = Modifier.hudGlass(14.dp),
+    ) {
+        Column(Modifier.width(224.dp).padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(formatted(target.name, scheme.onSurface), style = MaterialTheme.typography.titleSmall, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(String.format(Locale.ROOT, "%.1f ❤", target.health / 2f), style = MaterialTheme.typography.labelLarge)
+            }
+            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(scheme.surfaceVariant)) {
+                // Green at full health through yellow to red, as the hue of vanilla's durability bars.
+                Box(Modifier.fillMaxWidth(fraction).height(6.dp).background(Color.hsv(fraction * 120f, 0.75f, 0.9f)))
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                for (item in target.armor + target.held) {
+                    Box(Modifier.size(Px * 16)) { if (item != null) ItemIcon(item.copy(count = 1), sprites) }
+                }
+                Spacer(Modifier.weight(1f))
+                Text(String.format(Locale.ROOT, "%.1f m", target.distance), style = MaterialTheme.typography.labelMedium,
+                    color = scheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/** Armor status: each worn piece (helmet first) and optionally the held item, with the uses each has left. */
+@Composable
+private fun ArmorStatus(frame: HudFrame, options: ConfigSnapshot) {
+    val sprites = LocalHudSprites.current
+    val items = if (options.get(Modules.ARMOR_HELD)) frame.armorPieces + frame.held else frame.armorPieces
+    val numbers = options.get(Modules.ARMOR_NUMBERS)
+    if (items.all { it == null }) return
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.62f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.hudGlass(12.dp),
+    ) {
+        Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            for (item in items) {
+                if (item == null) continue
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ItemIcon(item.copy(count = 1), sprites)
+                    if (numbers && item.usesLeft >= 0) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(item.usesLeft.toString(), style = MaterialTheme.typography.labelLarge,
+                            color = Color.hsv(item.durability.let { if (it < 0f) 1f else it } * 120f, 0.55f, 1f))
+                    } else if (item.count > 1) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(item.count.toString(), style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Item counter: one chip per kind carried, its icon and the total across the inventory. */
+@Composable
+private fun ItemCounts(counts: List<HudCount>) {
+    if (counts.isEmpty()) return
+    val sprites = LocalHudSprites.current
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.62f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.hudGlass(12.dp),
+    ) {
+        Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            for (count in counts) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ItemIcon(count.item, sprites)
+                    Spacer(Modifier.width(6.dp))
+                    Text(count.count.toString(), style = MaterialTheme.typography.labelLarge)
+                }
+            }
+        }
+    }
 }

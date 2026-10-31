@@ -50,7 +50,7 @@ import java.util.Locale
 /**
  * Singleplayer: the player's own worlds as cards, newest first, with a search field once there are enough to
  * need one. Selecting a card fills the footer; Play is the page's one primary action. Worlds come from the
- * vanilla saves folder; opening them needs the game adapter, which the footer says plainly.
+ * vanilla saves folder and open on the local server; New world creates a default survival world beside them.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -69,6 +69,23 @@ internal fun SingleplayerPage(controller: MenuController) {
                 Spacer(Modifier.weight(1f))
                 if ((worlds?.size ?: 0) > 6) {
                     PillField(query, { query = it }, "Search worlds", AlkalineIcons.Search, Modifier.width(300.dp))
+                    Spacer(Modifier.width(8.dp))
+                }
+                androidx.compose.material3.FilledTonalButton(onClick = {
+                    controller.playWorld(library.newWorldFolder("New World"), "New World")
+                }) {
+                    Icon(AlkalineIcons.Add, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("New world")
+                }
+            }
+            if (controller.singleplayer) {
+                controller.playError?.let { reason ->
+                    Text(
+                        "${controller.playAddress} closed: $reason",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
             val all = worlds
@@ -104,14 +121,14 @@ internal fun SingleplayerPage(controller: MenuController) {
                     }
                 }
             }
-            PlayBar(all?.firstOrNull { it.id() == selectedId })
+            PlayBar(all?.firstOrNull { it.id() == selectedId }) { controller.playWorld(it.folder, it.name) }
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun PlayBar(selected: SavedWorld?) {
+private fun PlayBar(selected: SavedWorld?, play: (SavedWorld) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(
@@ -120,7 +137,7 @@ private fun PlayBar(selected: SavedWorld?) {
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
             Text(
-                "Opening worlds needs the 1.8.9 game adapter, which is not in this build yet.",
+                selected?.let { describe(it) + " · " + relativeTime(it.lastPlayedMillis) } ?: "Or start a new one",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -128,8 +145,8 @@ private fun PlayBar(selected: SavedWorld?) {
         Spacer(Modifier.width(16.dp))
         val height = ButtonDefaults.MediumContainerHeight
         Button(
-            onClick = {},
-            enabled = false,
+            onClick = { selected?.let(play) },
+            enabled = selected != null,
             shapes = ButtonDefaults.shapesFor(height),
             contentPadding = ButtonDefaults.contentPaddingFor(height),
             modifier = Modifier.height(height),

@@ -68,6 +68,7 @@ public final class PlaySession implements AutoCloseable {
     private final EntityPicker picker = new EntityPicker();
     /** Minecraft.leftClickCounter. */
     private final AttackCooldown cooldown = new AttackCooldown();
+    private final CombatTracker combat = new CombatTracker();
     private final MapStore maps = new MapStore();
     /** The living entity under the crosshair within reach (RenderManager.pointedEntity), or null. */
     private Entity pointed;
@@ -202,6 +203,11 @@ public final class PlaySession implements AutoCloseable {
         return pointed;
     }
 
+    /** Landed hits, the combo and the player being fought, for the PvP readouts. */
+    CombatTracker combat() {
+        return combat;
+    }
+
     /** Minecraft.leftClickCounter, for the digging that holds the attack key. */
     AttackCooldown cooldown() {
         return cooldown;
@@ -312,12 +318,17 @@ public final class PlaySession implements AutoCloseable {
      * s gives f = (0.6 s + 0.2)^3 * 8 degrees-per-count factors of 0.15; zooming slows the turn by its magnification.
      */
     void look(float dx, float dy, ConfigSnapshot settings, float magnification) {
+        float degrees = degreesPerCount(settings, magnification);
+        int invert = settings.get(ClientSettings.INVERT_MOUSE) ? -1 : 1;
+        player.yaw += dx * degrees;
+        player.pitch = Math.max(-90.0F, Math.min(90.0F, player.pitch + dy * degrees * invert));
+    }
+
+    /** Degrees one count of relative mouse motion turns, as {@link #look} turns the player. */
+    static float degreesPerCount(ConfigSnapshot settings, float magnification) {
         float sensitivity = settings.get(ClientSettings.MOUSE_SENSITIVITY);
         float f = sensitivity * 0.6F + 0.2F;
-        float factor = f * f * f * 8.0F / magnification;
-        int invert = settings.get(ClientSettings.INVERT_MOUSE) ? -1 : 1;
-        player.yaw += dx * factor * 0.15F;
-        player.pitch = Math.max(-90.0F, Math.min(90.0F, player.pitch + dy * factor * 0.15F * invert));
+        return f * f * f * 8.0F / magnification * 0.15F;
     }
 
     /**
@@ -349,6 +360,7 @@ public final class PlaySession implements AutoCloseable {
             return;
         }
         session.sendAttack(target.id);
+        combat.attacked(target, picker.distance(), System.currentTimeMillis());
         // EntityPlayer.attackTargetEntityWithCurrentItem on the client: only another player "takes" the hit there
         // (EntityOtherPlayerMP.attackEntityFrom answers true; other entities false), so only hits on players slow
         // the attacker and show the critical and enchantment particles.
@@ -374,7 +386,7 @@ public final class PlaySession implements AutoCloseable {
      * The block under the crosshair when it is what the crosshair hits (Minecraft.objectMouseOver of type BLOCK):
      * within reach and not behind an entity. Null in adventure and spectator mode, where nothing is dug.
      */
-    private BlockTarget crosshairBlock() {
+    BlockTarget crosshairBlock() {
         if (gameMode > 1) {
             return null;
         }
@@ -1003,6 +1015,9 @@ public final class PlaySession implements AutoCloseable {
     private void handle(ServerSession.Event event) {
         if (sounds != null) {
             sounds.event(event, this);
+        }
+        if (event instanceof ServerSession.EntityStatus status) {
+            combat.status(status.entityId(), status.status(), entities.selfId(), System.currentTimeMillis());
         }
         if (event instanceof ServerSession.EntityVelocity velocity && velocity.entityId() == entities.selfId()) {
             player.velocity(velocity.motionX(), velocity.motionY(), velocity.motionZ());

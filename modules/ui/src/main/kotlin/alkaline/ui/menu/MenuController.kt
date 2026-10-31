@@ -87,6 +87,12 @@ interface MenuActions {
     /** Connects to a multiplayer server; the host reports back through [MenuController.joined] or [MenuController.left]. */
     fun join(address: String) {}
 
+    /**
+     * Opens a singleplayer world on the local server, creating it when [folder] has no level.dat yet. The host
+     * reports progress through [MenuController.connectStatus], then [MenuController.joined] or [MenuController.left].
+     */
+    fun playWorld(folder: java.nio.file.Path, name: String) {}
+
     /** Returns from the pause card to the game (recaptures the mouse). */
     fun resumeGame() {}
 
@@ -453,11 +459,29 @@ class MenuController @JvmOverloads constructor(
     var playError by mutableStateOf<String?>(null)
         private set
 
+    /** Whether the session is a singleplayer world on the local server rather than a multiplayer server. */
+    var singleplayer by mutableStateOf(false)
+        private set
+
+    /** The local server's progress while a world opens (for example "Preparing spawn area 40%"). */
+    var connectStatus by mutableStateOf<String?>(null)
+
     fun join(address: String) {
         playAddress = address
         playError = null
+        singleplayer = false
+        connectStatus = null
         play = PlayPhase.CONNECTING
         actions.join(address)
+    }
+
+    fun playWorld(folder: java.nio.file.Path, name: String) {
+        playAddress = name
+        playError = null
+        singleplayer = true
+        connectStatus = null
+        play = PlayPhase.CONNECTING
+        actions.playWorld(folder, name)
     }
 
     /**
@@ -493,7 +517,7 @@ class MenuController @JvmOverloads constructor(
         actions.leaveGame()
     }
 
-    /** The session ended; back to the server list, with [reason] shown when it was not the player's choice. */
+    /** The session ended; back to the world or server list, with [reason] shown when it was not the player's choice. */
     fun left(reason: String?) {
         if (overlay == Overlay.INVENTORY) actions.inventoryClosed()
         chat.forget()
@@ -504,7 +528,7 @@ class MenuController @JvmOverloads constructor(
         overlay = Overlay.NONE
         play = PlayPhase.MENU
         playError = reason
-        page = MenuPage.MULTIPLAYER
+        page = if (singleplayer) MenuPage.SINGLEPLAYER else MenuPage.MULTIPLAYER
     }
 
     /** Id of the key binding waiting for its next input, as Compose state for the Controls page. */

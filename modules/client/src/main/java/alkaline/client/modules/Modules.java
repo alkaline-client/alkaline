@@ -140,6 +140,52 @@ public final class Modules {
             "toggle_sprint.readout", TOGGLE_SPRINT.title(), "Show status",
             "Shows Sprinting or Sneaking, and whether it is toggled or held.", true));
 
+    // ---- PvP ----------------------------------------------------------------------------------------------
+
+    public static final Module REACH = hud("reach", "Reach display",
+            "How far your last landed hit reached, from your eyes to the target's hitbox.", false,
+            HudAnchor.LEFT, 6, -14);
+    public static final Setting.BooleanSetting REACH_BLUR = blur(REACH, true);
+    public static final Module COMBO = hud("combo", "Combo counter",
+            "Hits you landed in a row without being hit back.", false, HudAnchor.LEFT, 6, 14);
+    public static final Setting.BooleanSetting COMBO_BLUR = blur(COMBO, true);
+    public static final Module TARGET = hud("target", "Target HUD",
+            "The player you are fighting: name, health, armor and distance.", false, HudAnchor.CENTER, 120, 40);
+    public static final Setting.BooleanSetting TARGET_BLUR = blur(TARGET, true);
+    public static final Setting.IntSetting TARGET_SECONDS = option(TARGET, Setting.integer(
+            "target.seconds", TARGET.title(), "Keep for", "Seconds the card stays after your last hit.", 5, 1, 30));
+    public static final Module ARMOR = hud("armor", "Armor status", "Your armor and held item with their durability.",
+            false, HudAnchor.BOTTOM_RIGHT, -6, -80);
+    public static final Setting.BooleanSetting ARMOR_BLUR = blur(ARMOR, true);
+    public static final Setting.BooleanSetting ARMOR_HELD = option(ARMOR, Setting.bool(
+            "armor.held", ARMOR.title(), "Held item", "Adds the item in your hand.", true));
+    public static final Setting.BooleanSetting ARMOR_NUMBERS = option(ARMOR, Setting.bool(
+            "armor.numbers", ARMOR.title(), "Durability left", "Uses left beside each piece.", true));
+    public static final Module ITEMS = hud("items", "Item counter",
+            "How many golden apples, pearls, healing potions, soups and arrows you carry.", false,
+            HudAnchor.BOTTOM_RIGHT, -110, -80);
+    public static final Setting.BooleanSetting ITEMS_BLUR = blur(ITEMS, true);
+
+    public static final Module FREELOOK = gameplay("freelook", "Freelook",
+            "Look around your player in third person while the key is held; your aim stays where it was.", false);
+    public static final Setting.KeySetting FREELOOK_KEY = option(FREELOOK, Setting.key(
+            "freelook.key", FREELOOK.title(), "Freelook key", "", "key:Left Alt"));
+    public static final Module HITBOXES = gameplay("hitboxes", "Hitboxes",
+            "Outlines entities' hitboxes, as vanilla's F3+B; the line shows where they look.", false);
+    public static final Setting.BooleanSetting HITBOXES_ALL = option(HITBOXES, Setting.bool(
+            "hitboxes.all", HITBOXES.title(), "Every entity", "Off outlines only other players.", false));
+    public static final Setting.BooleanSetting HITBOXES_LOOK = option(HITBOXES, Setting.bool(
+            "hitboxes.look", HITBOXES.title(), "Look line", "Vanilla's blue line from the eyes.", true));
+    public static final Setting.ColorSetting HITBOXES_COLOR = option(HITBOXES, Setting.color(
+            "hitboxes.color", HITBOXES.title(), "Color", "", 0xFFFFFFFF));
+    public static final Module BLOCK_OUTLINE = gameplay("block_outline", "Block outline",
+            "The frame around the block under the crosshair (vanilla's selection box).", true);
+    public static final Setting.ColorSetting BLOCK_OUTLINE_COLOR = option(BLOCK_OUTLINE, Setting.color(
+            "block_outline.color", BLOCK_OUTLINE.title(), "Color", "Vanilla is black at 40% (#66000000).", 0x66000000));
+    public static final Setting.FloatSetting BLOCK_OUTLINE_WIDTH = option(BLOCK_OUTLINE, Setting.decimal(
+            "block_outline.width", BLOCK_OUTLINE.title(), "Thickness", "Line width in pixels. Vanilla uses 2.", 2f,
+            1f, 6f));
+
     public static final ConfigSchema SCHEMA = BUILDER.build();
 
     private static final Map<String, Module> BY_ID = ALL.stream().collect(Collectors.toMap(Module::id, Function.identity()));

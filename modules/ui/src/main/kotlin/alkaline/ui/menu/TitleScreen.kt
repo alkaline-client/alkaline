@@ -53,6 +53,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
@@ -383,9 +384,10 @@ private fun ConnectingCard(controller: MenuController) {
             LoadingIndicator(Modifier.size(40.dp))
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
-                Text("Joining", style = MaterialTheme.typography.titleMedium)
-                Text(controller.playAddress, style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (controller.singleplayer) "Opening ${controller.playAddress}" else "Joining",
+                    style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (controller.singleplayer) controller.connectStatus ?: "Starting the server" else controller.playAddress,
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             TextButton(onClick = { controller.leave() }) { Text("Cancel") }
         }
@@ -417,7 +419,9 @@ private fun PauseCard(controller: MenuController) {
                 }
             }
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = { controller.leave() }, modifier = Modifier.fillMaxWidth()) { Text("Disconnect") }
+            TextButton(onClick = { controller.leave() }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (controller.singleplayer) "Save and quit" else "Disconnect")
+            }
         }
     }
 }

@@ -84,5 +84,4 @@ Performance
 
 ## Not scheduled
 - **Vulkan 1.1 compatibility mode:** AGENTS.md says not to build it until it is scheduled.
-- **Singleplayer:** it needs an integrated server.
 - **Windows and target-GPU qualification:** they need that hardware.

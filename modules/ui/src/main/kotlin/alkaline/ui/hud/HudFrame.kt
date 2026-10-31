@@ -13,7 +13,22 @@ data class HudItem(
     val glint: Boolean = false,
     /** Which glint the game draws over the icon (see the game's ItemCatalog.glintStyle), when [glint] is set. */
     val glintStyle: Int = 0,
+    /** Uses left before it breaks, or -1 for items that do not wear. */
+    val usesLeft: Int = -1,
 )
+
+/** The player being fought (Target HUD): name (§ formatted), health, distance in blocks, armor helmet first. */
+data class HudTarget(
+    val name: String,
+    val health: Float,
+    val maxHealth: Float,
+    val distance: Float,
+    val armor: List<HudItem?>,
+    val held: HudItem?,
+)
+
+/** A kind of item the Item counter tracks, shown with one of the carried stacks, and how many are carried. */
+data class HudCount(val item: HudItem, val count: Int)
 
 /** An active potion effect: vanilla's English name, level (1 = I), ticks left and its inventory.png icon. */
 data class HudEffect(val name: String, val level: Int, val ticks: Int, val iconIndex: Int)
@@ -164,6 +179,15 @@ data class HudFrame(
     val dragged: Set<Int> = emptySet(),
     /** Tooltip lines (§ formatted) of the hovered slot's item while the cursor is empty. */
     val tooltip: List<String> = emptyList(),
+    /** Blocks the last landed hit reached, or -1 before the first. */
+    val reach: Float = -1f,
+    /** Hits landed in a row without being hit. */
+    val combo: Int = 0,
+    val target: HudTarget? = null,
+    /** Worn armor, helmet first (null for an empty slot). */
+    val armorPieces: List<HudItem?> = List(4) { null },
+    val held: HudItem? = null,
+    val itemCounts: List<HudCount> = emptyList(),
 ) {
     companion object {
         const val KEY_FORWARD = 1
@@ -191,6 +215,16 @@ data class HudFrame(
                 HudScore("§bplay.example.net", 1)),
             chat = listOf(HudChat("§e[Server] §fWelcome to Alkaline.", 0), HudChat("§7Steve: gg", 0)),
             movementStatus = "Sprinting (Toggled)",
+            reach = 2.94f, combo = 4,
+            target = HudTarget("§cSteve", 13f, 20f, 2.8f, listOf(HudItem("items/diamond_helmet", 1),
+                HudItem("items/iron_chestplate", 1), HudItem("items/iron_leggings", 1), HudItem("items/diamond_boots", 1)),
+                HudItem("items/diamond_sword", 1, glint = true)),
+            armorPieces = listOf(HudItem("items/diamond_helmet", 1, 0.9f, usesLeft = 327),
+                HudItem("items/diamond_chestplate", 1, 0.95f, usesLeft = 503), HudItem("items/diamond_leggings", 1, usesLeft = 495),
+                HudItem("items/diamond_boots", 1, 0.7f, usesLeft = 300)),
+            held = HudItem("items/diamond_sword", 1, 0.8f, true, usesLeft = 1250),
+            itemCounts = listOf(HudCount(HudItem("items/golden_apple", 6), 6), HudCount(HudItem("items/ender_pearl", 16), 16),
+                HudCount(HudItem("items/arrow", 64), 128)),
         )
     }
 }

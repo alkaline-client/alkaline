@@ -33,7 +33,7 @@ object MenuPreview {
             val services = ClientServices.open(directory, MinecraftInstallation.gameDirectory())
             val controller = MenuController(store, object : MenuActions {
                 override fun quit() = exitApplication()
-                override val versionLabel = "Alkaline 0.1.0-dev · design preview"
+                override val versionLabel = "Alkaline dev · design preview"
             }, services)
             Window(
                 onCloseRequest = { store.close(); exitApplication() },

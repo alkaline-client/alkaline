@@ -7,12 +7,7 @@ kotlin {
     jvmToolchain(25)
 }
 
-val ffmpegClassifier = when {
-    System.getProperty("os.arch") !in listOf("amd64", "x86_64") -> error("Alkaline music currently requires x86_64.")
-    System.getProperty("os.name").startsWith("Windows") -> "windows-x86_64"
-    System.getProperty("os.name") == "Linux" -> "linux-x86_64"
-    else -> error("Alkaline music currently supports Windows and Linux.")
-}
+val ffmpegClassifier = if (extra["alkalinePlatform"] == "windows-x64") "windows-x86_64" else "linux-x86_64"
 
 // The music player: FFmpeg decodes every format and stream into the audio engine's music feed; yt-dlp (when
 // installed) resolves video and music sites; playlists and the library are JSON files of the player's own.

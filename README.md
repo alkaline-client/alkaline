@@ -61,6 +61,14 @@ The screenshot shortcut (`F2`) opens a save dialog. Choose a `.png` destination 
 
 - The repository is not yet a complete client (see the multiplayer limits above). It has a dedicated 20 Hz snapshot tick loop and bounded asynchronous CPU scene compilation, plus the Vulkan 1.3 indexed-mesh frame smoke path and CPU-side image, font, section-mesh, and textured scene submission foundations. It now also has a Vulkan frame encoder with depth and per-frame streaming, GPU-instanced model and particle renderers drawing the server's entities and particles, and an in-game Compose host with the HUD. It still has no block breaking, no singleplayer, and no automatic deterministic capture producer. The in-game Compose host rasterizes with Skia on the CPU and uploads to Vulkan; it is not a Skia-on-Vulkan backend. `apps:hud-preview` is a separate Compose Desktop design preview, not evidence of in-game rendering. No target-era GPU/Windows compatibility or visual-parity claim is made.
 
+## Releases
+
+Versions are `<year>.<drop>.<update>[.<hotfix>]`: `2026.1.0` is the first drop of 2026, `2026.1.2` its second update, `2026.1.2.1` a hotfix of that ([decision 0025](docs/decisions/0025-version-numbers-and-releases.md)). Each GitHub release has, for `linux-x64` and `windows-x64`, `alkaline-<version>-<platform>.zip` (the `bin/` and `lib/` folder that Sulfur installs) and `alkaline-<version>-<platform>-minecraft-launcher.zip` (unzip into `.minecraft`; Minecraft's own launcher then lists `Alkaline-<version>`, gives it Java 25 and downloads the vanilla 1.8.9 jar for its assets). Build them with:
+
+```bash
+./gradlew :apps:game-client:distZip :apps:game-client:minecraftLauncherZip -Palkaline.platform=linux-x64
+```
+
 ## Screen-space consistency check
 
 Supply the original OpenGL reference and Vulkan candidate as separate PNG captures of the **same frame**. The checker compares every decoded 8-bit RGBA value at the same coordinates, with **zero tolerance**, and writes a same-size PNG mask: gray (`#404040`) for identical pixels, magenta (`#FF20C0`) for any difference, including alpha. It does not resize, align, flip, or mask images. The output is always opaque so even hidden RGB/alpha differences remain visible.

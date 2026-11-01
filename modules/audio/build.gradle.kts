@@ -2,13 +2,7 @@ plugins {
     `java-library`
 }
 
-val nativeClassifier = when {
-    System.getProperty("os.arch") !in listOf("amd64", "x86_64") ->
-        error("Alkaline audio currently requires x86_64.")
-    System.getProperty("os.name").startsWith("Windows") -> "natives-windows"
-    System.getProperty("os.name") == "Linux" -> "natives-linux"
-    else -> error("Alkaline audio currently supports Windows and Linux.")
-}
+val nativeClassifier = if (extra["alkalinePlatform"] == "windows-x64") "natives-windows" else "natives-linux"
 
 dependencies {
     implementation(project(":modules:config"))

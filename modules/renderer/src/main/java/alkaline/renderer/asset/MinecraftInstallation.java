@@ -12,9 +12,15 @@ public final class MinecraftInstallation {
     private MinecraftInstallation() {
     }
 
-    /** Honors {@code ALKALINE_MINECRAFT_JAR}, then the launcher directory for the current OS. */
+    /**
+     * Honors {@code ALKALINE_MINECRAFT_JAR}, then the {@code alkaline.minecraftJar} property (which the version JSON
+     * for Minecraft's own launcher sets), then the launcher directory for the current OS.
+     */
     public static Optional<Path> locateClientJar() {
         String override = System.getenv("ALKALINE_MINECRAFT_JAR");
+        if (override == null || override.isBlank()) {
+            override = System.getProperty("alkaline.minecraftJar");
+        }
         if (override != null && !override.isBlank()) {
             Path jar = Path.of(override);
             return Files.isRegularFile(jar) ? Optional.of(jar) : Optional.empty();

@@ -244,7 +244,8 @@ final class ClientApp implements AutoCloseable {
 
             @Override
             public String getVersionLabel() {
-                return "Alkaline 0.1.0-dev · Minecraft " + Minecraft189.VERSION + " (protocol " + Minecraft189.PROTOCOL + ")";
+                String version = ClientApp.class.getPackage().getImplementationVersion();
+                return "Alkaline " + (version != null ? version : "dev") + " · Minecraft " + Minecraft189.VERSION + " (protocol " + Minecraft189.PROTOCOL + ")";
             }
 
             @Override

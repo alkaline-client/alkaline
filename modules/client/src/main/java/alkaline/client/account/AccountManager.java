@@ -35,6 +35,10 @@ public final class AccountManager implements AutoCloseable {
     private static final int FORMAT = 1;
     /** Face pixels: the 8x8 head front with the hat layer composited over it. */
     public static final int FACE_SIZE = 8;
+    /** Environment variables through which a launcher hands over its account; see {@link #useLauncherAccount}. */
+    public static final String NAME_VARIABLE = "ALKALINE_PLAYER_NAME";
+    public static final String UUID_VARIABLE = "ALKALINE_PLAYER_UUID";
+    public static final String TOKEN_VARIABLE = "ALKALINE_ACCESS_TOKEN";
 
     /** What the account chip shows. */
     public sealed interface State {
@@ -83,6 +87,42 @@ public final class AccountManager implements AutoCloseable {
 
     public void removeListener(Listener listener) {
         listeners.remove(listener);
+    }
+
+    /**
+     * Signs in with the account a launcher (Sulfur) handed over in {@code environment}: a Microsoft account with
+     * its Minecraft access token, or an offline name without one. Nothing is saved: the launcher keeps the refresh
+     * token and hands over a renewed session on every launch. False when the environment names no player.
+     */
+    public synchronized boolean useLauncherAccount(Map<String, String> environment) {
+        String name = environment.getOrDefault(NAME_VARIABLE, "").strip();
+        if (name.isEmpty()) {
+            return false;
+        }
+        String uuid = environment.getOrDefault(UUID_VARIABLE, "").strip().replace("-", "");
+        String token = environment.getOrDefault(TOKEN_VARIABLE, "").strip();
+        MinecraftProfile handed = new MinecraftProfile(uuid, name, null);
+        // Launchers renew tokens shortly before handing them over; Minecraft's last a day.
+        session = new MinecraftSession(handed, token, System.currentTimeMillis() + 86_400_000L);
+        publish(new State.SignedIn(handed, null));
+        if (!token.isEmpty()) {
+            Thread.ofVirtual().name("alkaline-account").start(() -> {
+                try {
+                    // The token's own profile carries the skin, and proves the token still works.
+                    MinecraftProfile profile = auth.profile(token);
+                    int[] face = fetchFace(profile.skinUrl());
+                    synchronized (this) {
+                        if (session != null && session.accessToken().equals(token)) {
+                            session = new MinecraftSession(profile, token, session.expiresAtMillis());
+                            publish(new State.SignedIn(profile, face));
+                        }
+                    }
+                } catch (AuthException failure) {
+                    System.err.println("The launcher's account could not be checked: " + failure.getMessage());
+                }
+            });
+        }
+        return true;
     }
 
     /** Restores the saved account in the background, if there is one. */

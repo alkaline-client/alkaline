@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +51,16 @@ import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.ImageInfo
 
 /**
+ * The Frosted surfaces setting. Without the blur, a surface lying straight on the menu background has nothing
+ * behind it but the raw scene, so it carries its own legibility: see [backdropAlpha].
+ */
+internal val LocalFrosted = staticCompositionLocalOf { true }
+
+/** [alpha] for a surface on the menu background: translucent over frosted glass, nearly solid without it. */
+@Composable
+internal fun backdropAlpha(alpha: Float): Float = if (LocalFrosted.current) alpha else maxOf(alpha, 0.94f)
+
+/**
  * Container and content colors for a secondary control: calm at rest, the primary container while hovered, so
  * the control under the pointer reads as the one a click will act on. The change is animated briefly; it
  * explains state, it does not decorate.
@@ -60,7 +71,7 @@ internal fun hoverColors(hovered: Boolean, selected: Boolean = false): Pair<Stat
     val container = when {
         hovered -> scheme.primaryContainer.copy(alpha = 0.92f)
         selected -> scheme.secondaryContainer.copy(alpha = 0.9f)
-        else -> scheme.surfaceContainerHigh.copy(alpha = 0.62f)
+        else -> scheme.surfaceContainerHigh.copy(alpha = backdropAlpha(0.62f))
     }
     val content = when {
         hovered -> scheme.onPrimaryContainer

@@ -212,6 +212,11 @@ class MenuController @JvmOverloads constructor(
 
     var clickGuiSection by mutableStateOf(ClickGuiSection.MODULES)
 
+    /** The Modules gallery's search, category and open module; kept while the HUD editor covers the ClickGUI. */
+    internal var moduleQuery by mutableStateOf("")
+    internal var moduleFilter by mutableStateOf(ModuleFilter.ALL)
+    internal var openModule by mutableStateOf<String?>(null)
+
     /** Profile names and the active one, as Compose state (the store changes them on the UI thread). */
     var profileNames by mutableStateOf(profiles?.names() ?: emptyList())
         private set

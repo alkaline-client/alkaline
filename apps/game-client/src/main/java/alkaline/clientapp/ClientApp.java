@@ -216,7 +216,10 @@ final class ClientApp implements AutoCloseable {
                 });
         Path alkalineDirectory = options.settingsFile().toAbsolutePath().getParent();
         services = ClientServices.open(alkalineDirectory, MinecraftInstallation.gameDirectory());
-        services.accounts().restore();
+        // A launcher's account comes first; Alkaline's own saved sign-in otherwise.
+        if (!services.accounts().useLauncherAccount(System.getenv())) {
+            services.accounts().restore();
+        }
         profiles = new alkaline.config.ProfileStore(alkaline.client.modules.Modules.SCHEMA, alkalineDirectory.resolve("profiles"));
         try {
             alkaline.config.ConfigStore.LoadReport report = profiles.open();
@@ -878,7 +881,8 @@ final class ClientApp implements AutoCloseable {
             alkaline.client.servers.ServerAddress target = address.resolve();
             alkaline.client.account.MinecraftSession account = services.accounts().session();
             String username = account != null ? account.profile().name() : "Player";
-            alkaline.game.net.Login.SessionJoin join = account == null ? null
+            // An offline account (a name from the launcher, no token) joins offline-mode servers only.
+            alkaline.game.net.Login.SessionJoin join = account == null || account.accessToken().isEmpty() ? null
                     : hash -> new alkaline.client.account.SessionService().join(account, hash);
             alkaline.game.net.ServerSession session = alkaline.game.net.ServerSession.connect(target.host(),
                     target.port(), address.host(), username, join);

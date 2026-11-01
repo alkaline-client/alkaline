@@ -140,7 +140,7 @@ internal val LocalMorph = staticCompositionLocalOf<MorphState?> { null }
 /** Starts a flight whenever the page changes between the title and a page it opens. */
 @Composable
 internal fun MorphDriver(state: MorphState, page: MenuPage, buttonHeight: Dp) {
-    val panelColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.66f)
+    val panelColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = backdropAlpha(0.66f))
     val spatial: FiniteAnimationSpec<Float> = MaterialTheme.motionScheme.defaultSpatialSpec()
     val density = LocalDensity.current
     val shown = remember { arrayOf(page) }

@@ -1,11 +1,15 @@
 package alkaline.client.account;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class AccountTest {
     @Test
@@ -36,5 +40,18 @@ class AccountTest {
         MinecraftSession session = new MinecraftSession(new MinecraftProfile("id", "Steve", null), "secret-token", 0L);
         assertTrue(!session.toString().contains("secret") && !new MicrosoftAuth.Result(session, "refresh-secret")
                 .toString().contains("secret"));
+    }
+
+    @Test
+    void takesTheLaunchersAccountWithoutSavingIt(@TempDir Path directory) {
+        AccountManager accounts = new AccountManager(directory.resolve("account.json"), OAuthClient.fromEnvironment());
+        assertFalse(accounts.useLauncherAccount(Map.of()));
+        assertTrue(accounts.useLauncherAccount(Map.of(
+                AccountManager.NAME_VARIABLE, "Steve", AccountManager.UUID_VARIABLE, "0123-4567")));
+        assertEquals("Steve", accounts.session().profile().name());
+        assertEquals("01234567", accounts.session().profile().uuid());
+        assertTrue(accounts.session().accessToken().isEmpty());
+        assertTrue(accounts.state() instanceof AccountManager.State.SignedIn);
+        assertFalse(Files.exists(directory.resolve("account.json")));
     }
 }

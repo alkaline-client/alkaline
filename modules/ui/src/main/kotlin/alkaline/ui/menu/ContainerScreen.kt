@@ -179,7 +179,7 @@ internal fun ContainerScreen(frame: HudFrame, input: InventoryInput?, onTyping: 
     ) {
         Surface(
             shape = RoundedCornerShape(Gui * 8),
-            color = scheme.surfaceContainer.copy(alpha = 0.78f),
+            color = scheme.surfaceContainer.copy(alpha = backdropAlpha(0.78f)),
             modifier = Modifier.align(Alignment.Center).size(Gui * layout.width, Gui * layout.height).glass(Gui * 8)
                 .onGloballyPositioned { panel = it.boundsInRoot().topLeft },
         ) {
@@ -516,7 +516,7 @@ internal fun SignEditor(controller: MenuController) {
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
         Surface(
             shape = RoundedCornerShape(24.dp),
-            color = scheme.surfaceContainer.copy(alpha = 0.82f),
+            color = scheme.surfaceContainer.copy(alpha = backdropAlpha(0.82f)),
             modifier = Modifier.width(360.dp).glass(24.dp),
         ) {
             Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {

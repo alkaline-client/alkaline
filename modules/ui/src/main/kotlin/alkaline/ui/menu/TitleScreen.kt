@@ -53,6 +53,8 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -82,6 +84,7 @@ fun AlkalineMenu(controller: MenuController) {
         CompositionLocalProvider(
             LocalContentColor provides MaterialTheme.colorScheme.onSurface,
             LocalDisplayRate provides controller.displayRate,
+            LocalFrosted provides config.get(ClientSettings.MENU_GLASS),
         ) {
             Box(Modifier.fillMaxSize()) {
                 if (controller.phase == MenuPhase.REVEAL) {
@@ -277,11 +280,17 @@ private fun TitlePage(controller: MenuController) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Staggered(0, stagger) {
-                // A soft shadow keeps the light mark legible over bright skies without adding a surface.
-                Box(Modifier.padding(bottom = 36.dp)) {
-                    val size = Modifier.size(width = 84.dp * AlkalineLogo.ASPECT, height = 84.dp)
-                    Icon(AlkalineLogo.Mark, null, size.offset(y = 3.dp).blur(12.dp), tint = Color.Black.copy(alpha = 0.45f))
-                    Icon(AlkalineLogo.Mark, "Alkaline", size, tint = MaterialTheme.colorScheme.onSurface)
+                // A soft shadow keeps the light mark legible over bright skies without adding a surface. The blur
+                // gets room to fall off around the mark: clipped to the mark's own bounds it ended in hard edges.
+                val mark = DpSize(84.dp * AlkalineLogo.ASPECT, 84.dp)
+                Box(Modifier.padding(bottom = 36.dp).size(mark), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier.requiredSize(mark.width + 48.dp, mark.height + 48.dp).offset(y = 2.dp).blur(10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(AlkalineLogo.Mark, null, Modifier.size(mark), tint = Color.Black.copy(alpha = 0.3f))
+                    }
+                    Icon(AlkalineLogo.Mark, "Alkaline", Modifier.size(mark), tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
             val large = ButtonDefaults.MediumContainerHeight
@@ -353,7 +362,7 @@ internal fun Panel(
     val flying = morph != null && state?.flying(morph) == true
     Surface(
         shape = RoundedCornerShape(PanelRadius),
-        color = if (flying) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.66f),
+        color = if (flying) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = backdropAlpha(0.66f)),
         tonalElevation = 0.dp,
         modifier = (if (morph == null) modifier else modifier.morphTarget(state, morph))
             .glass(PanelRadius, enabled = !flying),

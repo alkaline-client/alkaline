@@ -131,7 +131,8 @@ internal fun NotificationCard(notification: Notification, blur: Boolean, hud: Bo
     val scheme = MaterialTheme.colorScheme
     Surface(
         shape = CardShape,
-        color = scheme.surfaceContainer.copy(alpha = 0.72f),
+        // In the menus without Frosted surfaces nothing blurs behind the card; it goes nearly solid instead.
+        color = scheme.surfaceContainer.copy(alpha = if (blur || hud) 0.72f else 0.94f),
         contentColor = scheme.onSurface,
         modifier = Modifier.width(300.dp).glass(16.dp, enabled = blur, hud = hud),
     ) {

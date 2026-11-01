@@ -217,7 +217,8 @@ public final class MicrosoftAuth {
                 refreshToken);
     }
 
-    private MinecraftProfile profile(String accessToken) throws AuthException {
+    /** The profile behind a Minecraft access token: name, UUID and skin. Blocking. */
+    MinecraftProfile profile(String accessToken) throws AuthException {
         HttpResponse<String> response = send(HttpRequest.newBuilder(URI.create(PROFILE)).timeout(TIMEOUT)
                 .header("Authorization", "Bearer " + accessToken).GET().build());
         if (response.statusCode() == 404) {
@@ -271,6 +272,11 @@ public final class MicrosoftAuth {
         HttpResponse<String> response = send(request.build());
         if (url.equals(XSTS) && response.statusCode() == 401) {
             throw new AuthException(xstsError(response.body()));
+        }
+        if (url.equals(LOGIN_WITH_XBOX) && response.statusCode() == 403) {
+            // Minecraft services accept only Azure applications Mojang approved; see OAuthClient.
+            throw new AuthException("Minecraft does not accept this sign-in application (" + client.clientId()
+                    + "). Sign in through Sulfur, or set ALKALINE_MSA_CLIENT_ID to an approved one.");
         }
         return parse(response, url.equals(LOGIN_WITH_XBOX) ? "Minecraft services" : "Xbox Live");
     }

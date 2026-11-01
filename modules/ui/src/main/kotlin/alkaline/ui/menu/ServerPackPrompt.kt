@@ -38,7 +38,7 @@ internal fun ServerPackPrompt(controller: MenuController) {
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
         Surface(
             shape = RoundedCornerShape(24.dp),
-            color = scheme.surfaceContainer.copy(alpha = 0.82f),
+            color = scheme.surfaceContainer.copy(alpha = backdropAlpha(0.82f)),
             modifier = Modifier.width(380.dp).glass(24.dp),
         ) {
             Column(Modifier.padding(24.dp)) {
@@ -69,7 +69,7 @@ internal fun ServerPackProgress(controller: MenuController, modifier: Modifier) 
     val scheme = MaterialTheme.colorScheme
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = scheme.surfaceContainer.copy(alpha = 0.82f),
+        color = scheme.surfaceContainer.copy(alpha = backdropAlpha(0.82f)),
         modifier = modifier.padding(top = 16.dp).width(260.dp).glass(16.dp),
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {

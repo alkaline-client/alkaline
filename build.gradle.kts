@@ -7,7 +7,7 @@ plugins {
 
 // Alkaline's version is <year>.<drop>.<update>[.<hotfix>], for example 2026.1.0, 2026.1.2 or 2026.1.2.1; see
 // decision 0025. Builds between releases carry the next update's number with -dev.
-val alkalineVersion = "2026.1.0"
+val alkalineVersion = "2026.1.1-dev"
 
 // The platform whose natives a build bundles: the host's, or another for a release with
 // -Palkaline.platform=linux-x64|windows-x64.
